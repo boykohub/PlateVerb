@@ -210,21 +210,27 @@ inline TrueStereoIR renderIR (const TrueStereoIR& src, const IRAnalysis& base, c
     return ir;
 }
 
-// Peak envelope (one value per 'binMs') of a stereo response, for the wave display
+// Peak envelope (one value per 'binMs') of a stereo response, plus low / mid / high band envelopes, for the display
 struct WaveData {
-    std::vector<float> l, r; float binMs = 1.0f, rt = 0, xoverMs = -1; int slot = 0; bool valid = false;
+    std::vector<float> l, r, lo, mid, hi; float binMs = 1.0f, rt = 0, xoverMs = -1; int slot = 0; bool valid = false, predelayIncluded = true;
 };
 inline WaveData makeWave (const std::vector<float>& L, const std::vector<float>& R, double fs, float binMs) {
     WaveData w; w.binMs = binMs;
     const int bin = std::max (1, (int) (binMs * 0.001 * fs)), n = (int) std::min (L.size(), R.size());
+    std::vector<float> m ((size_t) n);
+    for (int i = 0; i < n; ++i) m[(size_t) i] = 0.5f * (L[(size_t) i] + R[(size_t) i]);
+    std::vector<float> bl, bm, bh; irdsp::split3 (m, fs, bl, bm, bh);
     float pk = 1e-9f;
     for (int i = 0; i < n; i += bin) {
-        float a = 0, b = 0;
-        for (int j = i; j < std::min (n, i + bin); ++j) { a = std::max (a, std::abs (L[(size_t) j])); b = std::max (b, std::abs (R[(size_t) j])); }
-        w.l.push_back (a); w.r.push_back (b); pk = std::max (pk, std::max (a, b));
+        float a = 0, b = 0, x = 0, y = 0, z = 0;
+        for (int j = i; j < std::min (n, i + bin); ++j) {
+            a = std::max (a, std::abs (L[(size_t) j])); b = std::max (b, std::abs (R[(size_t) j]));
+            x = std::max (x, std::abs (bl[(size_t) j])); y = std::max (y, std::abs (bm[(size_t) j])); z = std::max (z, std::abs (bh[(size_t) j]));
+        }
+        w.l.push_back (a); w.r.push_back (b); w.lo.push_back (x); w.mid.push_back (y); w.hi.push_back (z);
+        pk = std::max (pk, std::max (a, b));
     }
-    for (auto& v : w.l) v /= pk;
-    for (auto& v : w.r) v /= pk;
+    for (auto* v : { &w.l, &w.r, &w.lo, &w.mid, &w.hi }) for (auto& e : *v) e /= pk;
     std::vector<double> e ((size_t) n); for (int i = 0; i < n; ++i) e[(size_t) i] = 0.5 * ((double) L[(size_t) i] * L[(size_t) i] + (double) R[(size_t) i] * R[(size_t) i]);
     w.rt = irdsp::rt60 (e, fs); w.valid = true;
     return w;
