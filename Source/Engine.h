@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include "Materials.h"
 
 namespace pv {
 
@@ -16,6 +17,7 @@ constexpr int kMaxOS = 4;
 constexpr float kMaxSize = 1.5f;
 constexpr float kMaxDelaySec = 3.0f;
 constexpr int kNumSlots = 5;
+constexpr float kDirtDefault = 30.0f;
 enum Slot { Plate = 0, Room, Chamber, Hall, IR };
 
 inline float dbToGain (float db) { return std::pow (10.0f, db * 0.05f); }
@@ -50,10 +52,25 @@ struct Line {
         float a = b[(size_t) (i & mask)], c = b[(size_t) ((i + 1) & mask)];
         return a + (c - a) * f;
     }
+    // 4-point Hermite (cubic) interpolation, d >= 2: smoother modulation, no interpolation noise
+    inline float readC (float d) const {
+        float r = (float) w - d; float fl = std::floor (r); int i = (int) fl; float f = r - fl;
+        const float xm1 = b[(size_t) ((i - 1) & mask)], x0 = b[(size_t) (i & mask)], x1 = b[(size_t) ((i + 1) & mask)], x2 = b[(size_t) ((i + 2) & mask)];
+        const float c1 = 0.5f * (x1 - xm1), c2 = xm1 - 2.5f * x0 + 2.0f * x1 - 0.5f * x2, c3 = 0.5f * (x2 - xm1) + 1.5f * (x0 - x1);
+        return ((c3 * f + c2) * f + c1) * f + x0;
+    }
 };
 
 inline float allpass (Line& l, float d, float g, float x) {
     float z = l.read (d);
+    float v = x - g * z;
+    l.push (v);
+    return z + g * v;
+}
+// modulated allpass: cw = how much cubic interpolation is blended in (0 = linear, the original character)
+inline float allpassM (Line& l, float d, float g, float x, float cw) {
+    float z = l.read (d);
+    if (cw > 0.0f) z += (l.readC (d) - z) * cw;
     float v = x - g * z;
     l.push (v);
     return z + g * v;
@@ -168,6 +185,10 @@ struct BandDecay {
         auto g = [loopSec] (float rt) { return std::min (0.9995f, std::pow (10.0f, -3.0f * loopSec / std::max (0.05f, rt))); };
         gM = g (rtMid); gL = g (rtMid * lowMul); gH = g (rtMid * highMul);
     }
+    void setRT (float loopSec, float rtL, float rtM, float rtH) {
+        auto g = [loopSec] (float rt) { return std::min (0.9995f, std::pow (10.0f, -3.0f * loopSec / std::max (0.05f, rt))); };
+        gL = g (rtL); gM = g (rtM); gH = g (rtH);
+    }
     void reset() { lo.reset(); hi.reset(); }
     inline float process (float x) { const float l = lo.lp (x), h = x - hi.lp (x); return l * gL + (x - l - h) * gM + h * gH; }
 };
@@ -218,15 +239,21 @@ struct PlateAlgo {
         lpL = lpR = tankL = tankR = 0;
     }
     float gOut = 0.5f, gIn1 = 0.75f, gIn2 = 0.625f, gT1 = 0.7f, gT2 = 0.5f, gT3 = 0.4f;
-    void update (float rt, float size, float lowMul, float highMul, float buildMs, float diffusion) {
-        s = fs / 29761.0f * size;
-        eScale = clampf (buildMs / 15.0f, 0.2f, kMaxEScale);
-        const float d = clampf (diffusion, 0.0f, 1.0f);
+    float cubicW = 0;
+    void update (float rt, float size, float lowMul, float highMul, float buildMs, float diffusion, const MaterialEffect& me, float cubic) {
+        cubicW = cubic;
+        s = fs / 29761.0f * std::min (kMaxSize, size * me.sizeMul);
+        eScale = clampf (buildMs / 15.0f * me.attackMul, 0.2f, kMaxEScale);
+        const float d = clampf (diffusion + me.diffOffset, 0.0f, 1.0f);
         gIn1 = 0.25f + 0.55f * d; gIn2 = 0.20f + 0.48f * d;
         gT1 = 0.45f + 0.30f * d; gT2 = 0.30f + 0.28f * d; gT3 = 0.25f + 0.30f * d; gOut = 0.65f * d;
         const float halfLoop = (10645.0f + 488.0f) * s / fs;
         bdL.setX (fs); bdR.setX (fs);
-        bdL.setGains (halfLoop, rt, lowMul, highMul); bdR.setGains (halfLoop, rt, lowMul, highMul);
+        // knob decay per band, plus the plate material's own losses (1/RT adds)
+        const float rtB[3] = { rt * lowMul, rt, rt * highMul };
+        float r[3];
+        for (int k = 0; k < 3; ++k) r[k] = 1.0f / std::max (0.02f, 1.0f / std::max (0.05f, rtB[k]) + me.extraLoss[k]);
+        bdL.setRT (halfLoop, r[0], r[1], r[2]); bdR.setRT (halfLoop, r[0], r[1], r[2]);
         lfo[0].setRate (fs, 0.83f); lfo[1].setRate (fs, 1.07f);
     }
     inline void process (float inL, float inR, float dampA, float mod, float early, float& oL, float& oR) {
@@ -237,11 +264,11 @@ struct PlateAlgo {
         float xR = allpass (e1, R (153), gIn1, inR);  xR = allpass (e2, R (115), gIn1, xR);
         xR = allpass (e3, R (406), gIn2, xR); xR = allpass (e4, R (297), gIn2, xR);
         const float m1 = lfo[0].next(), m2 = lfo[1].next();
-        float a = allpass (apL1, 672 * s + exc * (1 + m1), -gT1, xR + tankR);
+        float a = allpassM (apL1, 672 * s + exc * (1 + m1), -gT1, xR + tankR, cubicW);
         float t1 = dL1.read (R (4453)); dL1.push (a); lpL += dampA * (t1 - lpL);
         float b = allpass (apL2, R (1800), gT2, bdL.process (lpL)); b = allpass (apL3, R (419), gT3, b);
         float t2 = dL2.read (R (3720)); dL2.push (b);
-        float c = allpass (apR1, 908 * s + exc * (1 + m2), -gT1, xL + tankL);
+        float c = allpassM (apR1, 908 * s + exc * (1 + m2), -gT1, xL + tankL, cubicW);
         float t3 = dR1.read (R (4217)); dR1.push (c); lpR += dampA * (t3 - lpR);
         float e = allpass (apR2, R (2656), gT2, bdR.process (lpR)); e = allpass (apR3, R (557), gT3, e);
         float t4 = dR2.read (R (3163)); dR2.push (e);
@@ -343,8 +370,13 @@ struct TankAlgo {
         lateL.clearRecent ((int) (c.lateOnsetMs * kMaxSize * fs * 0.001f) + 16); lateR.clearRecent ((int) (c.lateOnsetMs * kMaxSize * fs * 0.001f) + 16);
     }
     float len1[S] = {}, len2[S] = {}, lenA1[S] = {}, lenA2[S] = {}, lenA3[S] = {}, lateS = 1;
-    void update (float rt, float dampHz, float size, float lowMul, float highMul, float buildMs, float diffusion) {
+    float cubicW = 0; bool erEq = false; Biquad erLo[2], erHi[2];
+    void update (float rt, float dampHz, float size, float lowMul, float highMul, float buildMs, float diffusion, const MaterialEffect& me, float cubic) {
         const TankConfig& c = tankConfig (algo);
+        cubicW = cubic;
+        lowMul *= me.lowMul; highMul *= me.highMul; diffusion += me.diffOffset;
+        erEq = std::abs (me.erLowDb) > 0.05f || std::abs (me.erHighDb) > 0.05f;
+        for (int ch = 0; ch < 2; ++ch) { erLo[ch].lowShelf (fs, 300.0f, me.erLowDb); erHi[ch].highShelf (fs, 4000.0f, me.erHighDb); }
         k = fs * 0.001f * c.scale * std::sqrt (size);    // tank density stays high at small sizes; size mostly moves ER/onset
         kEr = fs * 0.001f * (c.denseER ? 1.0f : size);
         const float d = clampf (diffusion, 0.0f, 1.0f);
@@ -401,6 +433,7 @@ struct TankAlgo {
             }
             const float nrm = 1.8f / std::sqrt ((float) tapS.size()); eL *= nrm; eR *= nrm;
         }
+        if (erEq) { eL = erHi[0].process (erLo[0].process (eL)); eR = erHi[1].process (erLo[1].process (eR)); }
         // tank input: diffused source, a little later than the first reflections, plus part of the ER
         lateL.push (inL); lateR.push (inR);
         float xL = lateL.read (lateS) + 0.35f * eL, xR = lateR.read (lateS) + 0.35f * eR;
@@ -411,7 +444,7 @@ struct TankAlgo {
         for (int i = 0; i < S; ++i) {
             float x = fb[(i + S - 1) % S];
             if (i == 0) x += xL; else if (i == 2) x += xR;
-            x = allpass (ap1[i], lenA1[i] + md * (1.0f + lfo[i].next()) + 1.0f, gT, x);
+            x = allpassM (ap1[i], lenA1[i] + md * (1.0f + lfo[i].next()) + 1.0f, gT, x, cubicW);
             float y = d1[i].read (len1[i]); d1[i].push (x);
             if (dampOn && (i & 1) == 0) y = damp[i].lp (y);
             y = band[i].process (y);
@@ -686,6 +719,8 @@ struct SlotParams {
     float early = 0.7f, damping = 0.35f, tone = 0.75f, mod = 0.5f, inWidth = 1.0f, diffusion = 0.7f;
     float eqF[4] = { 100, 400, 2500, 8000 }, eqG[4] = { 0, 0, 0, 0 };
     CompParams comp;
+    int matA = 0, matB = 0; float matBlend = 0.0f;     // surface (rooms, IR) or plate material, see Materials.h
+    float dirt = kDirtDefault;                          // 1..100; 30 = the original sound
 };
 
 struct Params {
@@ -793,8 +828,22 @@ public:
             const SlotParams& sp = p.slot[s];
             preS[s] = std::max (1.0f, sp.predelayMs * 0.001f * fs); inW[s] = clampf (sp.inWidth, 0.0f, 1.0f);
             const float dampHz = 20000.0f * std::pow (0.05f, sp.damping);
-            if (s == Plate) { plateDampA = 1.0f - std::exp (-2.0f * kPi * std::min (dampHz, 0.45f * fs) / fs); plate.update (sp.decaySec, sp.size, sp.lowMult, sp.highMult, sp.buildMs, sp.diffusion); }
-            else if (s != IR) tank[s].update (sp.decaySec, dampHz, sp.size, sp.lowMult, sp.highMult, sp.buildMs, sp.diffusion);
+            // Dirt: 30 = the original sound. Lower = cubic interpolation of the modulated delays and a little
+            // more diffusion (cleaner, smoother); higher = less diffusion, modulation jitter and converter grit.
+            const float dirt = clampf (sp.dirt, 1.0f, 100.0f);
+            const float clean = dirt < kDirtDefault ? (kDirtDefault - dirt) / (kDirtDefault - 1.0f) : 0.0f;
+            grit[s] = dirt > kDirtDefault ? (dirt - kDirtDefault) / (100.0f - kDirtDefault) : 0.0f;
+            const float diffD = sp.diffusion + 0.15f * clean - 0.2f * grit[s];
+            gritQ[s] = grit[s] > 0.0f ? std::pow (2.0f, -(23.0f - 11.0f * grit[s])) : 0.0f;    // 24-bit -> 12-bit
+            cubicW[s] = clean;
+            if (s == Plate) {
+                plateDampA = 1.0f - std::exp (-2.0f * kPi * std::min (dampHz, 0.45f * fs) / fs);
+                plate.update (sp.decaySec, sp.size, sp.lowMult, sp.highMult, sp.buildMs, diffD, plateEffect (sp.matA, sp.matB, sp.matBlend), clean);
+            }
+            else if (s != IR) {
+                const float vOverS = (s == Room ? 0.8f : s == Chamber ? 1.0f : 3.0f) * sp.size;
+                tank[s].update (sp.decaySec, dampHz, sp.size, sp.lowMult, sp.highMult, sp.buildMs, diffD, surfaceEffect (sp.matA, sp.matB, sp.matBlend, vOverS), clean);
+            }
         }
         const float irDiff = 0.6f * clampf (p.slot[IR].diffusion, 0.0f, 1.0f), irMod = clampf (p.slot[IR].mod, 0.0f, 1.0f) * 0.0004f * fs;
         const bool haveIr = irL != nullptr && irR != nullptr;
@@ -838,7 +887,9 @@ public:
                             oL = irBL[k]; oR = irBR[k];
                             if (irMod > 0.0f) {
                                 c.mdL.push (oL); c.mdR.push (oR);
-                                oL = c.mdL.read (1.0f + irMod * (1.0f + c.mlfo[0].next())); oR = c.mdR.read (1.0f + irMod * (1.0f + c.mlfo[1].next()));
+                                const float dl = 2.0f + irMod * (1.0f + c.mlfo[0].next()), dr = 2.0f + irMod * (1.0f + c.mlfo[1].next());
+                                oL = c.mdL.read (dl); oR = c.mdR.read (dr);
+                                if (cubicW[s] > 0.0f) { oL += (c.mdL.readC (dl) - oL) * cubicW[s]; oR += (c.mdR.readC (dr) - oR) * cubicW[s]; }
                             }
                             if (irDiff > 0.0f)
                                 for (int j = 0; j < 2; ++j) {
@@ -850,6 +901,10 @@ public:
                         float pl, pr; c.input (xL, xR, preS[s], inW[s], true, pl, pr);
                         if (s == Plate) plate.process (pl, pr, plateDampA, sp.mod, sp.early, oL, oR);
                         else tank[s].process (pl, pr, sp.mod, sp.early, oL, oR);
+                    }
+                    if (grit[s] > 0.0f) {                     // converter grit: requantised (like early digital reverbs)
+                        const float q = gritQ[s];
+                        oL = std::round (oL / q) * q; oR = std::round (oR / q) * q;   // no dither: silence stays silent
                     }
                     c.post (oL, oR, xL, xR, sp.comp);
                     wL += oL * c.sLvl; wR += oR * c.sLvl;
@@ -880,6 +935,9 @@ private:
     SlotChain chain[kNumSlots], irIn;
     StereoDelay delay; Transformer tr;
     float sRv = 0.3f, sDl = 0, sOut = 1;
+    float grit[kNumSlots] = {}, gritQ[kNumSlots] = {}, cubicW[kNumSlots] = {};
+    uint32_t seed = 22222u;
+    inline float rnd() { seed = seed * 1664525u + 1013904223u; return (float) (seed >> 8) / 16777216.0f; }
     bool delayDirty = true;
 };
 
