@@ -14,6 +14,23 @@ namespace col
     static const Colour bandLo  { 0xffff9f43 };
     static const Colour bandMid { 0xff6ee7b7 };
     static const Colour bandHi  { 0xff7cc4ff };
+    // controls: warm ivory caps, light blue when switched on, ink-blue lettering, cream panel labels
+    static const Colour creamHi { 0xfffbf5e3 };
+    static const Colour creamLo { 0xffe2d4ae };
+    static const Colour creamEdge { 0xff8a7a55 };
+    static const Colour onHi    { 0xffdff0ff };
+    static const Colour onLo    { 0xff94c9f5 };
+    static const Colour ink     { 0xff16305e };
+    static const Colour label   { 0xfff3e6c4 };
+}
+// a 2D cap with a soft top highlight and a short drop shadow
+static void drawCap (Graphics& g, Rectangle<float> r, float corner, Colour hi, Colour lo)
+{
+    g.setColour (Colours::black.withAlpha (0.28f)); g.fillRoundedRectangle (r.translated (0.0f, 1.8f), corner);
+    g.setGradientFill (ColourGradient (hi, r.getX(), r.getY(), lo, r.getX(), r.getBottom(), false));
+    g.fillRoundedRectangle (r, corner);
+    g.setColour (Colours::white.withAlpha (0.55f)); g.drawHorizontalLine ((int) (r.getY() + 1.5f), r.getX() + corner, r.getRight() - corner);
+    g.setColour (col::creamEdge.withAlpha (0.8f)); g.drawRoundedRectangle (r, corner, 1.0f);
 }
 
 static Font uiFont (float h, bool bold = false) { return Font (FontOptions (h, bold ? Font::bold : Font::plain)); }
@@ -59,11 +76,13 @@ public:
         const float kr = r - 8.0f;
         g.setColour (Colours::black.withAlpha (0.3f));
         g.fillEllipse (c.x - kr, c.y - kr + 2.0f, kr * 2, kr * 2);
-        g.setGradientFill (ColourGradient (Colours::white, c.x, c.y - kr, Colour (0xffbccbe3), c.x, c.y + kr, false));
+        g.setGradientFill (ColourGradient (col::creamHi, c.x, c.y - kr, col::creamLo, c.x, c.y + kr, false));
         g.fillEllipse (c.x - kr, c.y - kr, kr * 2, kr * 2);
-        g.setColour (col::navy.withAlpha (0.6f));
+        g.setColour (Colours::white.withAlpha (0.5f));
+        g.drawEllipse (c.x - kr + 1.5f, c.y - kr + 1.5f, kr * 2 - 3.0f, kr * 2 - 3.0f, 1.0f);
+        g.setColour (col::creamEdge);
         g.drawEllipse (c.x - kr, c.y - kr, kr * 2, kr * 2, 1.0f);
-        g.setColour (col::panel);
+        g.setColour (col::ink);
         g.drawLine (Line<float> (c.getPointOnCircumference (kr * 0.2f, ang), c.getPointOnCircumference (kr * 0.88f, ang)), 3.5f);
     }
 
@@ -76,9 +95,8 @@ public:
             g.setColour (col::lcdBg); g.fillRoundedRectangle ((float) x, cy - 3.0f, (float) w, 6.0f, 3.0f);
             g.setColour (Colour (0xffbfe0ff)); g.fillRoundedRectangle ((float) x, cy - 3.0f, sliderPos - (float) x, 6.0f, 3.0f);
             Rectangle<float> cap (sliderPos - 10.0f, cy - 12.0f, 20.0f, 24.0f);
-            g.setGradientFill (ColourGradient (Colours::white, cap.getX(), cap.getY(), Colour (0xffb9c8e0), cap.getX(), cap.getBottom(), false));
-            g.fillRoundedRectangle (cap, 3.0f);
-            g.setColour (col::panel); g.fillRect (cap.getCentreX() - 1.0f, cap.getY() + 4.0f, 2.0f, cap.getHeight() - 8.0f);
+            drawCap (g, cap, 3.0f, col::creamHi, col::creamLo);
+            g.setColour (col::ink); g.fillRect (cap.getCentreX() - 1.0f, cap.getY() + 4.0f, 2.0f, cap.getHeight() - 8.0f);
             return;
         }
         if (style != Slider::LinearVertical) { LookAndFeel_V4::drawLinearSlider (g, x, y, w, h, sliderPos, minPos, maxPos, style, s); return; }
@@ -94,11 +112,8 @@ public:
         g.setColour (col::lcdBg);
         g.fillRoundedRectangle (cx - 3.0f, (float) y, 6.0f, (float) h, 3.0f);
         Rectangle<float> cap (cx - 15.0f, sliderPos - 11.0f, 30.0f, 22.0f);
-        g.setColour (Colours::black.withAlpha (0.35f));
-        g.fillRoundedRectangle (cap.translated (0.0f, 2.0f), 3.0f);
-        g.setGradientFill (ColourGradient (Colours::white, cap.getX(), cap.getY(), Colour (0xffb9c8e0), cap.getX(), cap.getBottom(), false));
-        g.fillRoundedRectangle (cap, 3.0f);
-        g.setColour (col::panel);
+        drawCap (g, cap, 3.0f, col::creamHi, col::creamLo);
+        g.setColour (col::ink);
         g.fillRect (cap.getX() + 3.0f, cap.getCentreY() - 1.0f, cap.getWidth() - 6.0f, 2.0f);
     }
 
@@ -106,31 +121,18 @@ public:
 
     void drawButtonBackground (Graphics& g, Button& b, const Colour&, bool over, bool down) override
     {
-        auto r = b.getLocalBounds().toFloat().reduced (1.5f);
+        auto r = b.getLocalBounds().toFloat().reduced (1.5f).withTrimmedBottom (1.0f);
         const bool on = b.getToggleState();
-        const bool plain = b.getProperties()["plain"];
-        g.setGradientFill (ColourGradient (on ? Colours::white : Colour (0xffdfe7f3), r.getX(), r.getY(),
-                                           on ? Colour (0xffd2e4ff) : Colour (0xffaebdd4), r.getX(), r.getBottom(), false));
-        g.fillRoundedRectangle (r, 3.0f);
-        if (over || down) { g.setColour (Colours::white.withAlpha (down ? 0.35f : 0.18f)); g.fillRoundedRectangle (r, 3.0f); }
-        if (! plain)
-        {
-            const float d = 8.0f;
-            Rectangle<float> led (r.getX() + 8.0f, r.getCentreY() - d * 0.5f, d, d);
-            if (on) { g.setColour (col::led.withAlpha (0.35f)); g.fillEllipse (led.expanded (3.0f)); g.setColour (col::led); }
-            else g.setColour (Colour (0xff56657f));
-            g.fillEllipse (led);
-        }
-        g.setColour (col::navy);
-        g.drawRoundedRectangle (r, 3.0f, 1.0f);
+        if (down) r = r.translated (0.0f, 0.8f);
+        drawCap (g, r, 3.0f, on ? col::onHi : col::creamHi, on ? col::onLo : col::creamLo);
+        if (over && ! down) { g.setColour (Colours::white.withAlpha (0.16f)); g.fillRoundedRectangle (r, 3.0f); }
     }
 
     void drawButtonText (Graphics& g, TextButton& b, bool, bool) override
     {
-        g.setColour (col::navy);
-        g.setFont (uiFont (b.getButtonText().length() > 6 ? 11.5f : 13.0f, true));
-        const bool plain = b.getProperties()["plain"];
-        g.drawText (b.getButtonText(), b.getLocalBounds().withTrimmedLeft (plain ? 0 : 16), Justification::centred, false);
+        g.setColour (col::ink);
+        g.setFont (uiFont (b.getButtonText().length() > 7 ? 12.0f : 13.5f, true));
+        g.drawText (b.getButtonText(), b.getLocalBounds().withTrimmedBottom (1), Justification::centred, false);
     }
 };
 
@@ -260,18 +262,36 @@ public:
                 if (fill)
                 {
                     Path f (p); f.lineTo (plot.getRight(), plot.getBottom()); f.lineTo (plot.getX(), plot.getBottom()); f.closeSubPath();
-                    g.setColour (c.withAlpha (0.10f)); g.fillPath (f);
+                    g.setGradientFill (ColourGradient (c.withAlpha (0.34f), 0.0f, plot.getY(), c.withAlpha (0.10f), 0.0f, plot.getBottom(), false));
+                    g.fillPath (f);
                 }
                 g.setColour (c); g.strokePath (p, PathStrokeType (width));
             };
             if (bd)
             {
-                std::vector<float> both (data.l.size());
-                for (size_t i = 0; i < both.size(); ++i) both[i] = jmax (data.l[i], data.r[i]);
-                curve (both, col::white.withAlpha (0.25f), 1.0f, false);
-                curve (data.lo, col::bandLo, 1.6f, true);
-                curve (data.mid, col::bandMid, 1.6f, true);
-                curve (data.hi, col::bandHi, 1.6f, true);
+                // layered fill: at every pixel column the area under each band's curve takes that band's colour
+                // (no mixing of the three into grey); the loudest band sits on top
+                const std::vector<float>* bv[3] = { &data.lo, &data.mid, &data.hi };
+                const Colour bc[3] = { col::bandLo, col::bandMid, col::bandHi };
+                for (int k = 0; k < cols; ++k)
+                {
+                    const float x0 = colX (k), x1 = colX (k + 1), m0 = msOf (x0), m1 = msOf (x1);
+                    float y[3]; int ord[3] = { 0, 1, 2 };
+                    for (int i = 0; i < 3; ++i)
+                        y[i] = plot.getY() + plot.getHeight() * jmax (floorDb, 20.0f * std::log10 (peakAt (*bv[i], m0, m1) + 1e-9f)) / floorDb;
+                    std::sort (ord, ord + 3, [&] (int p, int q) { return y[p] < y[q]; });
+                    for (int j = 0; j < 3; ++j)
+                    {
+                        const float top = y[ord[j]], bot = j < 2 ? y[ord[j + 1]] : plot.getBottom();
+                        if (bot <= top) continue;
+                        const float depth = (bot - plot.getY()) / plot.getHeight();
+                        g.setColour (bc[ord[j]].withAlpha (0.30f + 0.12f * (1.0f - depth)));
+                        g.fillRect (x0, top, x1 - x0 + 0.02f, bot - top);
+                    }
+                }
+                curve (data.lo, col::bandLo, 1.6f, false);
+                curve (data.mid, col::bandMid, 1.6f, false);
+                curve (data.hi, col::bandHi, 1.6f, false);
             }
             else { curve (data.l, Colour (0xffbfe0ff), 1.4f, false); curve (data.r, col::led.withAlpha (0.9f), 1.4f, false); }
         }
@@ -299,8 +319,8 @@ public:
         for (auto& h : handles())
         {
             const bool hot = h.id == hover || h.id == dragging;
-            const Colour c = h.irOnly ? col::amber : Colours::white;
-            g.setColour (c.withAlpha (hot ? 0.95f : 0.6f));
+            const Colour c = h.irOnly ? col::amber : col::creamLo.brighter (0.15f);
+            g.setColour (c.withAlpha (hot ? 1.0f : 0.85f));
             if (h.vertical)
             {
                 for (float y = plot.getY(); y < plot.getBottom(); y += 6.0f) g.drawVerticalLine ((int) h.pos, y, y + 3.0f);
@@ -308,14 +328,14 @@ public:
                 const float tx = h.pos + tw + 4.0f > plot.getRight() ? h.pos - tw + 2.0f : h.pos - 2.0f;
                 Rectangle<float> tab (tx, plot.getY() + 2.0f + (float) h.row * 21.0f, tw, 18.0f);
                 g.fillRoundedRectangle (tab, 3.0f);
-                g.setColour (col::lcdBg); g.setFont (monoFont (11.0f)); g.drawText (h.label, tab, Justification::centred);
+                g.setColour (col::ink); g.setFont (monoFont (11.0f)); g.drawText (h.label, tab, Justification::centred);
             }
             else
             {
                 g.drawHorizontalLine ((int) h.pos, h.x0, h.x1);
                 Rectangle<float> tab (h.x1 + 4.0f, h.pos - 9.0f, (float) h.label.length() * 8.5f + 12.0f, 18.0f);
                 g.fillRoundedRectangle (tab, 3.0f);
-                g.setColour (col::lcdBg); g.setFont (monoFont (11.0f)); g.drawText (h.label, tab, Justification::centred);
+                g.setColour (col::ink); g.setFont (monoFont (11.0f)); g.drawText (h.label, tab, Justification::centred);
             }
         }
         g.setColour (col::lcdText); g.setFont (monoFont (13.0f));
@@ -516,18 +536,11 @@ public:
         {
             addButton (sid (s, "on"), kSlotNames[s], false);
             addSlider (sid (s, "lv"), "LEVEL", Fader, false);
-            // clicking the name opens the algorithm for editing; clicking the light turns it on / off
+            // the algorithm's button switches it on / off and opens it for editing;
+            // clicking its fader column only opens it for editing
             auto& b = button (sid (s, "on"));
-            b.setClickingTogglesState (false);
-            b.onClick = [this, s, &b]
-            {
-                if (b.getMouseXYRelative().x < 30)
-                {
-                    const String id = sid (s, "on");
-                    proc.setParam (id, raw (id) > 0.5f ? 0.0f : 1.0f);
-                }
-                else selectSlot (s);
-            };
+            b.onClick = [this, s] { selectSlot (s); };
+            slider (sid (s, "lv")).addMouseListener (&columnClicks, false);
         }
         const char* rv[][2] = { { "decay", "DECAY" }, { "lowMult", "LOW DEC" }, { "highMult", "HIGH DEC" }, { "size", "SIZE" },
                                 { "predelay", "PRE-DLY" }, { "build", "BUILD" }, { "early", "EARLY" }, { "diff", "DIFFUSE" },
@@ -612,7 +625,7 @@ public:
         g.drawText ("DIGITAL REVERBERATION PROCESSOR  /  PV-5", titleArea.getX() + 2, 34, 320, 14, Justification::centredLeft);
         g.setColour (shownDsp > 70.0f ? Colour (0xffff8a65) : col::lcdText); g.setFont (uiFont (13.0f, true));
         g.drawText ("DSP " + String (shownDsp, 1) + " %", dspArea, Justification::centredLeft);
-        g.setColour (col::white); g.setFont (uiFont (12.5f, true));
+        g.setColour (col::label); g.setFont (uiFont (12.5f, true));
         g.drawText ("PRESET", presetBox.getX() - 64, presetBox.getY(), 58, presetBox.getHeight(), Justification::centredRight);
         g.drawText ("OVERSAMPLING", combo ("os").getX() - 112, combo ("os").getY(), 106, combo ("os").getHeight(), Justification::centredRight);
         g.drawText ("OUTPUT", slider ("out").getX() - 66, slider ("out").getY(), 60, slider ("out").getHeight(), Justification::centredRight);
@@ -631,7 +644,7 @@ public:
             const String t = s.perSlot ? s.title + "  -  " + String (kSlotNames[editSlot]) : s.title;
             auto tab = Rectangle<float> (r.getX() + 12.0f, r.getY() - 10.0f, (float) t.length() * 9.0f + 22.0f, 20.0f);
             g.setColour (col::navy); g.fillRoundedRectangle (tab, 3.0f);
-            g.setColour (s.perSlot ? Colour (0xffbfe0ff) : col::white); g.setFont (uiFont (13.0f, true));
+            g.setColour (s.perSlot ? Colour (0xffbfe0ff) : col::label); g.setFont (uiFont (13.0f, true));
             g.drawText (t, tab, Justification::centred);
         }
         g.setColour (col::lcdText.withAlpha (0.9f)); g.setFont (uiFont (12.0f, true));
@@ -640,18 +653,19 @@ public:
         {
             if (! c->slider.isVisible() || c->baseId == "out") continue;
             auto b = c->slider.getBounds();
-            g.setColour (col::white); g.setFont (uiFont (12.5f, true));
+            const float dim = c->slider.getAlpha();
+            g.setColour (col::label.withMultipliedAlpha (dim)); g.setFont (uiFont (12.5f, true));
             if (c->kind == Horizontal) g.drawText (c->label, b.getX(), b.getY() - 20, b.getWidth(), 16, Justification::centredLeft);
             else g.drawText (c->label, b.getX() - 18, b.getBottom() + 2, b.getWidth() + 36, 16, Justification::centred);
             auto vb = valueBox (*c).toFloat();
             bool limited = false;
             const String t = isComp (c->baseId) ? compValueText (c->baseId, limited) : text (c->slider.getName());
-            g.setColour (col::lcdBg); g.fillRoundedRectangle (vb, 3.0f);
-            g.setColour (col::lcdText.withAlpha (0.25f)); g.drawRoundedRectangle (vb, 3.0f, 1.0f);
-            g.setColour (limited ? col::amber : col::lcdText); g.setFont (monoFont (12.0f));
+            g.setColour (col::lcdBg.withMultipliedAlpha (dim)); g.fillRoundedRectangle (vb, 3.0f);
+            g.setColour (col::lcdText.withAlpha (0.25f * dim)); g.drawRoundedRectangle (vb, 3.0f, 1.0f);
+            g.setColour ((limited ? col::amber : col::lcdText).withMultipliedAlpha (dim)); g.setFont (monoFont (12.0f));
             g.drawText (t, vb, Justification::centred, false);
         }
-        g.setColour (col::white); g.setFont (uiFont (12.5f, true));
+        g.setColour (col::label); g.setFont (uiFont (12.5f, true));
         for (auto& c : combos)
             if (c->box.isVisible() && c->baseId != "os")
                 g.drawText (c->label, c->box.getX(), c->box.getY() - 18, c->box.getWidth(), 16, Justification::centredLeft);
@@ -710,7 +724,7 @@ public:
         irNext.setBounds (ir.getX() + 132, ir.getY() + 18, 36, 28);
         irClear.setBounds (ir.getX() + 300, ir.getY() + 18, 88, 28);
         const char* irIds[] = { "irStart", "irXover", "irFadeOut", "irXfeed", "irXdelay", "irAsym" };
-        for (int i = 0; i < 6; ++i) slider (irIds[i]).setBounds (ir.getX() + 48 + (i % 3) * 124, ir.getY() + 70 + (i / 3) * 92, 46, 46);
+        for (int i = 0; i < 6; ++i) slider (irIds[i]).setBounds (ir.getX() + 44 + (i % 3) * 124, ir.getY() + 64 + (i / 3) * 96, 54, 54);
         button ("irReverse").setBounds (ir.getX() + 12, ir.getY() + 266, 150, 26);
         button ("irPitch").setBounds (ir.getX() + 200, ir.getY() + 266, 188, 26);
         wave.setBounds (428, 76, 956, 300);
@@ -866,6 +880,10 @@ private:
                 if (c->baseId == "matA" || c->baseId == "matB") { c->box.clear (dontSendNotification); c->box.addItemList (materialNames (s), 1); }
                 c->att = std::make_unique<APVTS::ComboBoxAttachment> (proc.apvts, sid (s, c->baseId), c->box);
             }
+        const float irAlpha = s == pv::IR ? 1.0f : 0.4f;
+        for (auto* b : { &irPrev, &irNext, &irClear }) b->setAlpha (irAlpha);
+        for (auto* id : { "irStart", "irXover", "irFadeOut", "irXfeed", "irXdelay", "irAsym" }) slider (id).setAlpha (irAlpha);
+        for (auto* id : { "irReverse", "irPitch" }) button (id).setAlpha (irAlpha);
         proc.viewSlot.store (s);
         proc.apvts.state.setProperty ("editSlot", s, nullptr);
         wave.slot = s;
@@ -873,6 +891,22 @@ private:
         repaint();
     }
     void selectSlot (int s) { if (s != editSlot) bindSlot (s); }
+    int slotColumnAt (Point<int> p) const
+    {
+        for (int s = 0; s < pv::kNumSlots; ++s)
+            if (Rectangle<int> (slotArea.getX() + 8 + s * 78, slotArea.getY() + 50, 76, slotArea.getHeight() - 56).contains (p)) return s;
+        return -1;
+    }
+    void mouseDown (const MouseEvent& e) override
+    {
+        const int s = slotColumnAt (e.getEventRelativeTo (this).getPosition());
+        if (s >= 0) selectSlot (s);
+    }
+    struct ColumnClicks : MouseListener
+    {
+        MainPanel& m; explicit ColumnClicks (MainPanel& p) : m (p) {}
+        void mouseDown (const MouseEvent& e) override { const int s = m.slotColumnAt (e.getEventRelativeTo (&m).getPosition()); if (s >= 0) m.selectSlot (s); }
+    } columnClicks { *this };
 
     Slider& slider (const String& id) { for (auto& c : sliders) if (c->slider.getName() == id) return c->slider; jassertfalse; return sliders.front()->slider; }
     Slider& sliderBase (const String& base) { for (auto& c : sliders) if (c->baseId == base) return c->slider; jassertfalse; return sliders.front()->slider; }
