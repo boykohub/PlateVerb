@@ -89,6 +89,12 @@ struct Biquad {
     inline float process (float x) { float y = b0 * x + z1; z1 = b1 * x - a1 * y + z2; z2 = b2 * x - a2 * y; return y; }
     void set (float B0, float B1, float B2, float A0, float A1, float A2) { b0 = B0 / A0; b1 = B1 / A0; b2 = B2 / A0; a1 = A1 / A0; a2 = A2 / A0; }
     static float lim (float fs, float f) { return clampf (f, 5.0f, 0.45f * fs); }
+    // one second-order section of a lowpass from an analog pole pair (sigma < 0, omega), already scaled
+    // to the prewarped cutoff, through the bilinear transform; unity gain at DC
+    void fromPoles (float sigma, float omega) {
+        const float m = sigma * sigma + omega * omega;
+        set (m, 2 * m, m, 1 - 2 * sigma + m, 2 * (m - 1), 1 + 2 * sigma + m);
+    }
     void peak (float fs, float f, float Q, float dB) {
         float A = std::pow (10.0f, dB / 40.0f), w = 2 * kPi * lim (fs, f) / fs, al = std::sin (w) / (2 * Q), c = std::cos (w);
         set (1 + al * A, -2 * c, 1 - al * A, 1 + al / A, -2 * c, 1 - al / A);
@@ -721,6 +727,31 @@ struct SlotParams {
     CompParams comp;
     int matA = 0, matB = 0; float matBlend = 0.0f;     // surface (rooms, IR) or plate material, see Materials.h
     float dirt = kDirtDefault;                          // 1..100; 30 = the original sound
+    float hiCutHz = 20000.0f;                           // steep high cut like early digital reverbs' bandwidth; >= 19.5 kHz = off
+};
+
+// 8th-order Chebyshev (0.5 dB ripple) lowpass: about 17 dB down 11 % above the cutoff and 37 dB down at 1.3x,
+// close to the anti-alias filters of 1970s/80s digital reverbs (EMT 250: 10.8 kHz, Lexicon 224: 8 kHz)
+struct HiCut {
+    Biquad s[2][4]; float hz = -1, rate = -1, gain = 1; bool on = false;
+    void reset() { for (auto& c : s) for (auto& b : c) b.reset(); }
+    void set (float fs, float f) {
+        const bool want = f < 19500.0f && f < 0.45f * fs;
+        if (want == on && f == hz && fs == rate) return;
+        if (! on && want) reset();
+        on = want; hz = f; rate = fs;
+        if (! on) return;
+        const int N = 8; const float rip = 0.5f;
+        const float eps = std::sqrt (std::pow (10.0f, 0.1f * rip) - 1.0f), v = std::asinh (1.0f / eps) / (float) N;
+        const float W = std::tan (kPi * f / fs);
+        for (int k = 0; k < N / 2; ++k) {
+            const float th = kPi * (float) (2 * k + 1) / (float) (2 * N);
+            const float sg = -std::sinh (v) * std::sin (th) * W, om = std::cosh (v) * std::cos (th) * W;
+            for (int c = 0; c < 2; ++c) s[c][k].fromPoles (sg, om);
+        }
+        gain = 1.0f / std::sqrt (1.0f + eps * eps);       // even order: DC sits at the bottom of the ripple
+    }
+    inline float process (int c, float x) { if (! on) return x; for (auto& b : s[c]) x = b.process (x); return x * gain; }
 };
 
 struct Params {
@@ -736,7 +767,7 @@ struct Params {
 
 // ---------------------------------------------------------------- one slot's signal chain
 struct SlotChain {
-    Line preL, preR; OnePole tone[2]; Biquad eq[2][4]; Compressor comp;
+    Line preL, preR; OnePole tone[2]; Biquad eq[2][4]; HiCut hc; Compressor comp;
     Line dfL[2], dfR[2], mdL, mdR; RandLfo mlfo[2];               // IR slot: diffusion and modulation
     float sLvl = 0; bool running = false, dirty = true;
     static constexpr float kDfMs[4] = { 1.37f, 3.11f, 1.63f, 2.79f };
@@ -752,6 +783,7 @@ struct SlotChain {
         mdL.clearRecent ((int) (0.002f * fs) + 16); mdR.clearRecent ((int) (0.002f * fs) + 16);
         tone[0].reset(); tone[1].reset();
         for (int c = 0; c < 2; ++c) for (int b = 0; b < 4; ++b) eq[c][b].reset();
+        hc.reset();
         comp.reset();
     }
     void update (float fs, const SlotParams& p) {
@@ -762,6 +794,7 @@ struct SlotChain {
             eq[c][3].highShelf (fs, p.eqF[3], p.eqG[3]);
             tone[c].setCut (fs, 400.0f * std::pow (50.0f, p.tone));
         }
+        hc.set (fs, p.hiCutHz);
         comp.fs = fs; comp.setTimes (p.comp.atkMs, p.comp.relMs);
         mlfo[0].setRate (fs, 0.7f); mlfo[1].setRate (fs, 0.9f);
     }
@@ -773,6 +806,7 @@ struct SlotChain {
         const float mid = 0.5f * (pl + pr), side = 0.5f * (pl - pr) * inW; pl = mid + side; pr = mid - side;
     }
     inline void post (float& L, float& R, float kL, float kR, const CompParams& cp) {
+        L = hc.process (0, L); R = hc.process (1, R);
         for (int b = 0; b < 4; ++b) { L = eq[0][b].process (L); R = eq[1][b].process (R); }
         if (cp.on) comp.process (L, R, cp.duck ? kL : L, cp.duck ? kR : R, cp);
         else comp.meter (cp.duck ? kL : L, cp.duck ? kR : R);
