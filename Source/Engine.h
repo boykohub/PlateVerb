@@ -286,25 +286,97 @@ struct FdnAlgo {
 };
 
 // ---------------------------------------------------------------- compressor (stereo linked)
+// Types: 0 = clean VCA, 1 = FET (1176-style), 2 = opto (LA-2A-style), 3 = FET into opto (both).
+// Tone: clean, or vintage (FET: distortion that grows with gain reduction; opto: tube make-up warmth).
+enum CompType { CompVCA = 0, CompFET, CompOpto, CompFetOpto };
+
+inline float gainComputer (float db, float thr, float ratio, float knee) {
+    float over = db - thr;
+    if (over <= -knee * 0.5f) return 0.0f;
+    if (over >= knee * 0.5f) return over * (1.0f - 1.0f / ratio);
+    float t = over + knee * 0.5f;
+    return (1.0f - 1.0f / ratio) * t * t / (2.0f * knee);
+}
+inline float warmSat (float x, float k, float b) {        // unity small-signal gain, asymmetric soft clip
+    float tb = std::tanh (b);
+    return (std::tanh (k * x + b) - tb) / (k * (1.0f - tb * tb));
+}
+
 struct Compressor {
-    float env = 0, fs = 48000, aA = 0, aR = 0;
+    float fs = 48000, aA = 0, aR = 0, aM = 0, inPk = 0;
+    float aOptA = 0, aOptRf = 0, aOptRs = 0, aMem = 0, aRms = 0;
+    float envV = 0, envF = 0, envO = 0, mem = 0, rms = 0, grTotal = 0;
+    Biquad tubeLp[2], tubeLow[2], dc[2];
+    void reset() { envV = envF = envO = mem = rms = grTotal = inPk = 0; for (int c = 0; c < 2; ++c) { tubeLp[c].reset(); tubeLow[c].reset(); dc[c].reset(); } }
+    static float coef (float ms, float fs) { return std::exp (-1.0f / (std::max (0.02f, ms) * 0.001f * fs)); }
     void setTimes (float atkMs, float relMs) {
-        aA = std::exp (-1.0f / (std::max (0.05f, atkMs) * 0.001f * fs));
-        aR = std::exp (-1.0f / (std::max (1.0f, relMs) * 0.001f * fs));
+        aA = coef (atkMs, fs); aR = coef (relMs, fs);
+        aOptA = coef (std::max (3.0f, atkMs), fs);
+        aOptRf = coef (relMs * 0.5f, fs);                  // opto: fast first part of the release...
+        aOptRs = coef (relMs * 6.0f, fs);                  // ...and a slow tail after heavy compression
+        aMem = coef (1500.0f, fs); aRms = coef (8.0f, fs);
+        aM = coef (300.0f, fs);                            // meter fall
+        for (int c = 0; c < 2; ++c) {
+            tubeLp[c].lowpass (fs, 17000.0f, 0.6f);
+            tubeLow[c].peak (fs, 90.0f, 0.7f, 0.8f);
+            dc[c].highpass (fs, 10.0f, 0.7f);
+        }
     }
-    inline void process (float& L, float& R, float thr, float ratio, float makeup, float mix) {
+    inline float meter (float L, float R) {
         float lvl = std::max (std::fabs (L), std::fabs (R));
-        float db = 20.0f * std::log10 (lvl + 1e-9f);
-        float over = db - thr, knee = 6.0f, gr;
-        if (over <= -knee / 2) gr = 0;
-        else if (over >= knee / 2) gr = over * (1 - 1 / ratio);
-        else { float t = over + knee / 2; gr = (1 - 1 / ratio) * t * t / (2 * knee); }
-        env = gr > env ? aA * env + (1 - aA) * gr : aR * env + (1 - aR) * gr;
-        float g = dbToGain (makeup - env);
-        L = L * (1 - mix) + L * g * mix;
-        R = R * (1 - mix) + R * g * mix;
+        inPk = lvl > inPk ? lvl : inPk * aM;
+        return lvl;
     }
-    float reductionDb() const { return env; }
+    inline float stepFet (float db, float thr, float ratio) {
+        float gr = gainComputer (db, thr, ratio, 2.0f);
+        envF = gr > envF ? aA * envF + (1 - aA) * gr : aR * envF + (1 - aR) * gr;
+        return envF;
+    }
+    inline float stepOpto (float db, float thr, float ratio) {
+        float gr = gainComputer (db, thr, ratio, 12.0f);
+        mem = aMem * mem + (1 - aMem) * (gr > 3.0f ? 1.0f : 0.0f);
+        const float r = mem * aOptRs + (1 - mem) * aOptRf;
+        envO = gr > envO ? aOptA * envO + (1 - aOptA) * gr : r * envO + (1 - r) * gr;
+        return envO;
+    }
+    inline void process (float& L, float& R, int type, bool vintage, float thr, float ratio, float makeup, float mix) {
+        const float lvl = meter (L, R);
+        const float pkDb = 20.0f * std::log10 (lvl + 1e-9f);
+        float yL = L, yR = R, gr = 0;
+        if (type == CompVCA) {
+            float g = gainComputer (pkDb, thr, ratio, 6.0f);
+            envV = g > envV ? aA * envV + (1 - aA) * g : aR * envV + (1 - aR) * g;
+            gr = envV;
+            float k = dbToGain (-gr); yL *= k; yR *= k;
+            if (vintage) { yL = warmSat (yL, 1.5f, 0.05f); yR = warmSat (yR, 1.5f, 0.05f); }
+        }
+        if (type == CompFET || type == CompFetOpto) {
+            const float t = type == CompFetOpto ? thr + 6.0f : thr;      // in the chain the FET only catches peaks
+            float g = stepFet (pkDb, t, ratio);
+            gr += g;
+            float k = dbToGain (-g); yL *= k; yR *= k;
+            if (vintage) { float d = 1.2f + 0.12f * g; yL = warmSat (yL, d, 0.12f); yR = warmSat (yR, d, 0.12f); }
+        }
+        if (type == CompOpto || type == CompFetOpto) {
+            float l2 = std::max (std::fabs (yL), std::fabs (yR));
+            rms = aRms * rms + (1 - aRms) * l2 * l2;                    // opto cell reacts to average level
+            const float db = 10.0f * std::log10 (rms + 1e-12f) + 3.0f;
+            float g = stepOpto (db, thr, type == CompFetOpto ? 3.0f : ratio);
+            gr += g;
+            float k = dbToGain (-g); yL *= k; yR *= k;
+            if (vintage) {
+                yL = tubeLp[0].process (tubeLow[0].process (warmSat (yL, 1.8f, 0.25f)));
+                yR = tubeLp[1].process (tubeLow[1].process (warmSat (yR, 1.8f, 0.25f)));
+            }
+        }
+        if (vintage) { yL = dc[0].process (yL); yR = dc[1].process (yR); }
+        grTotal = gr;
+        const float mk = dbToGain (makeup);
+        L = L * (1 - mix) + yL * mk * mix;
+        R = R * (1 - mix) + yR * mk * mix;
+    }
+    float reductionDb() const { return grTotal; }
+    float inputDb() const { return 20.0f * std::log10 (inPk + 1e-9f); }
 };
 
 // ---------------------------------------------------------------- stereo delay with gentle analog EQ
@@ -335,40 +407,45 @@ struct StereoDelay {
 };
 
 // ---------------------------------------------------------------- output transformer models
-struct TransformerModel { const char* name; float sat, asym, hfHz, hfQ, bumpHz, bumpDb, full; };
+struct TransformerModel { const char* name; float sat, asym, hfHz, hfQ, bumpHz, bumpDb; };
 constexpr int kNumTransformers = 6;
 inline const TransformerModel& transformerModel (int i) {
     static const TransformerModel m[kNumTransformers] = {
-        { "Marinair-style (British console)",  1.00f, 0.12f, 32000, 0.80f,  70, 0.8f, 0.30f },
-        { "Carnhill-style (British reissue)",  0.85f, 0.10f, 36000, 0.75f,  80, 0.6f, 0.25f },
-        { "Jensen-style (US clean)",           0.35f, 0.03f, 60000, 0.71f,  40, 0.2f, 0.10f },
-        { "UTC-style (US vintage)",            0.90f, 0.18f, 19000, 1.10f, 100, 1.0f, 0.35f },
-        { "Lundahl-style (Scandinavian)",      0.50f, 0.06f, 50000, 0.70f,  50, 0.4f, 0.15f },
-        { "Haufe-style (German broadcast)",    0.75f, 0.15f, 24000, 0.90f,  90, 0.7f, 0.30f }
+        { "Marinair-style (British console)",  1.00f, 0.10f, 24000, 0.85f,  70, 1.5f },
+        { "Carnhill-style (British reissue)",  0.90f, 0.08f, 28000, 0.80f,  80, 1.2f },
+        { "Jensen-style (US clean)",           0.45f, 0.02f, 45000, 0.71f,  40, 0.4f },
+        { "UTC-style (US vintage)",            0.95f, 0.16f, 16000, 1.20f, 100, 2.0f },
+        { "Lundahl-style (Scandinavian)",      0.60f, 0.05f, 38000, 0.72f,  50, 0.8f },
+        { "Haufe-style (German broadcast)",    0.80f, 0.13f, 20000, 0.95f,  90, 1.4f }
     };
     return m[std::min (std::max (i, 0), kNumTransformers - 1)];
 }
 
+// Core saturation with low-frequency pre-emphasis / de-emphasis: the linear parts cancel,
+// so the distortion is concentrated in the lows below 'freq', like real transformer iron.
 struct Transformer {
-    float fs = 48000; OnePole split[2]; Biquad bump[2], hf[2], dc[2];
-    void clear() { for (int c = 0; c < 2; ++c) { split[c].reset(); bump[c].reset(); hf[c].reset(); dc[c].reset(); } }
+    float fs = 48000, drive = 1, bias = 0, biasOff = 0, norm = 1;
+    Biquad pre[2], post[2], bump[2], hf[2], dc[2];
+    void clear() { for (int c = 0; c < 2; ++c) { pre[c].reset(); post[c].reset(); bump[c].reset(); hf[c].reset(); dc[c].reset(); } }
     void set (int model, float freq, float amount) {
         const auto& m = transformerModel (model);
+        const float emph = 12.0f * amount;
+        drive = dbToGain (2.0f + amount * 14.0f * m.sat);     // saturation ceiling from about -2 dBFS down to -16 dBFS
+        bias = m.asym * (0.5f + 1.5f * amount);              // asymmetry = even harmonics (warmth)
+        biasOff = std::tanh (bias);
+        norm = 1.0f / (drive * (1.0f - biasOff * biasOff));
         for (int c = 0; c < 2; ++c) {
-            split[c].setCut (fs, freq);
-            bump[c].peak (fs, m.bumpHz * (freq / 80.0f), 0.9f, m.bumpDb * (0.4f + amount));
+            pre[c].lowShelf (fs, freq, emph, 0.7f);
+            post[c].lowShelf (fs, freq, -emph, 0.7f);
+            bump[c].peak (fs, m.bumpHz * (freq / 80.0f), 0.8f, m.bumpDb * (0.3f + amount));
             hf[c].lowpass (fs, std::min (m.hfHz, 0.45f * fs), m.hfQ);
-            dc[c].highpass (fs, 8.0f, 0.7f);
+            dc[c].highpass (fs, 10.0f, 0.7f);
         }
     }
-    inline float process (int c, float x, int model, float amount) {
-        const auto& m = transformerModel (model);
-        float low = split[c].lp (x);
-        float drive = 1.0f + amount * m.sat * 7.0f, bias = m.asym * amount;
-        float sat = (std::tanh (drive * (low + bias)) - std::tanh (drive * bias)) / drive;
-        float y = (x - low) + low + amount * (sat - low);
-        float k = 1.0f + 2.0f * amount * m.full;
-        y = y + amount * m.full * (std::tanh (y * k) / k - y);
+    inline float process (int c, float x) {
+        float u = pre[c].process (x);
+        float v = (std::tanh (drive * u + bias) - biasOff) * norm;
+        float y = post[c].process (v);
         y = hf[c].process (bump[c].process (y));
         return dc[c].process (y);
     }
@@ -382,9 +459,9 @@ struct Params {
     float decaySec = 2.5f, size = 1.0f, predelayMs = 10, damping = 0.35f, tone = 0.75f, mod = 0.5f, early = 0.7f;
     float rvMix = 0.3f;
     float eqF[4] = { 100, 400, 2500, 8000 }, eqG[4] = { 0, 0, 0, 0 };
-    bool compOn = false; float compThr = -20, compRatio = 3, compAtk = 10, compRel = 200, compMakeup = 0, compMix = 1;
+    bool compOn = false; int compType = 0; bool compVintage = false; float compThr = -30, compRatio = 4, compAtk = 10, compRel = 200, compMakeup = 0, compMix = 1;
     bool delayOn = false; float delayMsL = 375, delayMsR = 500, delayFb = 0.35f, delayMix = 0.0f;
-    bool pingPong = false; float dlLowDb = 0, dlMidDb = 0, dlMidHz = 1000, dlHighDb = 0;
+    bool pingPong = false; float dlPanL = -1, dlPanR = 1, dlWidth = 1; float dlLowDb = 0, dlMidDb = 0, dlMidHz = 1000, dlHighDb = 0;
     bool trOn = false; int trModel = 0; float trFreq = 80, trAmount = 0.3f;
     float outGainDb = 0;
 };
@@ -409,12 +486,13 @@ public:
         for (int a = 1; a < kNumAlgos; ++a) { fdn[a].fs = fs; fdn[a].clear(); }
         preL.clear(); preR.clear(); tone[0].reset(); tone[1].reset();
         for (int c = 0; c < 2; ++c) for (int b = 0; b < 4; ++b) eq[c][b].reset();
-        comp.fs = fs; comp.env = 0;
+        comp.fs = fs; comp.reset();
         delay.fs = fs; delay.clear(); delay.curL = delay.curR = 0; firstBlock = true;
         tr.fs = fs; tr.clear();
     }
     int latency() const { return up[0].latencyBase(); }
     float compReductionDb() const { return comp.reductionDb(); }
+    float compInputDb() const { return comp.inputDb(); }
 
     void process (float* L, float* R, int n, const Params& p) {
         setOversampling (p.oversampling);
@@ -438,6 +516,10 @@ public:
         const float tR = clampf (p.delayMsR * 0.001f * fs, 1.0f, kMaxDelaySec * fs - 4);
         if (firstBlock) { delay.curL = tL; delay.curR = tR; firstBlock = false; }
         const float smA = 1.0f - std::exp (-1.0f / (0.03f * fs));      // ~30 ms parameter smoothing
+        // delay pan (equal power) for each delay channel
+        auto panGains = [] (float pan, float& gl, float& gr) { float a = (clampf (pan, -1, 1) + 1) * 0.25f * kPi; gl = std::cos (a); gr = std::sin (a); };
+        float pLl, pLr, pRl, pRr; panGains (p.dlPanL, pLl, pLr); panGains (p.dlPanR, pRl, pRr);
+        const float width = clampf (p.dlWidth, 0.0f, 2.0f);
         const float tgtRv = p.rvMix, tgtDl = p.delayOn ? p.delayMix : 0.0f, tgtOut = dbToGain (p.outGainDb);
 
         int nOn = 0; for (int a = 0; a < kNumAlgos; ++a) nOn += p.algoOn[a] ? 1 : 0;
@@ -469,14 +551,21 @@ public:
                     wL += oL * sAlgo[a]; wR += oR * sAlgo[a];
                 }
                 for (int b = 0; b < 4; ++b) { wL = eq[0][b].process (wL); wR = eq[1][b].process (wR); }
-                if (p.compOn) comp.process (wL, wR, p.compThr, p.compRatio, p.compMakeup, p.compMix);
+                if (p.compOn) comp.process (wL, wR, p.compType, p.compVintage, p.compThr, p.compRatio, p.compMakeup, p.compMix);
+                else comp.meter (wL, wR);
                 // ---- delay
                 float dL = 0, dR = 0;
-                if (p.delayOn || sDl > 1e-4f) delay.process (xL, xR, tL, tR, p.delayFb, p.pingPong, smA * 0.2f, dL, dR);
+                if (p.delayOn || sDl > 1e-4f) {
+                    float rL, rR;
+                    delay.process (xL, xR, tL, tR, p.delayFb, p.pingPong, smA * 0.2f, rL, rR);
+                    float oL = rL * pLl + rR * pRl, oR = rL * pLr + rR * pRr;
+                    float mid = 0.5f * (oL + oR), side = 0.5f * (oL - oR) * width;
+                    dL = mid + side; dR = mid - side;
+                }
                 // ---- mix
                 float yL = xL * (1 - sRv) + wL * sRv + dL * sDl;
                 float yR = xR * (1 - sRv) + wR * sRv + dR * sDl;
-                if (p.trOn) { yL = tr.process (0, yL, p.trModel, p.trAmount); yR = tr.process (1, yR, p.trModel, p.trAmount); }
+                if (p.trOn) { yL = tr.process (0, yL); yR = tr.process (1, yR); }
                 bufL[k] = yL * sOut; bufR[k] = yR * sOut;
             }
             L[i] = dn[0].down (bufL); R[i] = dn[1].down (bufR);
