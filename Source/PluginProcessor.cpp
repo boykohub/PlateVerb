@@ -16,6 +16,8 @@ static StringArray divNames() { return { "1/64", "1/32T", "1/32", "1/16T", "1/16
                                          "1/8D", "1/4T", "1/4", "1/4D", "1/2T", "1/2", "1/2D", "1/1" }; }
 static StringArray trNames()  { StringArray s; for (int i = 0; i < pv::kNumTransformers; ++i) s.add (pv::transformerModel (i).name); return s; }
 
+static StringArray compTypeNames() { return { "Clean VCA", "1176-style FET", "LA-2A-style Opto", "1176 + LA-2A" }; }
+
 static String algoId (const char* prefix, int a) { return String (prefix) + String (a); }
 
 // ============================================================================ processor
@@ -35,24 +37,39 @@ public:
         pMod = P ("mod"); pEarly = P ("early"); pMix = P ("mix");
         for (int b = 0; b < 4; ++b) { pEqF[b] = P (algoId ("eqF", b)); pEqG[b] = P (algoId ("eqG", b)); }
         pCpOn = P ("cpOn"); pCpThr = P ("cpThr"); pCpRatio = P ("cpRatio"); pCpAtk = P ("cpAtk"); pCpRel = P ("cpRel");
-        pCpMakeup = P ("cpMakeup"); pCpMix = P ("cpMix");
+        pCpMakeup = P ("cpMakeup"); pCpMix = P ("cpMix"); pCpType = P ("cpType"); pCpTone = P ("cpTone");
+        pDlPanL = P ("dlPanL"); pDlPanR = P ("dlPanR"); pDlWidth = P ("dlWidth");
         pDlOn = P ("dlOn"); pDlSync = P ("dlSync"); pDlPing = P ("dlPing"); pDlTimeL = P ("dlTimeL"); pDlTimeR = P ("dlTimeR");
         pDlDivL = P ("dlDivL"); pDlDivR = P ("dlDivR"); pDlFb = P ("dlFb"); pDlMix = P ("dlMix");
         pDlLow = P ("dlLow"); pDlMid = P ("dlMid"); pDlMidF = P ("dlMidF"); pDlHigh = P ("dlHigh");
         pTrOn = P ("trOn"); pTrModel = P ("trModel"); pTrFreq = P ("trFreq"); pTrAmt = P ("trAmt"); pOut = P ("out");
     }
 
-    // unit "%" shows a 0..1 parameter as 0..100 %
+    // unit "%" shows a 0..1 parameter as 0..100 %, unit "pan" shows -1..1 as L100..C..R100.
+    // centre == -2 gives a logarithmic (smooth, even-feeling) range for times and frequencies.
+    static constexpr float kLog = -2.0f;
     static std::unique_ptr<AudioParameterFloat> fp (const String& id, const String& name, float lo, float hi,
                                                     float def, float centre = -1.0f, const String& unit = "%", int decimals = 0)
     {
         NormalisableRange<float> r (lo, hi);
-        if (centre > lo && centre < hi) r.setSkewForCentre (centre);
-        const bool pct = unit == "%";
+        if (centre == kLog && lo > 0.0f)
+            r = NormalisableRange<float> (lo, hi,
+                    [] (float a, float b, float t) { return a * std::pow (b / a, t); },
+                    [] (float a, float b, float v) { return std::log (v / a) / std::log (b / a); });
+        else if (centre > lo && centre < hi) r.setSkewForCentre (centre);
+        const bool pct = unit == "%", pan = unit == "pan";
         auto attr = AudioParameterFloatAttributes()
-            .withLabel (unit)
-            .withStringFromValueFunction ([pct, decimals] (float v, int) { return pct ? String (roundToInt (v * 100.0f)) : String (v, decimals); })
-            .withValueFromStringFunction ([pct] (const String& t) { return pct ? t.getFloatValue() / 100.0f : t.getFloatValue(); });
+            .withLabel (pan ? String() : unit)
+            .withStringFromValueFunction ([pct, pan, decimals] (float v, int)
+            {
+                if (pan) { const int p = roundToInt (v * 100.0f); return p == 0 ? String ("C") : (p < 0 ? "L" + String (-p) : "R" + String (p)); }
+                return pct ? String (roundToInt (v * 100.0f)) : String (v, decimals);
+            })
+            .withValueFromStringFunction ([pct, pan] (const String& t)
+            {
+                if (pan) { auto u = t.trim().toUpperCase(); float v = u.substring (1).getFloatValue() / 100.0f; return u.startsWith ("L") ? -v : (u.startsWith ("R") ? v : 0.0f); }
+                return pct ? t.getFloatValue() / 100.0f : t.getFloatValue();
+            });
         return std::make_unique<AudioParameterFloat> (ParameterID { id, 1 }, name, r, def, attr);
     }
     static std::unique_ptr<AudioParameterBool> bp (const String& id, const String& name, bool def)
@@ -86,14 +103,16 @@ public:
         const float fLo[] = { 20, 100, 800, 2000 }, fHi[] = { 500, 2000, 8000, 20000 }, fDef[] = { 100, 400, 2500, 8000 };
         for (int b = 0; b < 4; ++b)
         {
-            l.add (fp (algoId ("eqF", b), String ("Reverb EQ ") + bandNames[b] + " Freq", fLo[b], fHi[b], fDef[b], fDef[b], "Hz"));
+            l.add (fp (algoId ("eqF", b), String ("Reverb EQ ") + bandNames[b] + " Freq", fLo[b], fHi[b], fDef[b], kLog, "Hz"));
             l.add (fp (algoId ("eqG", b), String ("Reverb EQ ") + bandNames[b] + " Gain", -15.0f, 15.0f, 0.0f, -1.0f, "dB", 1));
         }
         l.add (bp ("cpOn", "Comp On", false));
-        l.add (fp ("cpThr", "Comp Threshold", -60.0f, 0.0f, -20.0f, -1.0f, "dB"));
-        l.add (fp ("cpRatio", "Comp Ratio", 1.0f, 20.0f, 3.0f, 4.0f, ":1", 1));
-        l.add (fp ("cpAtk", "Comp Attack", 0.1f, 200.0f, 10.0f, 10.0f, "ms", 1));
-        l.add (fp ("cpRel", "Comp Release", 10.0f, 3000.0f, 200.0f, 200.0f, "ms"));
+        l.add (cp ("cpType", "Comp Type", compTypeNames(), 0));
+        l.add (cp ("cpTone", "Comp Tone", StringArray { "Clean", "Vintage" }, 0));
+        l.add (fp ("cpThr", "Comp Threshold", -70.0f, 0.0f, -30.0f, -1.0f, "dB", 1));
+        l.add (fp ("cpRatio", "Comp Ratio", 1.0f, 20.0f, 4.0f, 4.0f, ":1", 1));
+        l.add (fp ("cpAtk", "Comp Attack", 0.05f, 300.0f, 10.0f, kLog, "ms", 2));
+        l.add (fp ("cpRel", "Comp Release", 5.0f, 5000.0f, 250.0f, kLog, "ms"));
         l.add (fp ("cpMakeup", "Comp Makeup", 0.0f, 24.0f, 0.0f, -1.0f, "dB", 1));
         l.add (fp ("cpMix", "Comp Mix", 0.0f, 1.0f, 1.0f));
         l.add (bp ("dlOn", "Delay On", false));
@@ -105,13 +124,16 @@ public:
         l.add (cp ("dlDivR", "Delay Div R", divNames(), 8));
         l.add (fp ("dlFb", "Delay Feedback", 0.0f, 0.95f, 0.35f));
         l.add (fp ("dlMix", "Delay Mix", 0.0f, 1.0f, 0.3f));
+        l.add (fp ("dlPanL", "Delay Pan L", -1.0f, 1.0f, -1.0f, -1.0f, "pan"));
+        l.add (fp ("dlPanR", "Delay Pan R", -1.0f, 1.0f, 1.0f, -1.0f, "pan"));
+        l.add (fp ("dlWidth", "Delay Width", 0.0f, 2.0f, 1.0f));
         l.add (fp ("dlLow", "Delay EQ Low", -12.0f, 12.0f, 0.0f, -1.0f, "dB", 1));
         l.add (fp ("dlMid", "Delay EQ Mid", -12.0f, 12.0f, 0.0f, -1.0f, "dB", 1));
-        l.add (fp ("dlMidF", "Delay EQ Mid Freq", 200.0f, 5000.0f, 1000.0f, 1000.0f, "Hz"));
+        l.add (fp ("dlMidF", "Delay EQ Mid Freq", 200.0f, 5000.0f, 1000.0f, kLog, "Hz"));
         l.add (fp ("dlHigh", "Delay EQ High", -12.0f, 12.0f, 0.0f, -1.0f, "dB", 1));
         l.add (bp ("trOn", "Transformer On", false));
         l.add (cp ("trModel", "Transformer Model", trNames(), 0));
-        l.add (fp ("trFreq", "Transformer Freq", 20.0f, 400.0f, 80.0f, 80.0f, "Hz"));
+        l.add (fp ("trFreq", "Transformer Freq", 20.0f, 400.0f, 80.0f, kLog, "Hz"));
         l.add (fp ("trAmt", "Transformer Amount", 0.0f, 1.0f, 0.3f));
         l.add (fp ("out", "Output", -24.0f, 12.0f, 0.0f, -1.0f, "dB", 1));
         return l;
@@ -119,6 +141,7 @@ public:
 
     void prepareToPlay (double sampleRate, int) override
     {
+        sampleRateHz = sampleRate;
         engine.prepare (sampleRate);
         readParams();
         engine.setOversampling (prm.oversampling, true);
@@ -139,8 +162,13 @@ public:
         if (buffer.getNumChannels() < 2 || n == 0) return;
         if (getTotalNumInputChannels() == 1) buffer.copyFrom (1, 0, buffer, 0, 0, n);
         readParams();
+        const auto t0 = Time::getHighResolutionTicks();
         engine.process (buffer.getWritePointer (0), buffer.getWritePointer (1), n, prm);
+        const double used = Time::highResolutionTicksToSeconds (Time::getHighResolutionTicks() - t0);
+        const float load = (float) (100.0 * used / (n / sampleRateHz));
+        dspLoad.store (dspLoad.load() * 0.9f + load * 0.1f);
         compGr.store (prm.compOn ? engine.compReductionDb() : 0.0f);
+        compIn.store (engine.compInputDb());
         const int lat = engine.latency();
         if (lat != getLatencySamples()) setLatencySamples (lat);
     }
@@ -156,6 +184,8 @@ public:
         for (int b = 0; b < 4; ++b) { prm.eqF[b] = f (pEqF[b]); prm.eqG[b] = f (pEqG[b]); }
         prm.compOn = on (pCpOn); prm.compThr = f (pCpThr); prm.compRatio = f (pCpRatio); prm.compAtk = f (pCpAtk);
         prm.compRel = f (pCpRel); prm.compMakeup = f (pCpMakeup); prm.compMix = f (pCpMix);
+        prm.compType = jlimit (0, 3, (int) f (pCpType)); prm.compVintage = f (pCpTone) > 0.5f;
+        prm.dlPanL = f (pDlPanL); prm.dlPanR = f (pDlPanR); prm.dlWidth = f (pDlWidth);
         prm.delayOn = on (pDlOn); prm.pingPong = on (pDlPing); prm.delayFb = f (pDlFb); prm.delayMix = f (pDlMix);
         prm.dlLowDb = f (pDlLow); prm.dlMidDb = f (pDlMid); prm.dlMidHz = f (pDlMidF); prm.dlHighDb = f (pDlHigh);
         if (on (pDlSync))
@@ -199,7 +229,7 @@ public:
     }
 
     APVTS apvts;
-    std::atomic<float> compGr { 0.0f };
+    std::atomic<float> compGr { 0.0f }, compIn { -100.0f }, dspLoad { 0.0f };
 
 private:
     pv::Engine engine;
@@ -210,7 +240,9 @@ private:
         *pCpRel = nullptr, *pCpMakeup = nullptr, *pCpMix = nullptr, *pDlOn = nullptr, *pDlSync = nullptr, *pDlPing = nullptr,
         *pDlTimeL = nullptr, *pDlTimeR = nullptr, *pDlDivL = nullptr, *pDlDivR = nullptr, *pDlFb = nullptr, *pDlMix = nullptr,
         *pDlLow = nullptr, *pDlMid = nullptr, *pDlMidF = nullptr, *pDlHigh = nullptr, *pTrOn = nullptr, *pTrModel = nullptr,
-        *pTrFreq = nullptr, *pTrAmt = nullptr, *pOut = nullptr;
+        *pTrFreq = nullptr, *pTrAmt = nullptr, *pOut = nullptr, *pCpType = nullptr, *pCpTone = nullptr,
+        *pDlPanL = nullptr, *pDlPanR = nullptr, *pDlWidth = nullptr;
+    double sampleRateHz = 48000.0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PlateVerbProcessor)
 };
@@ -445,17 +477,20 @@ public:
         for (int b = 0; b < 4; ++b) { addSlider (algoId ("eqF", b), String (bn[b]) + " HZ", false); addSlider (algoId ("eqG", b), String (bn[b]) + " dB", false); }
         // compressor
         addButton ("cpOn", "COMP");
+        addCombo ("cpType", compTypeNames(), "TYPE");
+        addCombo ("cpTone", StringArray { "Clean", "Vintage" }, "TONE");
         const char* cpn[][2] = { { "cpThr", "THRESH" }, { "cpRatio", "RATIO" }, { "cpAtk", "ATTACK" },
                                  { "cpRel", "RELEASE" }, { "cpMakeup", "MAKEUP" }, { "cpMix", "MIX" } };
         for (auto& e : cpn) addSlider (e[0], e[1], false);
         // delay
         addButton ("dlOn", "DELAY"); addButton ("dlSync", "SYNC"); addButton ("dlPing", "PING");
         const char* dln[][2] = { { "dlTimeL", "TIME L" }, { "dlTimeR", "TIME R" }, { "dlFb", "FEEDBACK" }, { "dlMix", "MIX" },
+                                 { "dlWidth", "WIDTH" }, { "dlPanL", "PAN L" }, { "dlPanR", "PAN R" },
                                  { "dlLow", "LOW" }, { "dlMid", "MID" }, { "dlMidF", "MID HZ" }, { "dlHigh", "HIGH" } };
         for (auto& e : dln) addSlider (e[0], e[1], false);
-        addCombo ("dlDivL", divNames()); addCombo ("dlDivR", divNames());
+        addCombo ("dlDivL", divNames(), "DIV L"); addCombo ("dlDivR", divNames(), "DIV R");
         // output
-        addCombo ("os", osNames());
+        addCombo ("os", osNames(), "OVERSAMPLING");
         addSlider ("out", "OUTPUT", false);
 
         display.badges[0] = "COMP"; display.badges[1] = "DELAY"; display.badges[2] = "XFMR";
@@ -464,8 +499,8 @@ public:
         addChildComponent (service);
 
         for (auto* prm : proc.getParameters()) lastValues.add (prm->getValue());
-        setSize (1200, 690);
-        startTimerHz (20);
+        setSize (1240, 700);
+        startTimerHz (25);
     }
     ~PlateVerbEditor() override { stopTimer(); setLookAndFeel (nullptr); }
 
@@ -479,10 +514,10 @@ public:
         g.fillRect (head);
         g.setColour (col::white.withAlpha (0.6f)); g.fillRect (0.0f, head.getBottom() - 2.0f, (float) getWidth(), 2.0f);
         g.setColour (col::white); g.setFont (uiFont (30.0f, true));
-        g.drawText ("P L A T E V E R B", 24, 26, 330, 40, Justification::centredLeft);
+        g.drawText ("P L A T E V E R B", 24, 26, 340, 40, Justification::centredLeft);
         g.setColour (col::lcdText.withAlpha (0.85f)); g.setFont (uiFont (11.5f, true));
-        g.drawText ("DIGITAL REVERBERATION PROCESSOR", 26, 66, 330, 16, Justification::centredLeft);
-        g.drawText ("MODEL PV-6  /  6 ALGORITHMS", 26, 84, 330, 16, Justification::centredLeft);
+        g.drawText ("DIGITAL REVERBERATION PROCESSOR", 26, 66, 340, 16, Justification::centredLeft);
+        g.drawText ("MODEL PV-6  /  6 ALGORITHMS", 26, 84, 340, 16, Justification::centredLeft);
         // screws
         for (auto pt : { Point<float> (10, 10), Point<float> (getWidth() - 10.0f, 10), Point<float> (10, getHeight() - 10.0f),
                          Point<float> (getWidth() - 10.0f, getHeight() - 10.0f) })
@@ -501,96 +536,148 @@ public:
             g.setColour (col::white); g.setFont (uiFont (11.5f, true));
             g.drawText (s.title, tab, Justification::centred);
         }
-        // labels
+        // captions
+        g.setColour (col::lcdText.withAlpha (0.85f)); g.setFont (uiFont (10.5f, true));
+        for (auto& c : captions) g.drawText (c.title, c.area, Justification::centredLeft);
+        // control labels
         g.setFont (uiFont (10.5f, true));
         for (auto& c : sliders)
         {
             if (! c->slider.isVisible()) continue;
             auto b = c->slider.getBounds();
             g.setColour (col::white);
-            g.drawText (c->label, b.getX() - 10, b.getBottom() + 1, b.getWidth() + 20, 14, Justification::centred);
+            g.drawText (c->label, b.getX() - 12, b.getBottom() + 1, b.getWidth() + 24, 14, Justification::centred);
         }
         for (auto& c : combos)
             if (c->box.isVisible())
                 g.drawText (c->label, c->box.getX(), c->box.getY() - 15, c->box.getWidth(), 14, Justification::centredLeft);
-        // compressor gain-reduction meter
-        auto m = grMeter.toFloat();
-        g.setColour (col::lcdBg); g.fillRoundedRectangle (m, 3.0f);
-        const float gr = jlimit (0.0f, 24.0f, proc.compGr.load());
-        g.setColour (col::led); g.fillRoundedRectangle (m.withHeight (m.getHeight() * gr / 24.0f).reduced (2.0f, 0.0f), 2.0f);
+        // value readouts above every fader
+        for (auto& c : sliders)
+        {
+            if (! c->fader) continue;
+            auto vb = valueBox (c->slider).toFloat();
+            g.setColour (col::lcdBg); g.fillRoundedRectangle (vb, 3.0f);
+            g.setColour (col::lcdText.withAlpha (0.25f)); g.drawRoundedRectangle (vb, 3.0f, 1.0f);
+            g.setColour (col::lcdText); g.setFont (monoFont (10.5f));
+            g.drawText (text (c->slider.getName()), vb, Justification::centred, false);
+        }
+        paintCompMeters (g);
+    }
+
+    void paintCompMeters (Graphics& g)
+    {
+        const float inDb = jlimit (-60.0f, 0.0f, proc.compIn.load());
+        const float grDb = jlimit (0.0f, 24.0f, proc.compGr.load());
+        const float thr  = raw ("cpThr");
+        auto in = inMeter.toFloat(), gr = grMeter.toFloat();
+        g.setColour (col::lcdBg); g.fillRoundedRectangle (in, 3.0f); g.fillRoundedRectangle (gr, 3.0f);
+        // input level (bottom up, -60..0 dB)
+        const float inH = in.getHeight() * (inDb + 60.0f) / 60.0f;
+        g.setColour (col::lcdText); g.fillRect (in.getX() + 3.0f, in.getBottom() - inH, in.getWidth() - 6.0f, inH);
+        // threshold marker
+        const float ty = in.getBottom() - in.getHeight() * (jlimit (-60.0f, 0.0f, thr) + 60.0f) / 60.0f;
+        g.setColour (Colour (0xffffc857)); g.fillRect (in.getX() - 3.0f, ty - 1.0f, in.getWidth() + 6.0f, 2.0f);
+        // gain reduction (top down, 0..24 dB)
+        const float grH = gr.getHeight() * grDb / 24.0f;
+        g.setColour (col::led); g.fillRect (gr.getX() + 3.0f, gr.getY(), gr.getWidth() - 6.0f, grH);
+        // scales
+        g.setFont (monoFont (9.0f));
+        for (int d = 0; d <= 60; d += 10)
+        {
+            const float y = in.getBottom() - in.getHeight() * (60.0f - (float) d) / 60.0f;
+            g.setColour (col::white.withAlpha (0.6f));
+            g.drawText (String (-d), (int) in.getX() - 26, (int) y - 6, 22, 12, Justification::centredRight);
+        }
+        for (int d = 0; d <= 24; d += 6)
+        {
+            const float y = gr.getY() + gr.getHeight() * (float) d / 24.0f;
+            g.setColour (col::white.withAlpha (0.6f));
+            g.drawText (String (-d), (int) gr.getRight() + 3, (int) y - 6, 24, 12, Justification::centredLeft);
+        }
+        // numeric readouts
+        g.setColour (col::lcdText); g.setFont (monoFont (10.5f));
+        g.drawText (inDb <= -59.9f ? String ("-inf") : String (inDb, 1), inMeter.getX() - 14, inMeter.getY() - 18, inMeter.getWidth() + 28, 14, Justification::centred);
+        g.drawText (grDb < 0.05f ? String ("0.0") : String (-grDb, 1), grMeter.getX() - 14, grMeter.getY() - 18, grMeter.getWidth() + 28, 14, Justification::centred);
         g.setColour (col::white); g.setFont (uiFont (10.0f, true));
-        g.drawText ("GR", grMeter.getX() - 6, grMeter.getBottom() + 1, grMeter.getWidth() + 12, 14, Justification::centred);
-        g.setColour (col::lcdText.withAlpha (0.8f));
-        g.drawText ("ANALOG EQ", delayEqLabel, Justification::centredLeft);
+        g.drawText ("IN dB", inMeter.getX() - 14, inMeter.getBottom() + 2, inMeter.getWidth() + 28, 14, Justification::centred);
+        g.drawText ("GR dB", grMeter.getX() - 14, grMeter.getBottom() + 2, grMeter.getWidth() + 28, 14, Justification::centred);
     }
 
     void resized() override
     {
-        sections.clear();
-        display.setBounds (380, 12, 470, 100);
-        // header right: oversampling + output
-        combo ("os").setBounds (880, 46, 90, 24);
-        slider ("out").setBounds (1000, 22, 62, 62);
-        service.setBounds (330, 150, 470, 230);
+        sections.clear(); captions.clear();
+        display.setBounds (390, 12, 480, 100);
+        combo ("os").setBounds (905, 46, 96, 24);
+        slider ("out").setBounds (1040, 22, 62, 62);
+        service.setBounds (380, 150, 470, 230);
 
         // algorithms
-        Rectangle<int> algo (16, 140, 500, 250); addSection (algo, "ALGORITHMS");
+        Rectangle<int> algo (16, 140, 520, 266); addSection (algo, "ALGORITHMS");
         for (int a = 0; a < pv::kNumAlgos; ++a)
         {
-            const int x = algo.getX() + 10 + a * 81;
-            button (algoId ("on", a)).setBounds (x, algo.getY() + 18, 78, 28);
-            slider (algoId ("lv", a)).setBounds (x + 19, algo.getY() + 56, 40, 166);
+            const int x = algo.getX() + 10 + a * 85;
+            button (algoId ("on", a)).setBounds (x, algo.getY() + 18, 80, 28);
+            slider (algoId ("lv", a)).setBounds (x + 20, algo.getY() + 80, 40, 158);
         }
         // reverb faders
-        Rectangle<int> rv (528, 140, 656, 250); addSection (rv, "REVERB");
+        Rectangle<int> rv (548, 140, 676, 266); addSection (rv, "REVERB");
         const char* rvIds[] = { "decay", "size", "predelay", "damping", "tone", "mod", "early", "mix" };
-        for (int i = 0; i < 8; ++i) slider (rvIds[i]).setBounds (rv.getX() + 22 + i * 79, rv.getY() + 22, 40, 200);
+        for (int i = 0; i < 8; ++i) slider (rvIds[i]).setBounds (rv.getX() + 24 + i * 83, rv.getY() + 44, 40, 194);
 
         // reverb EQ
-        Rectangle<int> eq (16, 410, 340, 266); addSection (eq, "REVERB EQ");
+        Rectangle<int> eq (16, 420, 330, 268); addSection (eq, "REVERB EQ");
         for (int b = 0; b < 4; ++b)
         {
-            const int x = eq.getX() + 14 + b * 80;
-            slider (algoId ("eqF", b)).setBounds (x, eq.getY() + 26, 58, 58);
-            slider (algoId ("eqG", b)).setBounds (x, eq.getY() + 126, 58, 58);
+            const int x = eq.getX() + 14 + b * 78;
+            slider (algoId ("eqF", b)).setBounds (x, eq.getY() + 36, 58, 58);
+            slider (algoId ("eqG", b)).setBounds (x, eq.getY() + 146, 58, 58);
         }
         // compressor
-        Rectangle<int> cp (368, 410, 330, 266); addSection (cp, "TAIL COMPRESSOR");
-        button ("cpOn").setBounds (cp.getX() + 14, cp.getY() + 20, 86, 28);
+        Rectangle<int> cp (358, 420, 372, 268); addSection (cp, "TAIL COMPRESSOR");
+        button ("cpOn").setBounds (cp.getX() + 14, cp.getY() + 36, 76, 28);
+        combo ("cpType").setBounds (cp.getX() + 98, cp.getY() + 38, 154, 24);
+        combo ("cpTone").setBounds (cp.getX() + 260, cp.getY() + 38, 98, 24);
         const char* cpIds[] = { "cpThr", "cpRatio", "cpAtk", "cpRel", "cpMakeup", "cpMix" };
         for (int i = 0; i < 6; ++i)
-            slider (cpIds[i]).setBounds (cp.getX() + 14 + (i % 3) * 82, cp.getY() + 62 + (i / 3) * 98, 58, 58);
-        grMeter = { cp.getRight() - 46, cp.getY() + 62, 22, 156 };
+            slider (cpIds[i]).setBounds (cp.getX() + 14 + (i % 3) * 74, cp.getY() + 98 + (i / 3) * 84, 54, 54);
+        inMeter = { cp.getX() + 268, cp.getY() + 98, 16, 136 };
+        grMeter = { cp.getX() + 310, cp.getY() + 98, 16, 136 };
 
         // delay
-        Rectangle<int> dl (710, 410, 474, 266); addSection (dl, "STEREO DELAY");
-        button ("dlOn").setBounds (dl.getX() + 14, dl.getY() + 20, 92, 28);
-        button ("dlSync").setBounds (dl.getX() + 112, dl.getY() + 20, 80, 28);
-        button ("dlPing").setBounds (dl.getX() + 198, dl.getY() + 20, 80, 28);
-        slider ("dlTimeL").setBounds (dl.getX() + 14, dl.getY() + 70, 58, 58);
-        slider ("dlTimeR").setBounds (dl.getX() + 96, dl.getY() + 70, 58, 58);
-        combo ("dlDivL").setBounds (dl.getX() + 14, dl.getY() + 86, 76, 24);
-        combo ("dlDivR").setBounds (dl.getX() + 96, dl.getY() + 86, 76, 24);
-        slider ("dlFb").setBounds (dl.getX() + 178, dl.getY() + 70, 58, 58);
-        slider ("dlMix").setBounds (dl.getX() + 260, dl.getY() + 70, 58, 58);
-        const char* eqIds[] = { "dlLow", "dlMid", "dlMidF", "dlHigh" };
-        for (int i = 0; i < 4; ++i) slider (eqIds[i]).setBounds (dl.getX() + 14 + i * 82, dl.getY() + 168, 58, 58);
-        delayEqLabel = { dl.getX() + 350, dl.getY() + 168, 110, 58 };
+        Rectangle<int> dl (742, 420, 482, 268); addSection (dl, "STEREO DELAY");
+        button ("dlOn").setBounds (dl.getX() + 14, dl.getY() + 22, 92, 28);
+        button ("dlSync").setBounds (dl.getX() + 112, dl.getY() + 22, 80, 28);
+        button ("dlPing").setBounds (dl.getX() + 198, dl.getY() + 22, 80, 28);
+        slider ("dlTimeL").setBounds (dl.getX() + 14, dl.getY() + 66, 54, 54);
+        slider ("dlTimeR").setBounds (dl.getX() + 92, dl.getY() + 66, 54, 54);
+        combo ("dlDivL").setBounds (dl.getX() + 10, dl.getY() + 80, 70, 24);
+        combo ("dlDivR").setBounds (dl.getX() + 86, dl.getY() + 80, 70, 24);
+        slider ("dlFb").setBounds (dl.getX() + 170, dl.getY() + 66, 54, 54);
+        slider ("dlMix").setBounds (dl.getX() + 248, dl.getY() + 66, 54, 54);
+        slider ("dlWidth").setBounds (dl.getX() + 326, dl.getY() + 66, 54, 54);
+        const char* row3[] = { "dlPanL", "dlPanR", "dlLow", "dlMid", "dlMidF", "dlHigh" };
+        for (int i = 0; i < 6; ++i) slider (row3[i]).setBounds (dl.getX() + 14 + i * 76 + (i >= 2 ? 10 : 0), dl.getY() + 172, 54, 54);
+        captions.push_back ({ { dl.getX() + 14, dl.getY() + 152, 140, 14 }, "PAN" });
+        captions.push_back ({ { dl.getX() + 176, dl.getY() + 152, 200, 14 }, "ANALOG EQ" });
     }
 
 private:
-    struct SliderCtl { Slider slider; String label; std::unique_ptr<APVTS::SliderAttachment> att; };
+    struct SliderCtl { Slider slider; String label; bool fader = false; std::unique_ptr<APVTS::SliderAttachment> att; };
     struct ButtonCtl { TextButton button; std::unique_ptr<APVTS::ButtonAttachment> att; };
     struct ComboCtl  { ComboBox box; String label; std::unique_ptr<APVTS::ComboBoxAttachment> att; };
     struct Section   { Rectangle<int> area; String title; };
+
+    static Rectangle<int> valueBox (const Slider& s) { return { s.getX() - 16, s.getY() - 24, s.getWidth() + 32, 17 }; }
 
     void addSlider (const String& id, const String& label, bool fader)
     {
         auto c = std::make_unique<SliderCtl>();
         c->slider.setName (id);
+        c->fader = fader;
         c->slider.setSliderStyle (fader ? Slider::LinearVertical : Slider::RotaryHorizontalVerticalDrag);
         c->slider.setTextBoxStyle (Slider::NoTextBox, false, 0, 0);
         c->slider.setPopupDisplayEnabled (true, true, this);
+        c->slider.setMouseDragSensitivity (320);
         c->label = label;
         addAndMakeVisible (c->slider);
         c->att = std::make_unique<APVTS::SliderAttachment> (proc.apvts, id, c->slider);
@@ -608,12 +695,12 @@ private:
         c->att = std::make_unique<APVTS::ButtonAttachment> (proc.apvts, id, c->button);
         buttons.push_back (std::move (c));
     }
-    void addCombo (const String& id, const StringArray& items)
+    void addCombo (const String& id, const StringArray& items, const String& label)
     {
         auto c = std::make_unique<ComboCtl>();
         c->box.setName (id);
         c->box.addItemList (items, 1);
-        c->label = id == "os" ? "OVERSAMPLING" : (id == "dlDivL" ? "DIV L" : "DIV R");
+        c->label = label;
         addAndMakeVisible (c->box);
         c->att = std::make_unique<APVTS::ComboBoxAttachment> (proc.apvts, id, c->box);
         combos.push_back (std::move (c));
@@ -624,9 +711,14 @@ private:
     void addSection (Rectangle<int> r, const String& t) { sections.push_back ({ r, t }); }
 
     float raw (const String& id) { auto* v = proc.apvts.getRawParameterValue (id); return v != nullptr ? v->load() : 0.0f; }
+    static String withUnit (RangedAudioParameter& p)
+    {
+        const auto l = p.getLabel();
+        return p.getCurrentValueAsText() + (l.isEmpty() || l == "%" || l == "x" ? "" : " ") + l;
+    }
     String text (const String& id)
     {
-        if (auto* prm = proc.apvts.getParameter (id)) return prm->getCurrentValueAsText() + (prm->getLabel() == "%" || prm->getLabel() == "x" ? "" : " ") + prm->getLabel();
+        if (auto* prm = proc.apvts.getParameter (id)) return withUnit (*prm);
         return {};
     }
 
@@ -639,24 +731,28 @@ private:
 
         // last-touched parameter
         auto& params = proc.getParameters();
+        bool changed = false;
         for (int i = 0; i < params.size() && i < lastValues.size(); ++i)
         {
             const float v = params[i]->getValue();
-            if (v != lastValues[i]) { lastValues.set (i, v); lastTouched = i; }
+            if (v != lastValues[i]) { lastValues.set (i, v); lastTouched = i; changed = true; }
         }
         StringArray algos;
         for (int a = 0; a < pv::kNumAlgos; ++a) if (raw (algoId ("on", a)) > 0.5f) algos.add (kAlgoNames[a]);
         StringArray l;
         l.add (algos.isEmpty() ? "-- NO ALGORITHM --" : algos.joinIntoString (" + "));
-        l.add ("DECAY " + text ("decay") + "   PRE " + text ("predelay") + "   OS " + osNames()[(int) raw ("os")]);
+        l.add ("DECAY " + text ("decay") + "   PRE " + text ("predelay") + "   OS " + osNames()[(int) raw ("os")]
+               + "   DSP " + String (proc.dspLoad.load(), 1) + "%");
         l.add ("SIZE " + text ("size") + "   MIX " + text ("mix") + "   DELAY MIX " + text ("dlMix"));
         if (lastTouched >= 0 && lastTouched < params.size())
             if (auto* rp = dynamic_cast<RangedAudioParameter*> (params[lastTouched]))
-                l.add ("> " + rp->getName (40).toUpperCase() + ": " + rp->getCurrentValueAsText() + (rp->getLabel() == "%" || rp->getLabel() == "x" ? "" : " ") + rp->getLabel());
+                l.add ("> " + rp->getName (40).toUpperCase() + ": " + withUnit (*rp));
         display.lines = l;
         display.badgeOn[0] = raw ("cpOn") > 0.5f; display.badgeOn[1] = raw ("dlOn") > 0.5f; display.badgeOn[2] = raw ("trOn") > 0.5f;
         display.repaint();
-        repaint (grMeter.expanded (4, 20));
+        repaint (inMeter.getUnion (grMeter).expanded (34, 22));
+        if (changed)
+            for (auto& c : sliders) if (c->fader) repaint (valueBox (c->slider));
     }
 
     PlateVerbProcessor& proc;
@@ -666,8 +762,8 @@ private:
     std::vector<std::unique_ptr<SliderCtl>> sliders;
     std::vector<std::unique_ptr<ButtonCtl>> buttons;
     std::vector<std::unique_ptr<ComboCtl>> combos;
-    std::vector<Section> sections;
-    Rectangle<int> grMeter, delayEqLabel;
+    std::vector<Section> sections, captions;
+    Rectangle<int> inMeter, grMeter;
     Array<float> lastValues; int lastTouched = -1;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PlateVerbEditor)
