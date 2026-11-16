@@ -549,6 +549,7 @@ public:
         addSlider ("mix", "MIX", Fader, false);
         addCombo ("matA", {}, "MATERIAL A", true);
         addCombo ("matB", {}, "MATERIAL B", true);
+        addCombo ("conv", kConverterNames, "CONVERTER", true);
         addSlider ("matMix", "BLEND A - B", Horizontal, true);
         const char* bn[] = { "LOW", "LO-MID", "HI-MID", "HIGH" };
         for (int b = 0; b < 4; ++b) { addSlider (nid ("eqF", b), String (bn[b]) + " HZ", Knob, true); addSlider (nid ("eqG", b), String (bn[b]) + " dB", Knob, true); }
@@ -738,9 +739,10 @@ public:
             slider (sid (s, "lv")).setBounds (x + 19, slotArea.getY() + 82, 38, 186);
         }
         Rectangle<int> rv (428, 398, 956, 296); addSection (rv, "REVERB", true);
-        comboBase ("matA").setBounds (rv.getX() + 14, rv.getY() + 34, 270, 28);
-        sliderBase ("matMix").setBounds (rv.getX() + 300, rv.getY() + 34, 230, 28);
-        comboBase ("matB").setBounds (rv.getX() + 650, rv.getY() + 34, 270, 28);
+        comboBase ("matA").setBounds (rv.getX() + 14, rv.getY() + 34, 232, 28);
+        sliderBase ("matMix").setBounds (rv.getX() + 260, rv.getY() + 34, 150, 28);
+        comboBase ("matB").setBounds (rv.getX() + 524, rv.getY() + 34, 232, 28);
+        comboBase ("conv").setBounds (rv.getX() + 770, rv.getY() + 34, 172, 28);
         const char* rvIds[] = { "decay", "lowMult", "highMult", "size", "predelay", "build", "early", "diff", "damping", "tone", "hiCut", "mod", "inWidth", "dirt", "mix" };
         for (int i = 0; i < 15; ++i) sliderBase (rvIds[i]).setBounds (rv.getX() + 16 + i * 62, rv.getY() + 106, 38, 160);
         // row C (collapsible): EQ, compressor, delay
