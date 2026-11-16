@@ -27,6 +27,22 @@ struct Line {
     void init (int maxLen) { int n = 1; while (n < maxLen + 8) n <<= 1; b.assign ((size_t) n, 0.0f); mask = n - 1; w = 0; }
     void clear() { std::fill (b.begin(), b.end(), 0.0f); w = 0; }
     inline void push (float x) { b[(size_t) w] = x; w = (w + 1) & mask; }
+    // zero only the n most recent samples (what can still be read at the current rate), not the whole buffer
+    void clearRange (int start, int n) {          // zero n samples starting at ring index 'start'
+        const int size = (int) b.size();
+        n = std::min (std::max (n, 0), size); start &= mask;
+        const int first = std::min (n, size - start);
+        std::fill (b.begin() + start, b.begin() + start + first, 0.0f);
+        std::fill (b.begin(), b.begin() + (n - first), 0.0f);
+    }
+    void clearRecent (int n) {
+        const int size = (int) b.size();
+        n = std::min (std::max (n, 0), size);
+        const int start = (w - n) & mask;
+        const int first = std::min (n, size - start);
+        std::fill (b.begin() + start, b.begin() + start + first, 0.0f);
+        std::fill (b.begin(), b.begin() + (n - first), 0.0f);
+    }
     // sample written d samples ago (d >= 1), linear interpolation
     inline float read (float d) const {
         float r = (float) w - d; float fl = std::floor (r); int i = (int) fl; float f = r - fl;
@@ -92,6 +108,10 @@ struct Resampler {
 
     static float bessel0 (float x) { float s = 1, t = 1; for (int k = 1; k < 25; ++k) { t *= (x / (2 * k)) * (x / (2 * k)); s += t; } return s; }
 
+    void reserve (int maxFactor) {
+        const size_t t = (size_t) (maxFactor * (K + 1));
+        h.reserve (t); hd.reserve (t); upHist.reserve ((size_t) (K + 1)); dnBuf.reserve (2 * t);
+    }
     void design (int factor) {
         // Tdesign = N*K + 1 symmetric taps, so up+down delay is exactly K base-rate samples.
         N = std::max (1, factor); T = N * (K + 1);
@@ -149,7 +169,11 @@ struct PlateAlgo {
         apR1.init (sz (940)); dR1.init (sz (4217)); apR2.init (sz (2656)); dR2.init (sz (3163));
     }
     void clear() {
-        for (Line* l : { &d1, &d2, &d3, &d4, &apL1, &dL1, &apL2, &dL2, &apR1, &dR1, &apR2, &dR2 }) l->clear();
+        const float sm = fs / 29761.0f * kMaxSize;
+        auto sz = [sm] (float n) { return (int) std::ceil (n * sm) + 64; };
+        d1.clearRecent (sz (142)); d2.clearRecent (sz (107)); d3.clearRecent (sz (379)); d4.clearRecent (sz (277));
+        apL1.clearRecent (sz (704)); dL1.clearRecent (sz (4453)); apL2.clearRecent (sz (1800)); dL2.clearRecent (sz (3720));
+        apR1.clearRecent (sz (940)); dR1.clearRecent (sz (4217)); apR2.clearRecent (sz (2656)); dR2.clearRecent (sz (3163));
         lpL = lpR = tankL = tankR = phase = 0;
     }
     // in: mono input; rt: seconds; damp: one-pole coefficient (1 = bright)
@@ -230,13 +254,17 @@ struct FdnAlgo {
             tapMs.push_back (c.slapMs1); tapGL.push_back (c.slapGain); tapGR.push_back (c.slapGain * 0.5f);
             tapMs.push_back (c.slapMs2); tapGL.push_back (c.slapGain * 0.45f); tapGR.push_back (c.slapGain * 0.8f);
         }
-        float maxTap = 0; for (float m : tapMs) maxTap = std::max (maxTap, m);
+        maxTap = 0; for (float m : tapMs) maxTap = std::max (maxTap, m);
         er.init ((int) (maxTap * kMaxSize * maxFs * 0.001f) + 16);
     }
-    void clear() {
-        for (auto& l : lines) l.clear();
-        for (int i = 0; i < 4; ++i) { difL[i].clear(); difR[i].clear(); }
-        er.clear(); for (auto& d : damp) d.reset(); phase = hpL = hpR = 0;
+    float maxTap = 0;
+    void clear() {                      // only the span readable at the current rate
+        const FdnConfig& c = fdnConfig (algo);
+        const float k = fs * 0.001f * c.size * kMaxSize;
+        for (int i = 0; i < L; ++i) lines[i].clearRecent ((int) (lenMs[i] * k + c.modMs * 2 * fs * 0.001f) + 16);
+        for (int i = 0; i < 4; ++i) { difL[i].clearRecent ((int) (difMs[i] * 1.07f * k) + 16); difR[i].clearRecent ((int) (difMs[i] * 1.07f * k) + 16); }
+        er.clearRecent ((int) (maxTap * kMaxSize * fs * 0.001f) + 16);
+        for (auto& d : damp) d.reset(); phase = hpL = hpR = 0;
     }
 
     float k = 1, kEr = 1, gain[L] = {}, len[L] = {};
@@ -393,7 +421,23 @@ struct StereoDelay {
     Line l, r; float curL = 1, curR = 1, fs = 48000, fbStateL = 0, fbStateR = 0;
     Biquad lo[2], mi[2], hi[2], hp[2], lp[2];
     void init (float maxFs) { l.init ((int) (kMaxDelaySec * maxFs) + 16); r.init ((int) (kMaxDelaySec * maxFs) + 16); }
-    void clear() { l.clear(); r.clear(); for (int c = 0; c < 2; ++c) { lo[c].reset(); mi[c].reset(); hi[c].reset(); hp[c].reset(); lp[c].reset(); } fbStateL = fbStateR = 0; }
+    // After a rate change: clear what the current delay time can read right away, and the rest
+    // of the old audio in 64k-sample chunks over the next blocks (no CPU spike).
+    int pendStart = 0, pendCount = 0;
+    void clearSmart (float needSamples) {
+        const int total = (int) (kMaxDelaySec * fs) + 16;
+        const int now = std::min (total, (int) needSamples + 4096);
+        l.clearRecent (now); r.clearRecent (now);
+        pendCount = total - now; pendStart = (l.w - total) & l.mask;
+        for (int c = 0; c < 2; ++c) { lo[c].reset(); mi[c].reset(); hi[c].reset(); hp[c].reset(); lp[c].reset(); }
+    }
+    void service() {
+        if (pendCount <= 0) return;
+        const int c = std::min (pendCount, 65536);
+        l.clearRange (pendStart, c); r.clearRange (pendStart, c);
+        pendStart = (pendStart + c) & l.mask; pendCount -= c;
+    }
+    void clear() { const int n = (int) (kMaxDelaySec * fs) + 16; l.clearRecent (n); r.clearRecent (n); for (int c = 0; c < 2; ++c) { lo[c].reset(); mi[c].reset(); hi[c].reset(); hp[c].reset(); lp[c].reset(); } fbStateL = fbStateR = 0; }
     void setEq (float lowDb, float midDb, float midHz, float highDb) {
         for (int c = 0; c < 2; ++c) {
             lo[c].lowShelf (fs, 140.0f, lowDb, 0.5f);
@@ -484,6 +528,7 @@ public:
         for (int a = 1; a < kNumAlgos; ++a) fdn[a].init (a, maxFs);
         preL.init ((int) (0.26f * maxFs) + 16); preR.init ((int) (0.26f * maxFs) + 16);
         delay.init (maxFs);
+        for (int c = 0; c < 2; ++c) { up[c].reserve (kMaxOS); dn[c].reserve (kMaxOS); }
         setOversampling (1, true);
     }
     void setOversampling (int n, bool force = false) {
@@ -491,12 +536,13 @@ public:
         if (n == os && ! force) return;
         os = n; fs = baseFs * (float) os;
         for (int c = 0; c < 2; ++c) { up[c].design (os); dn[c].design (os); }
-        plate.fs = fs; plate.clear();
-        for (int a = 1; a < kNumAlgos; ++a) { fdn[a].fs = fs; fdn[a].clear(); }
-        preL.clear(); preR.clear(); tone[0].reset(); tone[1].reset();
+        plate.fs = fs;
+        for (int a = 1; a < kNumAlgos; ++a) fdn[a].fs = fs;
+        for (int a = 0; a < kNumAlgos; ++a) algoDirty[a] = true;         // cleared when next used, not all at once
+        preL.clearRecent ((int) (0.26f * fs) + 16); preR.clearRecent ((int) (0.26f * fs) + 16); tone[0].reset(); tone[1].reset();
         for (int c = 0; c < 2; ++c) for (int b = 0; b < 4; ++b) eq[c][b].reset();
         comp.fs = fs; comp.reset();
-        delay.fs = fs; delay.clear(); delay.curL = delay.curR = 0; firstBlock = true;
+        delay.fs = fs; delayDirty = true; delay.curL = delay.curR = 0; firstBlock = true;
         tr.fs = fs; tr.clear();
     }
     int latency() const { return up[0].latencyBase(); }
@@ -524,6 +570,8 @@ public:
         const float tL = clampf (p.delayMsL * 0.001f * fs, 1.0f, kMaxDelaySec * fs - 4);
         const float tR = clampf (p.delayMsR * 0.001f * fs, 1.0f, kMaxDelaySec * fs - 4);
         if (firstBlock) { delay.curL = tL; delay.curR = tR; firstBlock = false; }
+        if (delayDirty && (p.delayOn || sDl > 1e-4f)) { delay.clearSmart (std::max (tL, tR)); delayDirty = false; }
+        delay.service();
         const float smA = 1.0f - std::exp (-1.0f / (0.03f * fs));      // ~30 ms parameter smoothing
         // delay pan (equal power) for each delay channel
         auto panGains = [] (float pan, float& gl, float& gr) { float a = (clampf (pan, -1, 1) + 1) * 0.25f * kPi; gl = std::cos (a); gr = std::sin (a); };
@@ -550,9 +598,10 @@ public:
                 for (int a = 0; a < kNumAlgos; ++a) {
                     sAlgo[a] += smA * (tgtAlgo[a] - sAlgo[a]);
                     if (! p.algoOn[a] && sAlgo[a] < 1e-4f) {
-                        if (running[a]) { running[a] = false; if (a == Plate) plate.clear(); else fdn[a].clear(); }
+                        if (running[a]) { running[a] = false; algoDirty[a] = true; }   // cleared when switched back on
                         continue;
                     }
+                    if (algoDirty[a]) { if (a == Plate) plate.clear(); else fdn[a].clear(); algoDirty[a] = false; }
                     running[a] = true;
                     float oL, oR;
                     if (a == Plate) plate.process (0.5f * (pl + pr), plateDampA, p.mod, oL, oR);
@@ -589,7 +638,7 @@ private:
     Line preL, preR; OnePole tone[2];
     Biquad eq[2][4]; Compressor comp; StereoDelay delay; Transformer tr;
     float sRv = 0.3f, sDl = 0, sOut = 1, sAlgo[kNumAlgos] = { 0, 0, 0, 0, 0, 0 };
-    bool running[kNumAlgos] = {};
+    bool running[kNumAlgos] = {}, algoDirty[kNumAlgos] = {}, delayDirty = true;
 };
 
 } // namespace pv
