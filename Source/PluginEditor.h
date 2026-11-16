@@ -604,6 +604,8 @@ public:
         g.drawText ("P L A T E V E R B", titleArea.withHeight (28), Justification::centredLeft);
         g.setColour (col::lcdText.withAlpha (0.85f)); g.setFont (uiFont (11.0f, true));
         g.drawText ("DIGITAL REVERBERATION PROCESSOR  /  PV-5", titleArea.getX() + 2, 34, 320, 14, Justification::centredLeft);
+        g.setColour (shownDsp > 70.0f ? Colour (0xffff8a65) : col::lcdText); g.setFont (uiFont (13.0f, true));
+        g.drawText ("DSP " + String (shownDsp, 1) + " %", dspArea, Justification::centredLeft);
         g.setColour (col::white); g.setFont (uiFont (12.5f, true));
         g.drawText ("PRESET", presetBox.getX() - 64, presetBox.getY(), 58, presetBox.getHeight(), Justification::centredRight);
         g.drawText ("OVERSAMPLING", combo ("os").getX() - 112, combo ("os").getY(), 106, combo ("os").getHeight(), Justification::centredRight);
@@ -1037,6 +1039,12 @@ private:
     {
         const int req = proc.presetSlotRequest.exchange (-1);
         if (req >= 0 && req < pv::kNumSlots) { bindSlot (req); buildPresetMenu(); }
+        if (++dspTick >= 10)    // update the DSP readout 2.5 times a second so it can be read
+        {
+            dspTick = 0;
+            const float d = std::round (proc.dspLoad.load() * 10.0f) / 10.0f;
+            if (d != shownDsp) { shownDsp = d; repaint (dspArea); }
+        }
 
         if (! collapsed)
         {
@@ -1092,7 +1100,8 @@ private:
     std::vector<std::unique_ptr<ButtonCtl>> buttons;
     std::vector<std::unique_ptr<ComboCtl>> combos;
     std::vector<Section> sections, captions;
-    Rectangle<int> inMeter, grMeter, slotArea, irInfoBox, titleArea;
+    Rectangle<int> inMeter, grMeter, slotArea, irInfoBox, titleArea, dspArea { 214, 10, 104, 22 };
+    float shownDsp = 0.0f; int dspTick = 0;
     Array<float> lastValues; int editSlot = 0, lastWaveVersion = -1; bool collapsed = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainPanel)
