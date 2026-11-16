@@ -348,8 +348,9 @@ struct Compressor {
         envOs = follow (envOs, gr, aOA, aSlow);
         return 0.6f * envOf + 0.4f * envOs;
     }
-    inline void process (float& L, float& R, int type, bool vintage, float thr, float ratio, float makeup, float mix) {
-        const float lvl = meter (L, R);
+    // kL/kR = key (detector) signal: the reverb itself, or the dry input when ducking.
+    inline void process (float& L, float& R, float kL, float kR, bool keyIsDry, int type, bool vintage, float thr, float ratio, float makeup, float mix) {
+        const float lvl = meter (kL, kR);
         const float pkDb = 20.0f * std::log10 (lvl + 1e-9f);
         float yL = L, yR = R, gr = 0;
         if (type == CompVCA) {
@@ -366,7 +367,7 @@ struct Compressor {
             if (vintage) { float d = 1.2f + 0.12f * envF; yL = warmSat (yL, d, 0.12f); yR = warmSat (yR, d, 0.12f); }
         }
         if (type == CompOpto || type == CompFetOpto) {
-            float l2 = std::max (std::fabs (yL), std::fabs (yR));
+            float l2 = keyIsDry ? lvl : std::max (std::fabs (yL), std::fabs (yR));
             rms = aRms * rms + (1 - aRms) * l2 * l2;                    // opto cell reacts to average level
             const float db = 10.0f * std::log10 (rms + 1e-12f) + 3.0f;
             float g = stepOpto (db, thr, type == CompFetOpto ? 3.0f : ratio);
@@ -467,7 +468,7 @@ struct Params {
     float decaySec = 2.5f, size = 1.0f, predelayMs = 10, damping = 0.35f, tone = 0.75f, mod = 0.5f, early = 0.7f;
     float rvMix = 0.3f;
     float eqF[4] = { 100, 400, 2500, 8000 }, eqG[4] = { 0, 0, 0, 0 };
-    bool compOn = false; int compType = 0; bool compVintage = false; float compThr = -30, compRatio = 4, compAtk = 10, compRel = 200, compMakeup = 0, compMix = 1;
+    bool compOn = false; bool compDuck = false; int compType = 0; bool compVintage = false; float compThr = -30, compRatio = 4, compAtk = 10, compRel = 200, compMakeup = 0, compMix = 1;
     bool delayOn = false; float delayMsL = 375, delayMsR = 500, delayFb = 0.35f, delayMix = 0.0f;
     bool pingPong = false; float dlPanL = -1, dlPanR = 1, dlWidth = 1; float dlLowDb = 0, dlMidDb = 0, dlMidHz = 1000, dlHighDb = 0;
     bool trOn = false; int trModel = 0; float trFreq = 80, trAmount = 0.3f;
@@ -559,8 +560,9 @@ public:
                     wL += oL * sAlgo[a]; wR += oR * sAlgo[a];
                 }
                 for (int b = 0; b < 4; ++b) { wL = eq[0][b].process (wL); wR = eq[1][b].process (wR); }
-                if (p.compOn) comp.process (wL, wR, p.compType, p.compVintage, p.compThr, p.compRatio, p.compMakeup, p.compMix);
-                else comp.meter (wL, wR);
+                const float kL = p.compDuck ? xL : wL, kR = p.compDuck ? xR : wR;     // ducking listens to the dry input
+                if (p.compOn) comp.process (wL, wR, kL, kR, p.compDuck, p.compType, p.compVintage, p.compThr, p.compRatio, p.compMakeup, p.compMix);
+                else comp.meter (kL, kR);
                 // ---- delay
                 float dL = 0, dR = 0;
                 if (p.delayOn || sDl > 1e-4f) {
