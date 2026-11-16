@@ -1,7 +1,8 @@
 // Built-in presets, fitted to measured impulse responses (decay per band, tone, onset, echo density, stereo spread).
 // Only these derived settings are stored here - no impulse response data.
 #pragma once
-struct PresetDef { const char* group; const char* name; int slot; float decay, low, high, size, pre, tone, damp, early, build, width, mod, diff; float eq[4]; };
+struct PresetDef { const char* group; const char* name; int slot; float decay, low, high, size, pre, tone, damp, early, build, width, mod, diff; float eq[4];
+                   float hiCut = 20000.0f; };     // steep high cut (Hz); 20 kHz = off
 static const PresetDef kPresets[] = {
     { "Lexicon 224 Plates", "CD Plate A V1", 0, 1.487f, 1.156f, 0.851f, 1.00f, 6.52f, 0.786f, 0.00f, 0.60f, 15.0f, 0.25f, 0.40f, 0.80f, { -2.54f, -0.50f, -0.52f, 1.99f } },
     { "Lexicon 224 Plates", "CD Plate B V1", 0, 1.440f, 1.044f, 0.767f, 1.00f, 1.19f, 0.779f, 0.00f, 0.80f, 15.0f, 1.00f, 0.40f, 1.00f, { 0.93f, 0.20f, 0.11f, 1.11f } },
@@ -147,6 +148,13 @@ static const PresetDef kPresets[] = {
     { "224XL Dark Chamber", "Dark Chamber 16", 2, 0.745f, 1.290f, 0.469f, 1.00f, 18.62f, 0.754f, 0.00f, 0.70f, 10.0f, 1.00f, 0.40f, 0.50f, { 6.06f, 3.90f, 1.81f, -2.25f } },
     { "Lexicon 480L Chambers", "Large Chamber", 2, 0.794f, 1.279f, 1.014f, 1.00f, 0.00f, 0.855f, 0.00f, 0.30f, 3.0f, 1.00f, 0.40f, 0.50f, { 1.61f, -0.78f, -0.92f, -6.20f } },
     { "Lexicon 480L Chambers", "Large Chamber 2", 2, 0.867f, 1.156f, 0.665f, 1.00f, 0.00f, 0.948f, 0.00f, 0.50f, 6.0f, 1.00f, 0.40f, 0.35f, { 6.12f, 2.28f, 0.56f, -1.04f } },
+    { "EMT 250", "T 0.4 s  Pre 22 ms  Low 1.5  High 0.5", 2, 0.365f, 1.110f, 1.070f, 1.00f, 22.00f, 1.000f, 0.00f, 0.50f, 3.0f, 1.00f, 0.40f, 0.35f, { -1.51f, -2.26f, -2.46f, -6.38f }, 10800.0f },
+    { "EMT 250", "T 0.8 s  Pre 18 ms  Low 0.5  High 0.9", 3, 0.769f, 0.581f, 0.806f, 1.00f, 18.00f, 1.000f, 0.00f, 1.25f, 15.0f, 1.00f, 0.40f, 0.50f, { 0.24f, -0.39f, -0.32f, -4.89f }, 10800.0f },
+    { "EMT 250", "T 2.2 s  Pre 120 ms  Low 0.5  High 0", 3, 2.211f, 0.444f, 1.069f, 1.00f, 120.00f, 1.000f, 0.00f, 1.25f, 15.0f, 1.00f, 0.40f, 0.50f, { 0.60f, 0.47f, -0.22f, -5.15f }, 10800.0f },
+    { "EMT 250", "T 2.2 s  Pre 60 ms  Low 1.5  High 0", 2, 2.294f, 1.489f, 0.691f, 1.00f, 60.00f, 1.000f, 0.00f, 0.50f, 15.0f, 1.00f, 0.40f, 0.35f, { 4.73f, 2.06f, 0.69f, -2.50f }, 10800.0f },
+    { "EMT 250", "T 2.5 s  Pre 38 ms  Low 1.5  High 0", 2, 2.563f, 1.496f, 0.584f, 1.00f, 38.00f, 1.000f, 0.00f, 0.50f, 3.0f, 1.00f, 0.40f, 0.50f, { -0.62f, -0.20f, -1.47f, -4.93f }, 10800.0f },
+    { "EMT 250", "T 2.8 s  Pre 34 ms  Low 1.5  High 0", 2, 2.816f, 1.479f, 0.279f, 1.00f, 34.00f, 1.000f, 0.00f, 0.50f, 3.0f, 1.00f, 0.40f, 0.35f, { -1.44f, -1.22f, -1.88f, -5.62f }, 10800.0f },
+    { "EMT 250", "T 4.0 s  Pre 110 ms  Low 1.8  High 0", 2, 4.133f, 1.634f, 0.308f, 1.00f, 110.00f, 1.000f, 0.00f, 0.50f, 3.0f, 1.00f, 0.40f, 0.50f, { -1.03f, -0.17f, -1.25f, -4.86f }, 10800.0f },
     { "Lexicon 480L Chambers", "Large Chamber Bonus 1", 2, 1.321f, 1.167f, 0.936f, 1.00f, 0.00f, 0.716f, 0.00f, 0.30f, 3.0f, 1.00f, 0.40f, 0.50f, { -0.39f, -0.94f, -2.15f, -11.28f } },
     { "Lexicon 480L Chambers", "Large Chamber Bonus 2", 2, 1.659f, 1.024f, 0.872f, 1.00f, 0.00f, 0.600f, 0.00f, 0.30f, 6.0f, 1.00f, 0.40f, 0.50f, { 3.23f, 2.23f, 0.07f, -6.42f } },
     { "Lexicon 480L Chambers", "Small And Bright", 2, 0.556f, 2.447f, 0.931f, 1.00f, 0.00f, 0.877f, 0.00f, 0.30f, 3.0f, 1.00f, 0.40f, 0.65f, { -0.36f, -2.05f, -0.55f, -1.91f } },
