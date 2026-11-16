@@ -18,6 +18,13 @@ static StringArray trNames()  { StringArray s; for (int i = 0; i < pv::kNumTrans
 
 static StringArray compTypeNames() { return { "Clean VCA", "1176-style FET", "LA-2A-style Opto", "1176 + LA-2A" }; }
 
+// seconds with enough decimals to read short times: 0.000020 s, 0.0080 s, 0.50 s, 1.10 s
+static String fmtSeconds (float v)
+{
+    const int d = jlimit (2, 6, (int) std::ceil (-std::log10 (jmax (1.0e-6f, v))) + 1);
+    return String (v, d) + " s";
+}
+
 static String algoId (const char* prefix, int a) { return String (prefix) + String (a); }
 
 // ============================================================================ processor
@@ -63,6 +70,7 @@ public:
             .withStringFromValueFunction ([pct, pan, decimals] (float v, int)
             {
                 if (pan) { const int p = roundToInt (v * 100.0f); return p == 0 ? String ("C") : (p < 0 ? "L" + String (-p) : "R" + String (p)); }
+                if (decimals < 0) return fmtSeconds (v).dropLastCharacters (2);
                 return pct ? String (roundToInt (v * 100.0f)) : String (v, decimals);
             })
             .withValueFromStringFunction ([pct, pan] (const String& t)
@@ -111,8 +119,8 @@ public:
         l.add (cp ("cpTone", "Comp Tone", StringArray { "Clean", "Vintage" }, 0));
         l.add (fp ("cpThr", "Comp Threshold", -70.0f, 0.0f, -30.0f, -1.0f, "dB", 1));
         l.add (fp ("cpRatio", "Comp Ratio", 1.0f, 20.0f, 4.0f, 4.0f, ":1", 1));
-        l.add (fp ("cpAtk", "Comp Attack", 0.05f, 300.0f, 10.0f, kLog, "ms", 2));
-        l.add (fp ("cpRel", "Comp Release", 5.0f, 5000.0f, 250.0f, kLog, "ms"));
+        l.add (fp ("cpAtk", "Comp Attack", 0.00002f, 0.3f, 0.01f, kLog, "s", -1));
+        l.add (fp ("cpRel", "Comp Release", 0.02f, 10.0f, 0.5f, kLog, "s", -1));
         l.add (fp ("cpMakeup", "Comp Makeup", 0.0f, 24.0f, 0.0f, -1.0f, "dB", 1));
         l.add (fp ("cpMix", "Comp Mix", 0.0f, 1.0f, 1.0f));
         l.add (bp ("dlOn", "Delay On", false));
@@ -182,8 +190,8 @@ public:
         prm.decaySec = f (pDecay); prm.size = f (pSize); prm.predelayMs = f (pPre); prm.damping = f (pDamp);
         prm.tone = f (pTone); prm.mod = f (pMod); prm.early = f (pEarly); prm.rvMix = f (pMix);
         for (int b = 0; b < 4; ++b) { prm.eqF[b] = f (pEqF[b]); prm.eqG[b] = f (pEqG[b]); }
-        prm.compOn = on (pCpOn); prm.compThr = f (pCpThr); prm.compRatio = f (pCpRatio); prm.compAtk = f (pCpAtk);
-        prm.compRel = f (pCpRel); prm.compMakeup = f (pCpMakeup); prm.compMix = f (pCpMix);
+        prm.compOn = on (pCpOn); prm.compThr = f (pCpThr); prm.compRatio = f (pCpRatio); prm.compAtk = f (pCpAtk) * 1000.0f;
+        prm.compRel = f (pCpRel) * 1000.0f; prm.compMakeup = f (pCpMakeup); prm.compMix = f (pCpMix);
         prm.compType = jlimit (0, 3, (int) f (pCpType)); prm.compVintage = f (pCpTone) > 0.5f;
         prm.dlPanL = f (pDlPanL); prm.dlPanR = f (pDlPanR); prm.dlWidth = f (pDlWidth);
         prm.delayOn = on (pDlOn); prm.pingPong = on (pDlPing); prm.delayFb = f (pDlFb); prm.delayMix = f (pDlMix);
@@ -499,7 +507,7 @@ public:
         addChildComponent (service);
 
         for (auto* prm : proc.getParameters()) lastValues.add (prm->getValue());
-        setSize (1240, 700);
+        setSize (1240, 720);
         startTimerHz (25);
     }
     ~PlateVerbEditor() override { stopTimer(); setLookAndFeel (nullptr); }
@@ -560,6 +568,18 @@ public:
             g.setColour (col::lcdText.withAlpha (0.25f)); g.drawRoundedRectangle (vb, 3.0f, 1.0f);
             g.setColour (col::lcdText); g.setFont (monoFont (10.5f));
             g.drawText (text (c->slider.getName()), vb, Justification::centred, false);
+        }
+        // compressor readouts: the value each type actually uses
+        for (auto* id : { "cpThr", "cpRatio", "cpAtk", "cpRel", "cpMakeup", "cpMix" })
+        {
+            auto& sl = slider (id);
+            auto vb = compBox (sl).toFloat();
+            bool limited = false;
+            const String t = compValueText (id, limited);
+            g.setColour (col::lcdBg); g.fillRoundedRectangle (vb, 3.0f);
+            g.setColour (col::lcdText.withAlpha (0.25f)); g.drawRoundedRectangle (vb, 3.0f, 1.0f);
+            g.setColour (limited ? Colour (0xffffc857) : col::lcdText); g.setFont (monoFont (10.0f));
+            g.drawText (t, vb, Justification::centred, false);
         }
         paintCompMeters (g);
     }
@@ -625,7 +645,7 @@ public:
         for (int i = 0; i < 8; ++i) slider (rvIds[i]).setBounds (rv.getX() + 24 + i * 83, rv.getY() + 44, 40, 194);
 
         // reverb EQ
-        Rectangle<int> eq (16, 420, 330, 268); addSection (eq, "REVERB EQ");
+        Rectangle<int> eq (16, 420, 330, 288); addSection (eq, "REVERB EQ");
         for (int b = 0; b < 4; ++b)
         {
             const int x = eq.getX() + 14 + b * 78;
@@ -633,18 +653,18 @@ public:
             slider (algoId ("eqG", b)).setBounds (x, eq.getY() + 146, 58, 58);
         }
         // compressor
-        Rectangle<int> cp (358, 420, 372, 268); addSection (cp, "TAIL COMPRESSOR");
+        Rectangle<int> cp (358, 420, 372, 288); addSection (cp, "TAIL COMPRESSOR");
         button ("cpOn").setBounds (cp.getX() + 14, cp.getY() + 36, 76, 28);
         combo ("cpType").setBounds (cp.getX() + 98, cp.getY() + 38, 154, 24);
         combo ("cpTone").setBounds (cp.getX() + 260, cp.getY() + 38, 98, 24);
         const char* cpIds[] = { "cpThr", "cpRatio", "cpAtk", "cpRel", "cpMakeup", "cpMix" };
         for (int i = 0; i < 6; ++i)
-            slider (cpIds[i]).setBounds (cp.getX() + 14 + (i % 3) * 74, cp.getY() + 98 + (i / 3) * 84, 54, 54);
-        inMeter = { cp.getX() + 268, cp.getY() + 98, 16, 136 };
-        grMeter = { cp.getX() + 310, cp.getY() + 98, 16, 136 };
+            slider (cpIds[i]).setBounds (cp.getX() + 14 + (i % 3) * 78, cp.getY() + 92 + (i / 3) * 98, 54, 54);
+        inMeter = { cp.getX() + 276, cp.getY() + 92, 16, 150 };
+        grMeter = { cp.getX() + 318, cp.getY() + 92, 16, 150 };
 
         // delay
-        Rectangle<int> dl (742, 420, 482, 268); addSection (dl, "STEREO DELAY");
+        Rectangle<int> dl (742, 420, 482, 288); addSection (dl, "STEREO DELAY");
         button ("dlOn").setBounds (dl.getX() + 14, dl.getY() + 22, 92, 28);
         button ("dlSync").setBounds (dl.getX() + 112, dl.getY() + 22, 80, 28);
         button ("dlPing").setBounds (dl.getX() + 198, dl.getY() + 22, 80, 28);
@@ -668,6 +688,28 @@ private:
     struct Section   { Rectangle<int> area; String title; };
 
     static Rectangle<int> valueBox (const Slider& s) { return { s.getX() - 16, s.getY() - 24, s.getWidth() + 32, 17 }; }
+    static Rectangle<int> compBox (const Slider& s)  { return { s.getX() - 12, s.getBottom() + 16, s.getWidth() + 24, 16 }; }
+
+    // Shows the setting the selected compressor type really uses: 1176 limits (amber when the knob is past them),
+    // and AUTO where the LA-2A has no control.
+    String compValueText (const String& id, bool& limited)
+    {
+        limited = false;
+        const int type = (int) raw ("cpType");
+        const bool fet = type == pv::CompFET || type == pv::CompFetOpto, optoOnly = type == pv::CompOpto;
+        if (id == "cpAtk" || id == "cpRel")
+        {
+            if (optoOnly) return id == "cpAtk" ? "AUTO 0.010 s" : "AUTO 0.06-15 s";
+            const float v = raw (id);
+            float lo = 0.0f, hi = 1.0e9f;
+            if (fet) { lo = id == "cpAtk" ? pv::Compressor::kFetAtkMin * 0.001f : pv::Compressor::kFetRelMin * 0.001f;
+                       hi = id == "cpAtk" ? pv::Compressor::kFetAtkMax * 0.001f : pv::Compressor::kFetRelMax * 0.001f; }
+            const float e = jlimit (lo, hi, v);
+            limited = e != v;
+            return fmtSeconds (e);
+        }
+        return text (id);
+    }
 
     void addSlider (const String& id, const String& label, bool fader)
     {
@@ -729,6 +771,10 @@ private:
         slider ("dlTimeL").setVisible (! sync); slider ("dlTimeR").setVisible (! sync);
         combo ("dlDivL").setVisible (sync); combo ("dlDivR").setVisible (sync);
 
+        // the LA-2A has no attack or release controls
+        const bool optoOnly = (int) raw ("cpType") == pv::CompOpto;
+        for (auto* id : { "cpAtk", "cpRel" }) { slider (id).setEnabled (! optoOnly); slider (id).setAlpha (optoOnly ? 0.4f : 1.0f); }
+
         // last-touched parameter
         auto& params = proc.getParameters();
         bool changed = false;
@@ -752,7 +798,10 @@ private:
         display.repaint();
         repaint (inMeter.getUnion (grMeter).expanded (34, 22));
         if (changed)
+        {
             for (auto& c : sliders) if (c->fader) repaint (valueBox (c->slider));
+            for (auto* id : { "cpThr", "cpRatio", "cpAtk", "cpRel", "cpMakeup", "cpMix" }) repaint (compBox (slider (id)));
+        }
     }
 
     PlateVerbProcessor& proc;
