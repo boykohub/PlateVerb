@@ -2,9 +2,9 @@
 // tail compressor, plus stereo delay and output transformer.
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_audio_formats/juce_audio_formats.h>
-#include <juce_dsp/juce_dsp.h>
 #include "Engine.h"
 #include "IRRender.h"
+#include "PartConv.h"
 #include "Presets.h"
 
 using namespace juce;
@@ -20,6 +20,13 @@ static StringArray divNames() { return { "1/64", "1/32T", "1/32", "1/16T", "1/16
                                          "1/8D", "1/4T", "1/4", "1/4D", "1/2T", "1/2", "1/2D", "1/1" }; }
 static StringArray trNames()  { StringArray s; for (int i = 0; i < pv::kNumTransformers; ++i) s.add (pv::transformerModel (i).name); return s; }
 static StringArray compTypeNames() { return { "Clean VCA", "1176-style FET", "LA-2A-style Opto", "1176 + LA-2A" }; }
+static StringArray materialNames (int slot)
+{
+    StringArray s;
+    if (slot == pv::Plate) for (int i = 0; i < pv::kNumPlates; ++i) s.add (pv::plateMaterial (i).name);
+    else for (int i = 0; i < pv::kNumSurfaces; ++i) s.add (pv::surfaceMaterial (i).name);
+    return s;
+}
 
 static String fmtSeconds (float v)
 {
@@ -30,10 +37,10 @@ static String sid (int slot, const String& base) { return "s" + String (slot) + 
 static String nid (const char* prefix, int i) { return String (prefix) + String (i); }
 static String slotTitle (int s) { String n = String (kSlotNames[s]).toLowerCase(); return s == pv::IR ? String ("IR") : n.substring (0, 1).toUpperCase() + n.substring (1); }
 
-static const char* const kSlotFloatIds[] = { "lv", "decay", "lowMult", "highMult", "size", "predelay", "build", "early", "diff", "damping",
+static const char* const kSlotFloatIds[] = { "matMix", "dirt", "lv", "decay", "lowMult", "highMult", "size", "predelay", "build", "early", "diff", "damping",
                                              "tone", "mod", "inWidth", "eqF0", "eqF1", "eqF2", "eqF3", "eqG0", "eqG1", "eqG2", "eqG3",
                                              "cpThr", "cpRatio", "cpAtk", "cpRel", "cpMakeup", "cpMix" };
-static const char* const kSlotOtherIds[] = { "on", "cpOn", "cpDuck", "cpType", "cpTone" };
+static const char* const kSlotOtherIds[] = { "on", "cpOn", "cpDuck", "cpType", "cpTone", "matA", "matB" };
 
 static File userPresetFolder()
 {
@@ -81,6 +88,7 @@ public:
             q.high = P (sid (s, "highMult")); q.size = P (sid (s, "size")); q.pre = P (sid (s, "predelay")); q.build = P (sid (s, "build"));
             q.early = P (sid (s, "early")); q.diff = P (sid (s, "diff")); q.damp = P (sid (s, "damping")); q.tone = P (sid (s, "tone"));
             q.mod = P (sid (s, "mod")); q.width = P (sid (s, "inWidth"));
+            q.matA = P (sid (s, "matA")); q.matB = P (sid (s, "matB")); q.matMix = P (sid (s, "matMix")); q.dirt = P (sid (s, "dirt"));
             for (int b = 0; b < 4; ++b) { q.eqF[b] = P (sid (s, nid ("eqF", b))); q.eqG[b] = P (sid (s, nid ("eqG", b))); }
             q.cpOn = P (sid (s, "cpOn")); q.cpDuck = P (sid (s, "cpDuck")); q.cpType = P (sid (s, "cpType")); q.cpTone = P (sid (s, "cpTone"));
             q.cpThr = P (sid (s, "cpThr")); q.cpRatio = P (sid (s, "cpRatio")); q.cpAtk = P (sid (s, "cpAtk")); q.cpRel = P (sid (s, "cpRel"));
@@ -109,7 +117,7 @@ public:
             r = NormalisableRange<float> (lo, hi,
                     [] (float a, float b, float t) { return a * std::pow (b / a, t); },
                     [] (float a, float b, float v) { return std::log (v / a) / std::log (b / a); });
-        else if (centre > lo && centre < hi) r.setSkewForCentre (centre);
+        else if (centre != -1.0f && centre > lo && centre < hi) r.setSkewForCentre (centre);   // -1 = linear
         const bool pct = unit == "%", pan = unit == "pan";
         auto attr = AudioParameterFloatAttributes()
             .withLabel (pan ? String() : unit)
@@ -162,6 +170,10 @@ public:
             g->addChild (fp (sid (s, "tone"), n + "Input Tone", 0.0f, 1.0f, ir ? 1.0f : 0.75f));
             g->addChild (fp (sid (s, "mod"), n + "Modulation", 0.0f, 1.0f, ir ? 0.0f : 0.5f));
             g->addChild (fp (sid (s, "inWidth"), n + "Input Width", 0.0f, 1.0f, 1.0f));
+            g->addChild (cp (sid (s, "matA"), n + "Material A", materialNames (s), 0));
+            g->addChild (cp (sid (s, "matB"), n + "Material B", materialNames (s), 0));
+            g->addChild (fp (sid (s, "matMix"), n + "Material Blend", 0.0f, 1.0f, 0.0f));
+            g->addChild (fp (sid (s, "dirt"), n + "Dirt", 1.0f, 100.0f, pv::kDirtDefault, -1.0f, "", 0));
             for (int b = 0; b < 4; ++b)
             {
                 g->addChild (fp (sid (s, nid ("eqF", b)), n + "EQ " + bandNames[b] + " Freq", fLo[b], fHi[b], fDef[b], kLog, "Hz"));
@@ -221,10 +233,8 @@ public:
         fillParams (prm, true);
         engine.setOversampling (prm.oversampling, true);
         setLatencySamples (engine.latency());
-        for (auto* b : { &inL, &inR, &irL, &irR }) b->assign ((size_t) blockMax, 0.0f);
-        convBufA.setSize (2, blockMax); convBufB.setSize (2, blockMax);
-        dsp::ProcessSpec spec { sampleRate, (uint32) blockMax, 2 };
-        convA.prepare (spec); convB.prepare (spec);
+        for (auto* b : { &inL, &inR, &irL, &irR, &nxL, &nxR }) b->assign ((size_t) blockMax, 0.0f);
+        trash.reserve (8);
         hostRate.store (sampleRate);
         notify();
     }
@@ -246,15 +256,14 @@ public:
         const auto t0 = Time::getHighResolutionTicks();
         {
             const GenericScopedTryLock<SpinLock> tl (swapLock);
-            if (tl.isLocked() && newA != nullptr && newB != nullptr)
+            if (tl.isLocked() && pending != nullptr && next == nullptr)
             {
-                convA.loadImpulseResponse (std::move (*newA), newRate, dsp::Convolution::Stereo::yes, dsp::Convolution::Trim::no, dsp::Convolution::Normalise::no);
-                convB.loadImpulseResponse (std::move (*newB), newRate, dsp::Convolution::Stereo::yes, dsp::Convolution::Trim::no, dsp::Convolution::Normalise::no);
-                trashA = std::move (newA); trashB = std::move (newB);      // freed later by the background thread
+                if (cur == nullptr) cur = std::move (pending);
+                else { next = std::move (pending); xfade = 0; }
             }
         }
-        const bool irOn = prm.slot[pv::IR].on && irReady.load();
-        if (irOn && ! irWasOn) { convA.reset(); convB.reset(); }
+        const bool irOn = prm.slot[pv::IR].on && irReady.load() && cur != nullptr;
+        if (irOn && ! irWasOn) cur->reset();
         irWasOn = irOn;
         float* L = buffer.getWritePointer (0); float* R = buffer.getWritePointer (1);
         for (int pos = 0; pos < n; pos += blockMax)
@@ -263,15 +272,23 @@ public:
             if (irOn)
             {
                 engine.irInput (L + pos, R + pos, inL.data(), inR.data(), m, prm);
-                convBufA.copyFrom (0, 0, inL.data(), m); convBufA.copyFrom (1, 0, inL.data(), m);
-                convBufB.copyFrom (0, 0, inR.data(), m); convBufB.copyFrom (1, 0, inR.data(), m);
-                dsp::AudioBlock<float> a (convBufA.getArrayOfWritePointers(), 2, (size_t) m), b (convBufB.getArrayOfWritePointers(), 2, (size_t) m);
-                convA.process (dsp::ProcessContextReplacing<float> (a));
-                convB.process (dsp::ProcessContextReplacing<float> (b));
-                for (int i = 0; i < m; ++i)
+                cur->process (inL.data(), inR.data(), irL.data(), irR.data(), m);
+                if (next != nullptr)                       // new IR: 50 ms crossfade from the old one
                 {
-                    irL[(size_t) i] = convBufA.getSample (0, i) + convBufB.getSample (0, i);
-                    irR[(size_t) i] = convBufA.getSample (1, i) + convBufB.getSample (1, i);
+                    next->process (inL.data(), inR.data(), nxL.data(), nxR.data(), m);
+                    const int fadeLen = jmax (64, (int) (0.05 * sampleRateHz));
+                    for (int i = 0; i < m; ++i)
+                    {
+                        const float g = jmin (1.0f, (float) (xfade + i) / (float) fadeLen);
+                        irL[(size_t) i] += (nxL[(size_t) i] - irL[(size_t) i]) * g;
+                        irR[(size_t) i] += (nxR[(size_t) i] - irR[(size_t) i]) * g;
+                    }
+                    xfade += m;
+                    if (xfade >= fadeLen)
+                    {
+                        const GenericScopedTryLock<SpinLock> tl (swapLock);
+                        if (tl.isLocked()) { trash.push_back (std::move (cur)); cur = std::move (next); }   // freed by the background thread
+                    }
                 }
                 engine.process (L + pos, R + pos, m, prm, irL.data(), irR.data());
             }
@@ -306,6 +323,7 @@ public:
             c.on = on (q.cpOn); c.duck = on (q.cpDuck); c.type = jlimit (0, 3, (int) f (q.cpType)); c.vintage = f (q.cpTone) > 0.5f;
             c.thr = f (q.cpThr); c.ratio = f (q.cpRatio); c.atkMs = f (q.cpAtk) * 1000.0f; c.relMs = f (q.cpRel) * 1000.0f;
             c.makeup = f (q.cpMakeup); c.mix = f (q.cpMix);
+            d.matA = (int) f (q.matA); d.matB = (int) f (q.matB); d.matBlend = f (q.matMix); d.dirt = f (q.dirt);
         }
         p.dlPanL = f (pDlPanL); p.dlPanR = f (pDlPanR); p.dlWidth = f (pDlWidth); p.delayAttackMs = f (pDlAtk);
         p.delayOn = on (pDlOn); p.pingPong = on (pDlPing); p.delayFb = f (pDlFb); p.delayMix = f (pDlMix);
@@ -459,6 +477,7 @@ private:
             if (rate <= 0) continue;
             if (rate != lastRate) { lastRate = rate; loadPending.store (true); viewEngine.prepare (rate); lastViewSlot = -1; }
             if (loadPending.exchange (false)) { loadFiles (rate); haveRendered = false; }
+            { const SpinLock::ScopedLockType sl (swapLock); trash.clear(); }        // old convolvers die here, not on the audio thread
             // IR render when its settings change (after they have been still for 120 ms)
             const uint32 now = Time::getMillisecondCounter();
             if (layout.load() != pv::IrNone)
@@ -487,7 +506,8 @@ private:
     }
     static std::vector<float> viewKey (const pv::SlotParams& s)
     {
-        std::vector<float> k { s.decaySec, s.lowMult, s.highMult, s.size, s.predelayMs, s.buildMs, s.early, s.damping, s.tone, s.mod, s.inWidth, s.diffusion };
+        std::vector<float> k { s.decaySec, s.lowMult, s.highMult, s.size, s.predelayMs, s.buildMs, s.early, s.damping, s.tone, s.mod, s.inWidth, s.diffusion,
+                               (float) s.matA, (float) s.matB, s.matBlend, s.dirt };
         for (int b = 0; b < 4; ++b) { k.push_back (s.eqF[b]); k.push_back (s.eqG[b]); }
         return k;
     }
@@ -504,7 +524,7 @@ private:
         for (int k = 0; k < (int) (0.3 * rate / 4096) + 1; ++k) e.process (zL.data(), zR.data(), 4096, p);     // settle the mix/level smoothing
         L[0] = R[0] = 1.0f;
         for (int o = 0; o < n && ! threadShouldExit(); o += 512) e.process (L.data() + o, R.data() + o, jmin (512, n - o), p);
-        auto w = pv::makeWave (L, R, rate, 1.0f); w.slot = slot;
+        auto w = pv::makeWave (L, R, rate, 0.5f); w.slot = slot;
         { const ScopedLock sl (waveLock); waves[slot] = std::move (w); }
         ++waveVersion;
     }
@@ -516,6 +536,8 @@ private:
         s.startMs = pIrStart->load(); s.xoverMs = pIrXover->load(); s.fadeOutMs = pIrFade->load();
         s.crossFeed = pIrXfeed->load(); s.crossDelayMs = pIrXdelay->load(); s.asym = pIrAsym->load();
         s.reverse = pIrReverse->load() > 0.5f; s.stretchPitch = pIrPitch->load() > 0.5f;
+        const auto me = pv::surfaceEffect ((int) q.matA->load(), (int) q.matB->load(), q.matMix->load(), 2.0f);
+        s.lowMult *= me.lowMul; s.highMult *= me.highMul;
         return s;
     }
     bool readFile (const File& f, double rate, std::vector<float>& l, std::vector<float>& r, int& chans)
@@ -607,23 +629,21 @@ private:
         // a setting identical to the recording's RT is "as recorded" (no re-enveloping)
         if (std::abs (set.decaySec - an.rtMid) < 0.011f) set.decaySec = 0.0f;
         auto ir = pv::renderIR (src, an, set, rate);
+        pv::trimIRTail (ir, rate);                         // the recorded noise floor below -80 dB only costs CPU
         const int n = ir.length();
-        AudioBuffer<float> a (2, n), b (2, n);
-        a.copyFrom (0, 0, ir.aL.data(), n); a.copyFrom (1, 0, ir.aR.data(), n);
-        b.copyFrom (0, 0, ir.bL.data(), n); b.copyFrom (1, 0, ir.bR.data(), n);
+        auto conv = std::make_unique<pv::PartitionedConvolver>();
+        conv->build (ir);
         {
-            // handed to the audio thread, which loads it between two process() calls (JUCE's Convolution rule)
+            // handed to the audio thread, which swaps it in with a short crossfade
             const SpinLock::ScopedLockType sl (swapLock);
-            trashA.reset(); trashB.reset();
-            newA = std::make_unique<AudioBuffer<float>> (std::move (a));
-            newB = std::make_unique<AudioBuffer<float>> (std::move (b));
-            newRate = rate;
+            trash.clear();
+            pending = std::move (conv);
         }
         irReady.store (true);
         // display: response to a centred source
         std::vector<float> L ((size_t) n), R ((size_t) n);
         for (int i = 0; i < n; ++i) { L[(size_t) i] = ir.aL[(size_t) i] + ir.bL[(size_t) i]; R[(size_t) i] = ir.aR[(size_t) i] + ir.bR[(size_t) i]; }
-        auto w = pv::makeWave (L, R, rate, 1.0f); w.slot = pv::IR; w.xoverMs = pIrXover->load();
+        auto w = pv::makeWave (L, R, rate, 0.5f); w.slot = pv::IR; w.xoverMs = pIrXover->load(); w.predelayIncluded = false;
         { const ScopedLock sl (waveLock); waves[pv::IR] = std::move (w); }
         ++waveVersion;
     }
@@ -631,15 +651,16 @@ private:
     struct SlotPtrs {
         std::atomic<float> *on = nullptr, *lv = nullptr, *decay = nullptr, *low = nullptr, *high = nullptr, *size = nullptr, *pre = nullptr,
             *build = nullptr, *early = nullptr, *diff = nullptr, *damp = nullptr, *tone = nullptr, *mod = nullptr, *width = nullptr,
-            *eqF[4] = {}, *eqG[4] = {}, *cpOn = nullptr, *cpDuck = nullptr, *cpType = nullptr, *cpTone = nullptr, *cpThr = nullptr,
+            *eqF[4] = {}, *eqG[4] = {}, *matA = nullptr, *matB = nullptr, *matMix = nullptr, *dirt = nullptr, *cpOn = nullptr, *cpDuck = nullptr, *cpType = nullptr, *cpTone = nullptr, *cpThr = nullptr,
             *cpRatio = nullptr, *cpAtk = nullptr, *cpRel = nullptr, *cpMakeup = nullptr, *cpMix = nullptr;
     } sp[pv::kNumSlots];
 
     pv::Engine engine;
     pv::Params prm;
-    dsp::Convolution convA, convB;
-    AudioBuffer<float> convBufA, convBufB;
-    std::vector<float> inL, inR, irL, irR;
+    std::unique_ptr<pv::PartitionedConvolver> cur, next, pending;
+    std::vector<std::unique_ptr<pv::PartitionedConvolver>> trash;
+    int xfade = 0;
+    std::vector<float> inL, inR, irL, irR, nxL, nxR;
     int blockMax = 512; bool irWasOn = false;
     std::atomic<bool> irReady { false }, loadPending { false };
     std::atomic<double> hostRate { 0.0 };
@@ -651,7 +672,7 @@ private:
     pv::TrueStereoIR source; pv::IRAnalysis analysis;
     pv::IRSettings pendingSet; uint32 irChangedAt = 0;
     pv::WaveData waves[pv::kNumSlots];
-    SpinLock swapLock; std::unique_ptr<AudioBuffer<float>> newA, newB, trashA, trashB; double newRate = 48000.0;
+    SpinLock swapLock;
     std::shared_ptr<bool> alive = std::make_shared<bool> (true);
 
     std::atomic<float> *pOs = nullptr, *pMix = nullptr, *pDlOn = nullptr, *pDlSync = nullptr, *pDlPing = nullptr,
