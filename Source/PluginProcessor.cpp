@@ -37,7 +37,7 @@ static String sid (int slot, const String& base) { return "s" + String (slot) + 
 static String nid (const char* prefix, int i) { return String (prefix) + String (i); }
 static String slotTitle (int s) { String n = String (kSlotNames[s]).toLowerCase(); return s == pv::IR ? String ("IR") : n.substring (0, 1).toUpperCase() + n.substring (1); }
 
-static const char* const kSlotFloatIds[] = { "matMix", "dirt", "lv", "decay", "lowMult", "highMult", "size", "predelay", "build", "early", "diff", "damping",
+static const char* const kSlotFloatIds[] = { "matMix", "dirt", "hiCut", "lv", "decay", "lowMult", "highMult", "size", "predelay", "build", "early", "diff", "damping",
                                              "tone", "mod", "inWidth", "eqF0", "eqF1", "eqF2", "eqF3", "eqG0", "eqG1", "eqG2", "eqG3",
                                              "cpThr", "cpRatio", "cpAtk", "cpRel", "cpMakeup", "cpMix" };
 static const char* const kSlotOtherIds[] = { "on", "cpOn", "cpDuck", "cpType", "cpTone", "matA", "matB" };
@@ -99,7 +99,7 @@ public:
             q.high = P (sid (s, "highMult")); q.size = P (sid (s, "size")); q.pre = P (sid (s, "predelay")); q.build = P (sid (s, "build"));
             q.early = P (sid (s, "early")); q.diff = P (sid (s, "diff")); q.damp = P (sid (s, "damping")); q.tone = P (sid (s, "tone"));
             q.mod = P (sid (s, "mod")); q.width = P (sid (s, "inWidth"));
-            q.matA = P (sid (s, "matA")); q.matB = P (sid (s, "matB")); q.matMix = P (sid (s, "matMix")); q.dirt = P (sid (s, "dirt"));
+            q.matA = P (sid (s, "matA")); q.matB = P (sid (s, "matB")); q.matMix = P (sid (s, "matMix")); q.dirt = P (sid (s, "dirt")); q.hiCut = P (sid (s, "hiCut"));
             for (int b = 0; b < 4; ++b) { q.eqF[b] = P (sid (s, nid ("eqF", b))); q.eqG[b] = P (sid (s, nid ("eqG", b))); }
             q.cpOn = P (sid (s, "cpOn")); q.cpDuck = P (sid (s, "cpDuck")); q.cpType = P (sid (s, "cpType")); q.cpTone = P (sid (s, "cpTone"));
             q.cpThr = P (sid (s, "cpThr")); q.cpRatio = P (sid (s, "cpRatio")); q.cpAtk = P (sid (s, "cpAtk")); q.cpRel = P (sid (s, "cpRel"));
@@ -129,18 +129,20 @@ public:
                     [] (float a, float b, float t) { return a * std::pow (b / a, t); },
                     [] (float a, float b, float v) { return std::log (v / a) / std::log (b / a); });
         else if (centre != -1.0f && centre > lo && centre < hi) r.setSkewForCentre (centre);   // -1 = linear
-        const bool pct = unit == "%", pan = unit == "pan";
+        const bool pct = unit == "%", pan = unit == "pan", cut = unit == "cut";
         auto attr = AudioParameterFloatAttributes()
-            .withLabel (pan ? String() : unit)
-            .withStringFromValueFunction ([pct, pan, decimals, zeroText, lo] (float v, int)
+            .withLabel (pan || cut ? String() : unit)
+            .withStringFromValueFunction ([pct, pan, cut, decimals, zeroText, lo] (float v, int)
             {
                 if (zeroText.isNotEmpty() && v <= lo + 1.0e-4f) return zeroText;
+                if (cut) return v >= 19500.0f ? String ("OFF") : String (v / 1000.0f, 1) + " kHz";
                 if (pan) { const int p = roundToInt (v * 100.0f); return p == 0 ? String ("C") : (p < 0 ? "L" + String (-p) : "R" + String (p)); }
                 if (decimals < 0) return fmtSeconds (v).dropLastCharacters (2);
                 return pct ? String (roundToInt (v * 100.0f)) : String (v, decimals);
             })
-            .withValueFromStringFunction ([pct, pan] (const String& t)
+            .withValueFromStringFunction ([pct, pan, cut] (const String& t)
             {
+                if (cut) { if (t.trim().equalsIgnoreCase ("off")) return 20000.0f; const float v = t.getFloatValue(); return t.containsIgnoreCase ("k") || v < 100.0f ? v * 1000.0f : v; }
                 if (pan) { auto u = t.trim().toUpperCase(); float v = u.substring (1).getFloatValue() / 100.0f; return u.startsWith ("L") ? -v : (u.startsWith ("R") ? v : 0.0f); }
                 return pct ? t.getFloatValue() / 100.0f : t.getFloatValue();
             });
@@ -185,6 +187,7 @@ public:
             g->addChild (cp (sid (s, "matB"), n + "Material B", materialNames (s), 0));
             g->addChild (fp (sid (s, "matMix"), n + "Material Blend", 0.0f, 1.0f, 0.0f));
             g->addChild (fp (sid (s, "dirt"), n + "Dirt", 1.0f, 100.0f, pv::kDirtDefault, -1.0f, "", 0));
+            g->addChild (fp (sid (s, "hiCut"), n + "High Cut", 2000.0f, 20000.0f, 20000.0f, kLog, "cut"));
             for (int b = 0; b < 4; ++b)
             {
                 g->addChild (fp (sid (s, nid ("eqF", b)), n + "EQ " + bandNames[b] + " Freq", fLo[b], fHi[b], fDef[b], kLog, "Hz"));
@@ -334,7 +337,7 @@ public:
             c.on = on (q.cpOn); c.duck = on (q.cpDuck); c.type = jlimit (0, 3, (int) f (q.cpType)); c.vintage = f (q.cpTone) > 0.5f;
             c.thr = f (q.cpThr); c.ratio = f (q.cpRatio); c.atkMs = f (q.cpAtk) * 1000.0f; c.relMs = f (q.cpRel) * 1000.0f;
             c.makeup = f (q.cpMakeup); c.mix = f (q.cpMix);
-            d.matA = (int) f (q.matA); d.matB = (int) f (q.matB); d.matBlend = f (q.matMix); d.dirt = f (q.dirt);
+            d.matA = (int) f (q.matA); d.matB = (int) f (q.matB); d.matBlend = f (q.matMix); d.dirt = f (q.dirt); d.hiCutHz = f (q.hiCut);
         }
         p.dlPanL = f (pDlPanL); p.dlPanR = f (pDlPanR); p.dlWidth = f (pDlWidth); p.delayAttackMs = f (pDlAtk);
         p.delayOn = on (pDlOn); p.pingPong = on (pDlPing); p.delayFb = f (pDlFb); p.delayMix = f (pDlMix);
@@ -418,6 +421,7 @@ public:
         setParam (sid (s, "size"), p.size); setParam (sid (s, "predelay"), p.pre); setParam (sid (s, "build"), p.build);
         setParam (sid (s, "early"), p.early); setParam (sid (s, "diff"), p.diff); setParam (sid (s, "damping"), p.damp);
         setParam (sid (s, "tone"), p.tone); setParam (sid (s, "mod"), p.mod); setParam (sid (s, "inWidth"), p.width);
+        setParam (sid (s, "hiCut"), p.hiCut);
         const float eqF[] = { 250.0f, 400.0f, 2500.0f, 8000.0f };     // presets were fitted with the low shelf at 250 Hz
         for (int b = 0; b < 4; ++b) { setParam (sid (s, nid ("eqF", b)), eqF[b]); setParam (sid (s, nid ("eqG", b)), p.eq[b]); }
         presetSlotRequest.store (s);
@@ -518,7 +522,7 @@ private:
     static std::vector<float> viewKey (const pv::SlotParams& s)
     {
         std::vector<float> k { s.decaySec, s.lowMult, s.highMult, s.size, s.predelayMs, s.buildMs, s.early, s.damping, s.tone, s.mod, s.inWidth, s.diffusion,
-                               (float) s.matA, (float) s.matB, s.matBlend, s.dirt };
+                               (float) s.matA, (float) s.matB, s.matBlend, s.dirt, s.hiCutHz };
         for (int b = 0; b < 4; ++b) { k.push_back (s.eqF[b]); k.push_back (s.eqG[b]); }
         return k;
     }
@@ -662,7 +666,7 @@ private:
     struct SlotPtrs {
         std::atomic<float> *on = nullptr, *lv = nullptr, *decay = nullptr, *low = nullptr, *high = nullptr, *size = nullptr, *pre = nullptr,
             *build = nullptr, *early = nullptr, *diff = nullptr, *damp = nullptr, *tone = nullptr, *mod = nullptr, *width = nullptr,
-            *eqF[4] = {}, *eqG[4] = {}, *matA = nullptr, *matB = nullptr, *matMix = nullptr, *dirt = nullptr, *cpOn = nullptr, *cpDuck = nullptr, *cpType = nullptr, *cpTone = nullptr, *cpThr = nullptr,
+            *eqF[4] = {}, *eqG[4] = {}, *matA = nullptr, *matB = nullptr, *matMix = nullptr, *dirt = nullptr, *hiCut = nullptr, *cpOn = nullptr, *cpDuck = nullptr, *cpType = nullptr, *cpTone = nullptr, *cpThr = nullptr,
             *cpRatio = nullptr, *cpAtk = nullptr, *cpRel = nullptr, *cpMakeup = nullptr, *cpMix = nullptr;
     } sp[pv::kNumSlots];
 
