@@ -47,25 +47,36 @@ static File userPresetFolder()
     return File::getSpecialLocation (File::userDocumentsDirectory).getChildFile ("PlateVerb").getChildFile ("Presets");
 }
 
-// "X.L.wav" <-> "X.R.wav", also _L/_R, " L"/" R", -L/-R
+// "X.L.wav" <-> "X.R.wav", also _L/_R, " L"/" R", -L/-R, (L)/(R) and Left/Right in any of those forms
+static const char* const kIrSideTags[][2] = { { "L", "R" }, { "Left", "Right" }, { "LEFT", "RIGHT" }, { "left", "right" }, { "l", "r" } };
 static File findPartner (const File& f, bool& isLeft)
 {
     const String stem = f.getFileNameWithoutExtension();
-    for (auto* sep : { ".", "_", " ", "-" })
-        for (int side = 0; side < 2; ++side)
-        {
-            const String me = String (sep) + (side == 0 ? "L" : "R"), other = String (sep) + (side == 0 ? "R" : "L");
-            if (stem.endsWithIgnoreCase (me))
+    for (auto& tag : kIrSideTags)
+        for (auto* sep : { ".", "_", " ", "-", "(" })
+            for (int side = 0; side < 2; ++side)
             {
-                const String base = stem.dropLastCharacters (me.length());
-                for (auto& o : StringArray { other, other.toLowerCase() })
+                const String close = String (sep) == "(" ? ")" : "";
+                const String me = String (sep) + tag[side] + close, other = String (sep) + tag[1 - side] + close;
+                if (stem.endsWith (me))
                 {
-                    File p = f.getSiblingFile (base + o + f.getFileExtension());
+                    File p = f.getSiblingFile (stem.dropLastCharacters (me.length()) + other + f.getFileExtension());
                     if (p.existsAsFile()) { isLeft = side == 0; return p; }
                 }
             }
-        }
     return {};
+}
+// 0 = named as a left file, 1 = right, -1 = can't tell
+static int irSide (const File& f)
+{
+    const String stem = f.getFileNameWithoutExtension().toUpperCase();
+    for (auto* sep : { ".", "_", " ", "-", "(" })
+    {
+        const String close = String (sep) == "(" ? ")" : "";
+        for (auto* l : { "L", "LEFT" }) if (stem.endsWith (String (sep) + l + close)) return 0;
+        for (auto* r : { "R", "RIGHT" }) if (stem.endsWith (String (sep) + r + close)) return 1;
+    }
+    return -1;
 }
 
 // ============================================================================ processor
