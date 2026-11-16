@@ -16,6 +16,40 @@ static StringArray divNames() { return { "1/64", "1/32T", "1/32", "1/16T", "1/16
                                          "1/8D", "1/4T", "1/4", "1/4D", "1/2T", "1/2", "1/2D", "1/1" }; }
 static StringArray trNames()  { StringArray s; for (int i = 0; i < pv::kNumTransformers; ++i) s.add (pv::transformerModel (i).name); return s; }
 
+// Presets fitted to measured impulse responses (decay per band, tone, onset, stereo spread).
+struct PresetDef { const char* name; int algo; float decay, low, high, size, pre, tone, damp, early, build, width, mod; float eq[4]; };
+static const PresetDef kPresets[] = {
+    { "Plate V1",                0, 1.510f, 1.370f, 0.974f, 1.00f, 1.41f, 0.872f, 0.00f, 0.50f, 22.0f, 0.55f, 0.40f, { -0.85f, -0.54f, -0.84f, -1.62f } },
+    { "Plate V2",                0, 1.634f, 1.272f, 0.867f, 1.00f, 1.41f, 0.899f, 0.00f, 0.50f, 22.0f, 0.55f, 0.40f, { -0.69f, 0.25f, -0.14f, 2.91f } },
+    { "Plate V3",                0, 3.756f, 1.322f, 0.360f, 1.00f, 5.13f, 0.912f, 0.00f, 1.00f, 22.0f, 0.25f, 0.40f, { 0.60f, 0.64f, 0.16f, 2.47f } },
+    { "Plate V4",                0, 6.629f, 1.306f, 0.242f, 1.00f, 5.13f, 0.919f, 0.00f, 1.00f, 22.0f, 0.25f, 0.40f, { 0.68f, 0.61f, -0.06f, 2.29f } },
+    { "Plate V5",                0, 1.623f, 1.286f, 0.871f, 1.00f, 1.41f, 0.896f, 0.00f, 0.50f, 22.0f, 0.55f, 0.40f, { -0.92f, -0.22f, -0.30f, 2.64f } },
+    { "Plate V6",                0, 3.551f, 1.230f, 0.430f, 1.00f, 17.43f, 0.894f, 0.00f, 0.00f, 3.0f, 0.40f, 0.40f, { -0.38f, -0.14f, -1.02f, -3.07f } },
+    { "CD Plate A",              0, 1.441f, 1.199f, 0.960f, 1.00f, 6.51f, 0.831f, 0.00f, 0.25f, 15.0f, 0.25f, 0.40f, { -2.37f, -1.16f, -0.78f, 2.12f } },
+    { "CD Plate B V1",           0, 1.442f, 1.110f, 0.897f, 1.00f, 1.18f, 0.838f, 0.00f, 0.50f, 22.0f, 0.85f, 0.40f, { 1.23f, -0.16f, -0.12f, -0.48f } },
+    { "CD Plate B V2",           0, 0.502f, 0.314f, 1.405f, 1.00f, 1.18f, 0.863f, 0.00f, 0.50f, 15.0f, 1.00f, 0.40f, { -0.57f, -1.40f, -1.53f, 1.34f } },
+    { "CD Plate B V3",           0, 1.456f, 1.300f, 0.899f, 1.00f, 1.18f, 0.868f, 0.00f, 0.75f, 22.0f, 0.55f, 0.40f, { -0.44f, -1.20f, -0.65f, -2.55f } },
+    { "Rich Plate V1",           0, 2.387f, 1.132f, 1.119f, 1.00f, 1.29f, 0.915f, 0.00f, 0.50f, 22.0f, 0.25f, 0.40f, { -0.47f, 0.02f, -0.41f, 0.44f } },
+    { "Rich Plate V2",           0, 1.902f, 1.199f, 0.748f, 1.00f, 35.52f, 0.931f, 0.00f, 0.50f, 15.0f, 0.40f, 0.40f, { -1.78f, -1.72f, -1.36f, -4.84f } },
+    { "Rich Plate V3",           0, 1.045f, 1.572f, 0.892f, 1.00f, 35.52f, 0.934f, 0.00f, 0.50f, 10.0f, 0.40f, 0.40f, { -2.32f, -1.44f, -1.12f, -4.22f } },
+    { "Rich Plate V4",           0, 1.446f, 1.345f, 1.059f, 1.00f, 1.24f, 0.908f, 0.00f, 0.50f, 15.0f, 0.25f, 0.40f, { -2.02f, -1.45f, -1.37f, -2.52f } },
+    { "Rich Plate V5",           0, 1.841f, 1.264f, 0.746f, 1.00f, 18.07f, 0.929f, 0.00f, 0.75f, 15.0f, 0.25f, 0.40f, { -2.68f, -1.22f, -1.85f, -7.14f } },
+    { "Small Plate V3",          0, 3.132f, 1.253f, 0.204f, 1.00f, 5.01f, 0.934f, 0.00f, 0.75f, 15.0f, 0.25f, 0.40f, { -0.16f, -1.17f, -1.07f, 0.17f } },
+    { "Small Plate V4",          0, 6.020f, 1.815f, 0.150f, 1.00f, 5.01f, 0.950f, 0.00f, 0.75f, 15.0f, 0.25f, 0.40f, { 0.44f, 0.21f, -0.78f, 0.15f } },
+    { "Small Plate V5",          0, 2.014f, 1.269f, 0.809f, 1.00f, 1.22f, 0.872f, 0.00f, 0.75f, 22.0f, 0.25f, 0.40f, { 0.66f, 0.84f, 0.81f, 3.91f } },
+    { "Small Plate V6",          0, 3.246f, 1.140f, 0.198f, 1.00f, 26.16f, 0.881f, 0.00f, 0.25f, 15.0f, 0.25f, 0.40f, { 1.28f, 0.00f, -0.32f, -3.46f } },
+    { "Large Chamber",           2, 0.814f, 1.068f, 1.199f, 1.00f, 0.00f, 1.000f, 0.00f, 0.30f, 10.0f, 1.00f, 0.40f, { 8.49f, 3.28f, 1.19f, 2.44f } },
+    { "Large Chamber 2",         2, 0.859f, 0.997f, 0.802f, 1.00f, 0.00f, 1.000f, 0.00f, 0.30f, 3.0f, 1.00f, 0.40f, { 3.47f, -0.35f, -0.39f, 2.60f } },
+    { "Large Chamber Bonus 1",   2, 1.312f, 1.069f, 1.286f, 1.00f, 0.00f, 1.000f, 0.00f, 0.30f, 15.0f, 1.00f, 0.40f, { 4.05f, 4.26f, 0.05f, -4.86f } },
+    { "Large Chamber Bonus 2",   2, 1.592f, 1.073f, 1.486f, 1.00f, 0.00f, 1.000f, 0.00f, 0.30f, 15.0f, 1.00f, 0.40f, { 3.81f, 4.17f, -0.72f, -8.52f } },
+    { "Small Chamber",           2, 0.297f, 1.177f, 1.307f, 1.00f, 0.00f, 1.000f, 0.00f, 1.20f, 65.0f, 1.00f, 0.40f, { 4.29f, 5.13f, 1.05f, -7.28f } },
+    { "Small Chamber 2",         2, 0.365f, 1.121f, 0.583f, 1.00f, 0.00f, 1.000f, 0.00f, 0.30f, 15.0f, 1.00f, 0.40f, { 8.49f, 4.40f, 2.20f, 5.96f } },
+    { "Small & Bright",          2, 0.567f, 0.944f, 1.161f, 1.00f, 0.00f, 1.000f, 0.00f, 0.30f, 15.0f, 1.00f, 0.40f, { 5.45f, 2.89f, 0.74f, 5.58f } },
+    { "Small & Bright 2",        2, 0.050f, 2.464f, 0.676f, 1.00f, 0.00f, 1.000f, 0.00f, 0.30f, 65.0f, 1.00f, 0.40f, { 8.28f, 8.55f, 4.91f, 10.36f } },
+    { "Wet & Tacky",             2, 1.134f, 0.955f, 0.876f, 1.00f, 0.00f, 1.000f, 0.00f, 0.30f, 6.0f, 1.00f, 0.40f, { 6.80f, 2.06f, 1.75f, 6.79f } },
+};
+static constexpr int kNumPresets = (int) (sizeof (kPresets) / sizeof (kPresets[0]));
+
 static StringArray compTypeNames() { return { "Clean VCA", "1176-style FET", "LA-2A-style Opto", "1176 + LA-2A" }; }
 
 // seconds with enough decimals to read short times: 0.000020 s, 0.0080 s, 0.50 s, 1.10 s
@@ -42,6 +76,7 @@ public:
         for (int a = 0; a < pv::kNumAlgos; ++a) { pOn[a] = P (algoId ("on", a)); pLv[a] = P (algoId ("lv", a)); }
         pDecay = P ("decay"); pSize = P ("size"); pPre = P ("predelay"); pDamp = P ("damping"); pTone = P ("tone");
         pMod = P ("mod"); pEarly = P ("early"); pMix = P ("mix");
+        pLowMult = P ("lowMult"); pHighMult = P ("highMult"); pBuild = P ("build"); pInWidth = P ("inWidth");
         for (int b = 0; b < 4; ++b) { pEqF[b] = P (algoId ("eqF", b)); pEqG[b] = P (algoId ("eqG", b)); }
         pCpOn = P ("cpOn"); pCpThr = P ("cpThr"); pCpRatio = P ("cpRatio"); pCpAtk = P ("cpAtk"); pCpRel = P ("cpRel");
         pCpMakeup = P ("cpMakeup"); pCpMix = P ("cpMix"); pCpType = P ("cpType"); pCpTone = P ("cpTone"); pCpDuck = P ("cpDuck");
@@ -99,7 +134,11 @@ public:
             l.add (bp (algoId ("on", a), nm + " On", a == 0));
             l.add (fp (algoId ("lv", a), nm + " Level", 0.0f, 1.0f, 1.0f));
         }
-        l.add (fp ("decay", "Decay", 0.2f, 20.0f, 2.5f, 2.5f, "s", 2));
+        l.add (fp ("decay", "Decay", 0.05f, 20.0f, 2.5f, 2.5f, "s", 2));
+        l.add (fp ("lowMult", "Low Decay", 0.3f, 3.0f, 1.0f, kLog, "x", 2));
+        l.add (fp ("highMult", "High Decay", 0.15f, 1.5f, 1.0f, kLog, "x", 2));
+        l.add (fp ("build", "Build", 3.0f, 230.0f, 15.0f, kLog, "ms"));
+        l.add (fp ("inWidth", "Input Width", 0.0f, 1.0f, 1.0f));
         l.add (fp ("size", "Size", 0.5f, 1.5f, 1.0f, -1.0f, "x", 2));
         l.add (fp ("predelay", "Pre-Delay", 0.0f, 250.0f, 10.0f, 40.0f, "ms"));
         l.add (fp ("damping", "Damping", 0.0f, 1.0f, 0.35f));
@@ -190,6 +229,7 @@ public:
         for (int a = 0; a < pv::kNumAlgos; ++a) { prm.algoOn[a] = on (pOn[a]); prm.algoLevel[a] = f (pLv[a]); }
         prm.decaySec = f (pDecay); prm.size = f (pSize); prm.predelayMs = f (pPre); prm.damping = f (pDamp);
         prm.tone = f (pTone); prm.mod = f (pMod); prm.early = f (pEarly); prm.rvMix = f (pMix);
+        prm.lowMult = f (pLowMult); prm.highMult = f (pHighMult); prm.buildMs = f (pBuild); prm.inWidth = f (pInWidth);
         for (int b = 0; b < 4; ++b) { prm.eqF[b] = f (pEqF[b]); prm.eqG[b] = f (pEqG[b]); }
         prm.compOn = on (pCpOn); prm.compThr = f (pCpThr); prm.compRatio = f (pCpRatio); prm.compAtk = f (pCpAtk) * 1000.0f;
         prm.compRel = f (pCpRel) * 1000.0f; prm.compMakeup = f (pCpMakeup); prm.compMix = f (pCpMix);
@@ -220,10 +260,30 @@ public:
     bool acceptsMidi() const override { return false; }
     bool producesMidi() const override { return false; }
     double getTailLengthSeconds() const override { return 20.0; }
-    int getNumPrograms() override { return 1; }
-    int getCurrentProgram() override { return 0; }
-    void setCurrentProgram (int) override {}
-    const String getProgramName (int) override { return {}; }
+    int getNumPrograms() override { return kNumPresets + 1; }
+    int getCurrentProgram() override { return currentPreset; }
+    const String getProgramName (int i) override { return i == 0 ? String ("Default") : String (kPresets[jlimit (0, kNumPresets - 1, i - 1)].name); }
+    void setCurrentProgram (int i) override
+    {
+        i = jlimit (0, kNumPresets, i);
+        currentPreset = i;
+        auto set = [this] (const String& id, float v) { if (auto* q = apvts.getParameter (id)) q->setValueNotifyingHost (q->convertTo0to1 (v)); };
+        auto reset = [this] (const String& id) { if (auto* q = apvts.getParameter (id)) q->setValueNotifyingHost (q->getDefaultValue()); };
+        const char* ids[] = { "decay", "lowMult", "highMult", "build", "inWidth", "size", "predelay", "damping", "tone", "mod", "early" };
+        if (i == 0)
+        {
+            for (auto* id : ids) reset (id);
+            for (int a = 0; a < pv::kNumAlgos; ++a) { reset (algoId ("on", a)); reset (algoId ("lv", a)); }
+            for (int b = 0; b < 4; ++b) { reset (algoId ("eqF", b)); reset (algoId ("eqG", b)); }
+            return;
+        }
+        const auto& p = kPresets[i - 1];
+        for (int a = 0; a < pv::kNumAlgos; ++a) { set (algoId ("on", a), a == p.algo ? 1.0f : 0.0f); set (algoId ("lv", a), 1.0f); }
+        set ("decay", p.decay); set ("lowMult", p.low); set ("highMult", p.high); set ("build", p.build); set ("inWidth", p.width);
+        set ("size", p.size); set ("predelay", p.pre); set ("damping", p.damp); set ("tone", p.tone); set ("mod", p.mod); set ("early", p.early);
+        const float eqF[] = { 250.0f, 400.0f, 2500.0f, 8000.0f };     // presets were fitted with the low shelf at 250 Hz
+        for (int b = 0; b < 4; ++b) { set (algoId ("eqF", b), eqF[b]); set (algoId ("eqG", b), p.eq[b]); }
+    }
     void changeProgramName (int, const String&) override {}
 
     void getStateInformation (MemoryBlock& dest) override
@@ -238,6 +298,7 @@ public:
     }
 
     APVTS apvts;
+    int currentPreset = 0;
     std::atomic<float> compGr { 0.0f }, compIn { -100.0f }, dspLoad { 0.0f };
 
 private:
@@ -250,6 +311,7 @@ private:
         *pDlTimeL = nullptr, *pDlTimeR = nullptr, *pDlDivL = nullptr, *pDlDivR = nullptr, *pDlFb = nullptr, *pDlMix = nullptr,
         *pDlLow = nullptr, *pDlMid = nullptr, *pDlMidF = nullptr, *pDlHigh = nullptr, *pTrOn = nullptr, *pTrModel = nullptr,
         *pTrFreq = nullptr, *pTrAmt = nullptr, *pOut = nullptr, *pCpType = nullptr, *pCpTone = nullptr, *pCpDuck = nullptr,
+        *pLowMult = nullptr, *pHighMult = nullptr, *pBuild = nullptr, *pInWidth = nullptr,
         *pDlPanL = nullptr, *pDlPanR = nullptr, *pDlWidth = nullptr;
     double sampleRateHz = 48000.0;
 
@@ -366,7 +428,7 @@ public:
     void drawButtonText (Graphics& g, TextButton& b, bool, bool) override
     {
         g.setColour (col::navy);
-        g.setFont (uiFont (11.5f, true));
+        g.setFont (uiFont (b.getButtonText().length() > 6 ? 10.5f : 11.5f, true));
         g.drawText (b.getButtonText(), b.getLocalBounds().withTrimmedLeft (14), Justification::centred, false);
     }
 };
@@ -478,8 +540,9 @@ public:
             addSlider (algoId ("lv", a), "LEVEL", true);
         }
         // reverb faders
-        const char* rv[][2] = { { "decay", "DECAY" }, { "size", "SIZE" }, { "predelay", "PRE-DLY" }, { "damping", "DAMPING" },
-                                { "tone", "TONE" }, { "mod", "MOD" }, { "early", "EARLY" }, { "mix", "MIX" } };
+        const char* rv[][2] = { { "decay", "DECAY" }, { "lowMult", "LOW DEC" }, { "highMult", "HIGH DEC" }, { "size", "SIZE" },
+                                { "predelay", "PRE-DLY" }, { "build", "BUILD" }, { "early", "EARLY" }, { "damping", "DAMPING" },
+                                { "tone", "TONE" }, { "mod", "MOD" }, { "inWidth", "WIDTH" }, { "mix", "MIX" } };
         for (auto& e : rv) addSlider (e[0], e[1], true);
         // reverb EQ
         const char* bn[] = { "LOW", "LO-MID", "HI-MID", "HIGH" };
@@ -501,6 +564,11 @@ public:
         addCombo ("dlDivL", divNames(), "DIV L"); addCombo ("dlDivR", divNames(), "DIV R");
         // output
         addCombo ("os", osNames(), "OVERSAMPLING");
+        presetBox.addItem ("Default", 1);
+        for (int i = 0; i < kNumPresets; ++i) presetBox.addItem (kPresets[i].name, i + 2);
+        presetBox.setSelectedId (proc.getCurrentProgram() + 1, dontSendNotification);
+        presetBox.onChange = [this] { proc.setCurrentProgram (presetBox.getSelectedId() - 1); };
+        addAndMakeVisible (presetBox);
         addSlider ("out", "OUTPUT", false);
 
         display.badges[0] = "COMP"; display.badges[1] = "DELAY"; display.badges[2] = "XFMR";
@@ -561,6 +629,7 @@ public:
         for (auto& c : combos)
             if (c->box.isVisible())
                 g.drawText (c->label, c->box.getX(), c->box.getY() - 15, c->box.getWidth(), 14, Justification::centredLeft);
+        g.drawText ("PRESET", presetBox.getX(), presetBox.getY() - 15, presetBox.getWidth(), 14, Justification::centredLeft);
         // value readouts above every fader
         for (auto& c : sliders)
         {
@@ -568,7 +637,7 @@ public:
             auto vb = valueBox (c->slider).toFloat();
             g.setColour (col::lcdBg); g.fillRoundedRectangle (vb, 3.0f);
             g.setColour (col::lcdText.withAlpha (0.25f)); g.drawRoundedRectangle (vb, 3.0f, 1.0f);
-            g.setColour (col::lcdText); g.setFont (monoFont (10.5f));
+            g.setColour (col::lcdText); g.setFont (monoFont (9.5f));
             g.drawText (text (c->slider.getName()), vb, Justification::centred, false);
         }
         // compressor readouts: the value each type actually uses
@@ -630,21 +699,22 @@ public:
         sections.clear(); captions.clear();
         display.setBounds (390, 12, 480, 100);
         combo ("os").setBounds (905, 46, 96, 24);
-        slider ("out").setBounds (1040, 22, 62, 62);
+        presetBox.setBounds (905, 92, 230, 24);
+        slider ("out").setBounds (1160, 20, 56, 56);
         service.setBounds (380, 150, 470, 230);
 
         // algorithms
-        Rectangle<int> algo (16, 140, 520, 266); addSection (algo, "ALGORITHMS");
+        Rectangle<int> algo (16, 140, 452, 266); addSection (algo, "ALGORITHMS");
         for (int a = 0; a < pv::kNumAlgos; ++a)
         {
-            const int x = algo.getX() + 10 + a * 85;
-            button (algoId ("on", a)).setBounds (x, algo.getY() + 18, 80, 28);
-            slider (algoId ("lv", a)).setBounds (x + 20, algo.getY() + 80, 40, 158);
+            const int x = algo.getX() + 8 + a * 73;
+            button (algoId ("on", a)).setBounds (x, algo.getY() + 18, 72, 28);
+            slider (algoId ("lv", a)).setBounds (x + 18, algo.getY() + 80, 36, 158);
         }
         // reverb faders
-        Rectangle<int> rv (548, 140, 676, 266); addSection (rv, "REVERB");
-        const char* rvIds[] = { "decay", "size", "predelay", "damping", "tone", "mod", "early", "mix" };
-        for (int i = 0; i < 8; ++i) slider (rvIds[i]).setBounds (rv.getX() + 24 + i * 83, rv.getY() + 44, 40, 194);
+        Rectangle<int> rv (480, 140, 744, 266); addSection (rv, "REVERB");
+        const char* rvIds[] = { "decay", "lowMult", "highMult", "size", "predelay", "build", "early", "damping", "tone", "mod", "inWidth", "mix" };
+        for (int i = 0; i < 12; ++i) slider (rvIds[i]).setBounds (rv.getX() + 26 + i * 61, rv.getY() + 44, 36, 194);
 
         // reverb EQ
         Rectangle<int> eq (16, 420, 330, 288); addSection (eq, "REVERB EQ");
@@ -690,7 +760,7 @@ private:
     struct ComboCtl  { ComboBox box; String label; std::unique_ptr<APVTS::ComboBoxAttachment> att; };
     struct Section   { Rectangle<int> area; String title; };
 
-    static Rectangle<int> valueBox (const Slider& s) { return { s.getX() - 16, s.getY() - 24, s.getWidth() + 32, 17 }; }
+    static Rectangle<int> valueBox (const Slider& s) { return { s.getX() - 12, s.getY() - 24, s.getWidth() + 24, 17 }; }
     static Rectangle<int> compBox (const Slider& s)  { return { s.getX() - 12, s.getBottom() + 16, s.getWidth() + 24, 16 }; }
 
     // Shows the setting the selected compressor type really uses: 1176 limits (amber when the knob is past them),
@@ -789,7 +859,8 @@ private:
         StringArray algos;
         for (int a = 0; a < pv::kNumAlgos; ++a) if (raw (algoId ("on", a)) > 0.5f) algos.add (kAlgoNames[a]);
         StringArray l;
-        l.add (algos.isEmpty() ? "-- NO ALGORITHM --" : algos.joinIntoString (" + "));
+        l.add ((proc.getCurrentProgram() > 0 ? proc.getProgramName (proc.getCurrentProgram()).toUpperCase() + "  /  " : String())
+               + (algos.isEmpty() ? "-- NO ALGORITHM --" : algos.joinIntoString (" + ")));
         l.add ("DECAY " + text ("decay") + "   PRE " + text ("predelay") + "   OS " + osNames()[(int) raw ("os")]
                + "   DSP " + String (proc.dspLoad.load(), 1) + "%");
         l.add ("SIZE " + text ("size") + "   MIX " + text ("mix") + "   DELAY MIX " + text ("dlMix"));
@@ -797,6 +868,7 @@ private:
             if (auto* rp = dynamic_cast<RangedAudioParameter*> (params[lastTouched]))
                 l.add ("> " + rp->getName (40).toUpperCase() + ": " + withUnit (*rp));
         display.lines = l;
+        if (presetBox.getSelectedId() != proc.getCurrentProgram() + 1) presetBox.setSelectedId (proc.getCurrentProgram() + 1, dontSendNotification);
         display.badgeOn[0] = raw ("cpOn") > 0.5f; display.badgeOn[1] = raw ("dlOn") > 0.5f; display.badgeOn[2] = raw ("trOn") > 0.5f;
         display.repaint();
         repaint (inMeter.getUnion (grMeter).expanded (34, 22));
@@ -811,6 +883,7 @@ private:
     PVLook look;
     LcdDisplay display;
     ServicePanel service;
+    ComboBox presetBox;
     std::vector<std::unique_ptr<SliderCtl>> sliders;
     std::vector<std::unique_ptr<ButtonCtl>> buttons;
     std::vector<std::unique_ptr<ComboCtl>> combos;
