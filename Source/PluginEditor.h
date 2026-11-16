@@ -516,10 +516,18 @@ public:
         {
             addButton (sid (s, "on"), kSlotNames[s], false);
             addSlider (sid (s, "lv"), "LEVEL", Fader, false);
-            auto* e = editButtons.add (new TextButton ("EDIT"));
-            e->getProperties().set ("plain", true);
-            e->onClick = [this, s] { selectSlot (s); };
-            addAndMakeVisible (e);
+            // clicking the name opens the algorithm for editing; clicking the light turns it on / off
+            auto& b = button (sid (s, "on"));
+            b.setClickingTogglesState (false);
+            b.onClick = [this, s, &b]
+            {
+                if (b.getMouseXYRelative().x < 30)
+                {
+                    const String id = sid (s, "on");
+                    proc.setParam (id, raw (id) > 0.5f ? 0.0f : 1.0f);
+                }
+                else selectSlot (s);
+            };
         }
         const char* rv[][2] = { { "decay", "DECAY" }, { "lowMult", "LOW DEC" }, { "highMult", "HIGH DEC" }, { "size", "SIZE" },
                                 { "predelay", "PRE-DLY" }, { "build", "BUILD" }, { "early", "EARLY" }, { "diff", "DIFFUSE" },
@@ -543,16 +551,14 @@ public:
         for (auto& e : irk) addSlider (e[0], e[1], Knob, false);
         addButton ("irReverse", "REVERSE", false);
         addButton ("irPitch", "STRETCH PITCH", false);
-        for (auto* b : { &irLoad, &irLoadL, &irLoadR, &irPrev, &irNext, &irClear, &presetPrev, &presetNext, &presetSave, &moreBtn })
+        for (auto* b : { &irLoad, &irPrev, &irNext, &irClear, &presetPrev, &presetNext, &presetSave, &moreBtn })
         {
             b->getProperties().set ("plain", true);
             addAndMakeVisible (*b);
         }
-        irLoad.setButtonText ("LOAD"); irLoadL.setButtonText ("L"); irLoadR.setButtonText ("R");
+        irLoad.setButtonText ("LOAD");
         irPrev.setButtonText ("<"); irNext.setButtonText (">"); irClear.setButtonText ("CLEAR");
-        irLoad.onClick = [this] { chooseIr (0); };
-        irLoadL.onClick = [this] { chooseIr (1); };
-        irLoadR.onClick = [this] { chooseIr (2); };
+        irLoad.onClick = [this] { chooseIr(); };
         irPrev.onClick = [this] { stepIr (-1); };
         irNext.onClick = [this] { stepIr (1); };
         irClear.onClick = [this] { proc.clearIr(); };
@@ -611,8 +617,8 @@ public:
         g.drawText ("OVERSAMPLING", combo ("os").getX() - 112, combo ("os").getY(), 106, combo ("os").getHeight(), Justification::centredRight);
         g.drawText ("OUTPUT", slider ("out").getX() - 66, slider ("out").getY(), 60, slider ("out").getHeight(), Justification::centredRight);
         {
-            auto& e = *editButtons[editSlot];
-            auto c0 = Rectangle<int> (e.getX() - 4, slotArea.getY() + 8, e.getWidth() + 8, slotArea.getHeight() - 14).toFloat();
+            auto& e = button (sid (editSlot, "on"));
+            auto c0 = Rectangle<int> (e.getX() - 1, slotArea.getY() + 12, e.getWidth() + 2, slotArea.getHeight() - 20).toFloat();
             g.setColour (col::white.withAlpha (0.10f)); g.fillRoundedRectangle (c0, 5.0f);
             g.setColour (col::white.withAlpha (0.55f)); g.drawRoundedRectangle (c0, 5.0f, 1.0f);
         }
@@ -630,18 +636,6 @@ public:
         }
         g.setColour (col::lcdText.withAlpha (0.9f)); g.setFont (uiFont (12.0f, true));
         for (auto& c : captions) if (c.visible) g.drawText (c.title, c.area, Justification::centredLeft);
-        // IR file info
-        {
-            g.setColour (col::lcdBg); g.fillRoundedRectangle (irInfoBox.toFloat(), 3.0f);
-            g.setColour (col::lcdText.withAlpha (0.25f)); g.drawRoundedRectangle (irInfoBox.toFloat(), 3.0f, 1.0f);
-            const int lay = proc.irLayout();
-            const String layTxt = lay == pv::IrTrueStereo ? "TRUE STEREO (4 CH)" : lay == pv::IrStereo ? "STEREO" : lay == pv::IrMono ? "MONO" : "NO IR LOADED";
-            g.setColour (col::lcdText); g.setFont (monoFont (12.5f));
-            auto ib = irInfoBox.reduced (10, 4);
-            g.drawText (proc.irInfo().isEmpty() ? String ("-") : proc.irInfo(), ib.removeFromTop (19), Justification::centredLeft, true);
-            g.setColour (col::lcdText.withAlpha (0.75f));
-            g.drawText (layTxt + (proc.irRecordedRt() > 0 ? "   RT " + String (proc.irRecordedRt(), 2) + " s" : String()), ib.removeFromTop (19), Justification::centredLeft, true);
-        }
         for (auto& c : sliders)
         {
             if (! c->slider.isVisible() || c->baseId == "out") continue;
@@ -712,14 +706,11 @@ public:
         // row A: IR panel + viewer
         Rectangle<int> ir (16, 76, 400, 300); addSection (ir, "IMPULSE RESPONSE", false);
         irLoad.setBounds (ir.getX() + 12, ir.getY() + 18, 70, 28);
-        irLoadL.setBounds (ir.getX() + 88, ir.getY() + 18, 36, 28);
-        irLoadR.setBounds (ir.getX() + 128, ir.getY() + 18, 36, 28);
-        irPrev.setBounds (ir.getX() + 172, ir.getY() + 18, 36, 28);
-        irNext.setBounds (ir.getX() + 212, ir.getY() + 18, 36, 28);
+        irPrev.setBounds (ir.getX() + 92, ir.getY() + 18, 36, 28);
+        irNext.setBounds (ir.getX() + 132, ir.getY() + 18, 36, 28);
         irClear.setBounds (ir.getX() + 300, ir.getY() + 18, 88, 28);
-        irInfoBox = { ir.getX() + 12, ir.getY() + 52, 376, 46 };
         const char* irIds[] = { "irStart", "irXover", "irFadeOut", "irXfeed", "irXdelay", "irAsym" };
-        for (int i = 0; i < 6; ++i) slider (irIds[i]).setBounds (ir.getX() + 48 + (i % 3) * 124, ir.getY() + 104 + (i / 3) * 80, 46, 46);
+        for (int i = 0; i < 6; ++i) slider (irIds[i]).setBounds (ir.getX() + 48 + (i % 3) * 124, ir.getY() + 70 + (i / 3) * 92, 46, 46);
         button ("irReverse").setBounds (ir.getX() + 12, ir.getY() + 266, 150, 26);
         button ("irPitch").setBounds (ir.getX() + 200, ir.getY() + 266, 188, 26);
         wave.setBounds (428, 76, 956, 300);
@@ -730,8 +721,7 @@ public:
         {
             const int x = slotArea.getX() + 8 + s * 78;
             button (sid (s, "on")).setBounds (x, slotArea.getY() + 18, 76, 30);
-            slider (sid (s, "lv")).setBounds (x + 19, slotArea.getY() + 82, 38, 160);
-            editButtons[s]->setBounds (x + 6, slotArea.getY() + 262, 64, 28);
+            slider (sid (s, "lv")).setBounds (x + 19, slotArea.getY() + 82, 38, 186);
         }
         Rectangle<int> rv (428, 398, 956, 296); addSection (rv, "REVERB", true);
         comboBase ("matA").setBounds (rv.getX() + 14, rv.getY() + 34, 270, 28);
@@ -876,7 +866,6 @@ private:
                 if (c->baseId == "matA" || c->baseId == "matB") { c->box.clear (dontSendNotification); c->box.addItemList (materialNames (s), 1); }
                 c->att = std::make_unique<APVTS::ComboBoxAttachment> (proc.apvts, sid (s, c->baseId), c->box);
             }
-        for (int k = 0; k < editButtons.size(); ++k) editButtons[k]->setToggleState (k == s, dontSendNotification);
         proc.viewSlot.store (s);
         proc.apvts.state.setProperty ("editSlot", s, nullptr);
         wave.slot = s;
@@ -993,23 +982,26 @@ private:
 
     // ---------------------------------------------------------------- IR files
     std::unique_ptr<FileChooser> chooser;
-    void chooseIr (int mode)                // 0 = file (auto pair), 1 = left-input file, 2 = right-input file
+    // One LOAD for everything: pick one file (its L/R partner is found by name), or select the
+    // L and R files together and both are loaded as a pair.
+    void chooseIr()
     {
         File start = proc.irFileA().existsAsFile() ? proc.irFileA().getParentDirectory() : File::getSpecialLocation (File::userDocumentsDirectory);
-        chooser = std::make_unique<FileChooser> (mode == 0 ? "Load impulse response" : mode == 1 ? "Load IR for the LEFT input" : "Load IR for the RIGHT input",
+        chooser = std::make_unique<FileChooser> ("Load impulse response (select one file, or the L and R files together)",
                                                  start, "*.wav;*.aif;*.aiff;*.flac");
-        chooser->launchAsync (FileBrowserComponent::openMode | FileBrowserComponent::canSelectFiles, [this, mode] (const FileChooser& fc)
+        chooser->launchAsync (FileBrowserComponent::openMode | FileBrowserComponent::canSelectFiles | FileBrowserComponent::canSelectMultipleItems,
+                              [this] (const FileChooser& fc)
         {
-            const File f = fc.getResult();
-            if (! f.existsAsFile()) return;
-            if (mode == 0) loadAuto (f);
-            else
+            Array<File> fs;
+            for (auto& f : fc.getResults()) if (f.existsAsFile()) fs.add (f);
+            if (fs.isEmpty()) return;
+            if (fs.size() >= 2)
             {
-                File a (proc.apvts.state.getProperty ("irA").toString()), b (proc.apvts.state.getProperty ("irB").toString());
-                if (mode == 1) a = f; else b = f;
-                if (! a.existsAsFile()) { a = b; b = File(); }
+                File a = fs[0], b = fs[1];
+                if (irSide (a) == 1 || irSide (b) == 0) std::swap (a, b);     // put the left file first
                 proc.requestIrLoad (a, b, true);
             }
+            else loadAuto (fs[0]);
             selectSlot (pv::IR);
             if (raw (sid (pv::IR, "on")) < 0.5f) proc.setParam (sid (pv::IR, "on"), 1.0f);
         });
@@ -1086,7 +1078,7 @@ private:
             wave.repaint();
         }
         if (changed) { repaint(); wave.repaint(); }
-        else { if (! collapsed) repaint (inMeter.getUnion (grMeter).expanded (40, 24)); repaint (irInfoBox); }
+        else { if (! collapsed) repaint (inMeter.getUnion (grMeter).expanded (40, 24)); }
     }
 
     PlateVerbProcessor& proc;
@@ -1094,13 +1086,12 @@ private:
     WaveView wave;
     ServicePanel service;
     ComboBox presetBox;
-    TextButton presetPrev, presetNext, presetSave, irLoad, irLoadL, irLoadR, irPrev, irNext, irClear, moreBtn;
-    OwnedArray<TextButton> editButtons;
+    TextButton presetPrev, presetNext, presetSave, irLoad, irPrev, irNext, irClear, moreBtn;
     std::vector<std::unique_ptr<SliderCtl>> sliders;
     std::vector<std::unique_ptr<ButtonCtl>> buttons;
     std::vector<std::unique_ptr<ComboCtl>> combos;
     std::vector<Section> sections, captions;
-    Rectangle<int> inMeter, grMeter, slotArea, irInfoBox, titleArea, dspArea { 214, 10, 104, 22 };
+    Rectangle<int> inMeter, grMeter, slotArea, titleArea, dspArea { 214, 10, 104, 22 };
     float shownDsp = 0.0f; int dspTick = 0;
     Array<float> lastValues; int editSlot = 0, lastWaveVersion = -1; bool collapsed = false;
 
