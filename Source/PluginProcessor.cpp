@@ -44,7 +44,7 @@ public:
         pMod = P ("mod"); pEarly = P ("early"); pMix = P ("mix");
         for (int b = 0; b < 4; ++b) { pEqF[b] = P (algoId ("eqF", b)); pEqG[b] = P (algoId ("eqG", b)); }
         pCpOn = P ("cpOn"); pCpThr = P ("cpThr"); pCpRatio = P ("cpRatio"); pCpAtk = P ("cpAtk"); pCpRel = P ("cpRel");
-        pCpMakeup = P ("cpMakeup"); pCpMix = P ("cpMix"); pCpType = P ("cpType"); pCpTone = P ("cpTone");
+        pCpMakeup = P ("cpMakeup"); pCpMix = P ("cpMix"); pCpType = P ("cpType"); pCpTone = P ("cpTone"); pCpDuck = P ("cpDuck");
         pDlPanL = P ("dlPanL"); pDlPanR = P ("dlPanR"); pDlWidth = P ("dlWidth");
         pDlOn = P ("dlOn"); pDlSync = P ("dlSync"); pDlPing = P ("dlPing"); pDlTimeL = P ("dlTimeL"); pDlTimeR = P ("dlTimeR");
         pDlDivL = P ("dlDivL"); pDlDivR = P ("dlDivR"); pDlFb = P ("dlFb"); pDlMix = P ("dlMix");
@@ -115,6 +115,7 @@ public:
             l.add (fp (algoId ("eqG", b), String ("Reverb EQ ") + bandNames[b] + " Gain", -15.0f, 15.0f, 0.0f, -1.0f, "dB", 1));
         }
         l.add (bp ("cpOn", "Comp On", false));
+        l.add (bp ("cpDuck", "Comp Ducking", false));
         l.add (cp ("cpType", "Comp Type", compTypeNames(), 0));
         l.add (cp ("cpTone", "Comp Tone", StringArray { "Clean", "Vintage" }, 0));
         l.add (fp ("cpThr", "Comp Threshold", -70.0f, 0.0f, -30.0f, -1.0f, "dB", 1));
@@ -192,7 +193,7 @@ public:
         for (int b = 0; b < 4; ++b) { prm.eqF[b] = f (pEqF[b]); prm.eqG[b] = f (pEqG[b]); }
         prm.compOn = on (pCpOn); prm.compThr = f (pCpThr); prm.compRatio = f (pCpRatio); prm.compAtk = f (pCpAtk) * 1000.0f;
         prm.compRel = f (pCpRel) * 1000.0f; prm.compMakeup = f (pCpMakeup); prm.compMix = f (pCpMix);
-        prm.compType = jlimit (0, 3, (int) f (pCpType)); prm.compVintage = f (pCpTone) > 0.5f;
+        prm.compType = jlimit (0, 3, (int) f (pCpType)); prm.compVintage = f (pCpTone) > 0.5f; prm.compDuck = on (pCpDuck);
         prm.dlPanL = f (pDlPanL); prm.dlPanR = f (pDlPanR); prm.dlWidth = f (pDlWidth);
         prm.delayOn = on (pDlOn); prm.pingPong = on (pDlPing); prm.delayFb = f (pDlFb); prm.delayMix = f (pDlMix);
         prm.dlLowDb = f (pDlLow); prm.dlMidDb = f (pDlMid); prm.dlMidHz = f (pDlMidF); prm.dlHighDb = f (pDlHigh);
@@ -248,7 +249,7 @@ private:
         *pCpRel = nullptr, *pCpMakeup = nullptr, *pCpMix = nullptr, *pDlOn = nullptr, *pDlSync = nullptr, *pDlPing = nullptr,
         *pDlTimeL = nullptr, *pDlTimeR = nullptr, *pDlDivL = nullptr, *pDlDivR = nullptr, *pDlFb = nullptr, *pDlMix = nullptr,
         *pDlLow = nullptr, *pDlMid = nullptr, *pDlMidF = nullptr, *pDlHigh = nullptr, *pTrOn = nullptr, *pTrModel = nullptr,
-        *pTrFreq = nullptr, *pTrAmt = nullptr, *pOut = nullptr, *pCpType = nullptr, *pCpTone = nullptr,
+        *pTrFreq = nullptr, *pTrAmt = nullptr, *pOut = nullptr, *pCpType = nullptr, *pCpTone = nullptr, *pCpDuck = nullptr,
         *pDlPanL = nullptr, *pDlPanR = nullptr, *pDlWidth = nullptr;
     double sampleRateHz = 48000.0;
 
@@ -485,6 +486,7 @@ public:
         for (int b = 0; b < 4; ++b) { addSlider (algoId ("eqF", b), String (bn[b]) + " HZ", false); addSlider (algoId ("eqG", b), String (bn[b]) + " dB", false); }
         // compressor
         addButton ("cpOn", "COMP");
+        addButton ("cpDuck", "DUCK");
         addCombo ("cpType", compTypeNames(), "TYPE");
         addCombo ("cpTone", StringArray { "Clean", "Vintage" }, "TONE");
         const char* cpn[][2] = { { "cpThr", "THRESH" }, { "cpRatio", "RATIO" }, { "cpAtk", "ATTACK" },
@@ -619,7 +621,7 @@ public:
         g.drawText (inDb <= -59.9f ? String ("-inf") : String (inDb, 1), inMeter.getX() - 14, inMeter.getY() - 18, inMeter.getWidth() + 28, 14, Justification::centred);
         g.drawText (grDb < 0.05f ? String ("0.0") : String (-grDb, 1), grMeter.getX() - 14, grMeter.getY() - 18, grMeter.getWidth() + 28, 14, Justification::centred);
         g.setColour (col::white); g.setFont (uiFont (10.0f, true));
-        g.drawText ("IN dB", inMeter.getX() - 14, inMeter.getBottom() + 2, inMeter.getWidth() + 28, 14, Justification::centred);
+        g.drawText (raw ("cpDuck") > 0.5f ? "DRY dB" : "IN dB", inMeter.getX() - 14, inMeter.getBottom() + 2, inMeter.getWidth() + 28, 14, Justification::centred);
         g.drawText ("GR dB", grMeter.getX() - 14, grMeter.getBottom() + 2, grMeter.getWidth() + 28, 14, Justification::centred);
     }
 
@@ -660,8 +662,9 @@ public:
         const char* cpIds[] = { "cpThr", "cpRatio", "cpAtk", "cpRel", "cpMakeup", "cpMix" };
         for (int i = 0; i < 6; ++i)
             slider (cpIds[i]).setBounds (cp.getX() + 14 + (i % 3) * 78, cp.getY() + 92 + (i / 3) * 98, 54, 54);
-        inMeter = { cp.getX() + 276, cp.getY() + 92, 16, 150 };
-        grMeter = { cp.getX() + 318, cp.getY() + 92, 16, 150 };
+        inMeter = { cp.getX() + 276, cp.getY() + 88, 16, 132 };
+        grMeter = { cp.getX() + 318, cp.getY() + 88, 16, 132 };
+        button ("cpDuck").setBounds (cp.getX() + 262, cp.getY() + 248, 96, 26);
 
         // delay
         Rectangle<int> dl (742, 420, 482, 288); addSection (dl, "STEREO DELAY");
