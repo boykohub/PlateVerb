@@ -157,68 +157,99 @@ struct Resampler {
     }
 };
 
-// ---------------------------------------------------------------- plate (Dattorro)
+// ---------------------------------------------------------------- frequency-dependent decay
+// Splits the loop signal at 300 Hz and 4 kHz and gives each band its own loop gain, so the
+// lows can ring longer (Low Decay) and the highs die faster (High Decay) than the mids.
+struct BandDecay {
+    OnePole lo, hi; float gL = 1, gM = 1, gH = 1;
+    void setX (float fs) { lo.setCut (fs, 300.0f); hi.setCut (fs, 4000.0f); }
+    void setGains (float loopSec, float rtMid, float lowMul, float highMul) {
+        auto g = [loopSec] (float rt) { return std::min (0.9995f, std::pow (10.0f, -3.0f * loopSec / std::max (0.05f, rt))); };
+        gM = g (rtMid); gL = g (rtMid * lowMul); gH = g (rtMid * highMul);
+    }
+    void reset() { lo.reset(); hi.reset(); }
+    inline float process (float x) { const float l = lo.lp (x), h = x - hi.lp (x); return l * gL + (x - l - h) * gM + h * gH; }
+};
+
+// ---------------------------------------------------------------- plate (Dattorro tank, true-stereo input)
 struct PlateAlgo {
-    Line d1, d2, d3, d4, apL1, dL1, apL2, dL2, apR1, dR1, apR2, dR2;
-    float fs = 48000, s = 1, lpL = 0, lpR = 0, tankL = 0, tankR = 0, phase = 0;
+    static constexpr int kEarly = 5;
+    Line d1, d2, d3, d4, e1, e2, e3, e4, apL1, dL1, apL2, dL2, apR1, dR1, apR2, dR2, ea[kEarly], eb[kEarly];
+    BandDecay bdL, bdR;
+    float fs = 48000, s = 1, lpL = 0, lpR = 0, tankL = 0, tankR = 0, phase = 0, eScale = 1;
+    // early-onset diffusers; 'build' stretches them (3 - 55 ms -> x0.2 - x3.7) to put more energy up front
+    static constexpr float kEaMs[kEarly] = { 0.93f, 1.71f, 3.07f, 5.3f, 8.9f }, kEbMs[kEarly] = { 1.13f, 1.97f, 2.71f, 6.1f, 10.3f };
+    static constexpr float kMaxEScale = 55.0f / 15.0f;
     void init (float maxFs) {
         float sm = maxFs / 29761.0f * kMaxSize;
         auto sz = [sm] (float n) { return (int) std::ceil (n * sm) + 64; };
         d1.init (sz (142)); d2.init (sz (107)); d3.init (sz (379)); d4.init (sz (277));
+        e1.init (sz (153)); e2.init (sz (115)); e3.init (sz (406)); e4.init (sz (297));
         apL1.init (sz (704)); dL1.init (sz (4453)); apL2.init (sz (1800)); dL2.init (sz (3720));
         apR1.init (sz (940)); dR1.init (sz (4217)); apR2.init (sz (2656)); dR2.init (sz (3163));
+        for (int i = 0; i < kEarly; ++i) { ea[i].init ((int) (kEaMs[i] * kMaxEScale * 0.001f * maxFs) + 16); eb[i].init ((int) (kEbMs[i] * kMaxEScale * 0.001f * maxFs) + 16); }
     }
     void clear() {
         const float sm = fs / 29761.0f * kMaxSize;
         auto sz = [sm] (float n) { return (int) std::ceil (n * sm) + 64; };
         d1.clearRecent (sz (142)); d2.clearRecent (sz (107)); d3.clearRecent (sz (379)); d4.clearRecent (sz (277));
+        e1.clearRecent (sz (153)); e2.clearRecent (sz (115)); e3.clearRecent (sz (406)); e4.clearRecent (sz (297));
         apL1.clearRecent (sz (704)); dL1.clearRecent (sz (4453)); apL2.clearRecent (sz (1800)); dL2.clearRecent (sz (3720));
         apR1.clearRecent (sz (940)); dR1.clearRecent (sz (4217)); apR2.clearRecent (sz (2656)); dR2.clearRecent (sz (3163));
+        for (int i = 0; i < kEarly; ++i) { ea[i].clearRecent ((int) (kEaMs[i] * kMaxEScale * 0.001f * fs) + 16); eb[i].clearRecent ((int) (kEbMs[i] * kMaxEScale * 0.001f * fs) + 16); }
+        bdL.reset(); bdR.reset();
         lpL = lpR = tankL = tankR = phase = 0;
     }
-    // in: mono input; rt: seconds; damp: one-pole coefficient (1 = bright)
-    float decay = 0.5f;
-    void update (float rt, float size) {
+    void update (float rt, float size, float lowMul, float highMul, float buildMs) {
         s = fs / 29761.0f * size;
-        const float halfLoop = 0.363f * size;           // seconds per tank half
-        decay = std::min (0.995f, std::pow (10.0f, -1.5f * halfLoop / std::max (0.05f, rt)));
+        eScale = clampf (buildMs / 15.0f, 0.2f, kMaxEScale);
+        const float halfLoop = 10645.0f * s / fs;        // seconds around one half of the tank
+        bdL.setX (fs); bdR.setX (fs);
+        bdL.setGains (halfLoop, rt, lowMul, highMul); bdR.setGains (halfLoop, rt, lowMul, highMul);
     }
-    inline void process (float in, float dampA, float mod, float& oL, float& oR) {
+    // inL/inR: separate inputs (true stereo); early: level of the fast, dense onset
+    inline void process (float inL, float inR, float dampA, float mod, float early, float& oL, float& oR) {
         const float exc = mod * 16.0f * s;
-        float x = in;
-        x = allpass (d1, 142 * s, 0.75f, x);  x = allpass (d2, 107 * s, 0.75f, x);
-        x = allpass (d3, 379 * s, 0.625f, x); x = allpass (d4, 277 * s, 0.625f, x);
+        float xL = allpass (d1, 142 * s, 0.75f, inL);  xL = allpass (d2, 107 * s, 0.75f, xL);
+        xL = allpass (d3, 379 * s, 0.625f, xL); xL = allpass (d4, 277 * s, 0.625f, xL);
+        float xR = allpass (e1, 153 * s, 0.75f, inR);  xR = allpass (e2, 115 * s, 0.75f, xR);
+        xR = allpass (e3, 406 * s, 0.625f, xR); xR = allpass (e4, 297 * s, 0.625f, xR);
         phase += 2 * kPi * 0.9f / fs; if (phase > 2 * kPi) phase -= 2 * kPi;
         const float m1 = std::sin (phase), m2 = std::cos (phase);
-        float a = allpass (apL1, 672 * s + exc * m1 + exc, -0.7f, x + decay * tankR);
+        float a = allpass (apL1, 672 * s + exc * m1 + exc, -0.7f, xR + tankR);
         float t1 = dL1.read (4453 * s); dL1.push (a); lpL += dampA * (t1 - lpL);
-        float b = allpass (apL2, 1800 * s, 0.5f, lpL * decay);
+        float b = allpass (apL2, 1800 * s, 0.5f, bdL.process (lpL));
         float t2 = dL2.read (3720 * s); dL2.push (b);
-        float c = allpass (apR1, 908 * s + exc * m2 + exc, -0.7f, x + decay * tankL);
+        float c = allpass (apR1, 908 * s + exc * m2 + exc, -0.7f, xL + tankL);
         float t3 = dR1.read (4217 * s); dR1.push (c); lpR += dampA * (t3 - lpR);
-        float e = allpass (apR2, 2656 * s, 0.5f, lpR * decay);
+        float e = allpass (apR2, 2656 * s, 0.5f, bdR.process (lpR));
         float t4 = dR2.read (3163 * s); dR2.push (e);
         tankL = t2; tankR = t4;
         auto T = [this] (const Line& l, float n) { return l.read (n * s); };
         oL = 0.6f * (T (dR1, 266) + T (dR1, 2974) - T (apR2, 1913) + T (dR2, 1996) - T (dL1, 1990) - T (apL2, 187) - T (dL2, 1066));
         oR = 0.6f * (T (dL1, 353) + T (dL1, 3627) - T (apL2, 1228) + T (dL2, 2673) - T (dR1, 2111) - T (apR2, 335) - T (dR2, 121));
+        if (early > 0.0f) {                              // dense onset within ~1-5 ms, like a real plate's attack
+            float qL = inL, qR = inR;
+            for (int i = 0; i < kEarly; ++i) { qL = allpass (ea[i], kEaMs[i] * eScale * 0.001f * fs, 0.68f, qL); qR = allpass (eb[i], kEbMs[i] * eScale * 0.001f * fs, 0.68f, qR); }
+            oL += early * 1.2f * qL; oR += early * 1.2f * qR;
+        }
     }
 };
 
 // ---------------------------------------------------------------- room/chamber/hall/church/stadium (FDN)
 struct FdnConfig {
     float size, rtMul, diff, dampMul, erLevel, lateLevel, erStartMs, erEndMs, modMs;
-    int erTaps; float slapMs1, slapMs2, slapGain;
+    int erTaps; float slapMs1, slapMs2, slapGain; bool denseER;
 };
 
 inline const FdnConfig& fdnConfig (int algo) {
     static const FdnConfig c[kNumAlgos] = {
-        { 1.0f, 1.0f, 0.70f, 1.00f, 0.0f, 1.0f, 0, 0, 0, 0, 0, 0, 0 },                  // plate (unused)
-        { 0.42f, 0.45f, 0.72f, 0.95f, 0.85f, 0.85f, 2.7f, 34.0f, 0.25f, 14, 0, 0, 0 },     // room
-        { 0.62f, 0.70f, 0.80f, 0.70f, 0.60f, 1.00f, 4.5f, 58.0f, 0.30f, 14, 0, 0, 0 },     // chamber
-        { 1.15f, 1.00f, 0.75f, 1.00f, 0.45f, 1.00f, 11.0f, 96.0f, 0.45f, 12, 0, 0, 0 },    // hall
-        { 1.70f, 1.90f, 0.70f, 1.25f, 0.35f, 1.00f, 21.0f, 165.0f, 0.55f, 12, 0, 0, 0 },   // church
-        { 2.50f, 1.40f, 0.50f, 1.45f, 0.50f, 0.90f, 38.0f, 330.0f, 0.65f, 10, 185.0f, 270.0f, 0.55f } // stadium
+        { 1.0f, 1.0f, 0.70f, 1.00f, 0.0f, 1.0f, 0, 0, 0, 0, 0, 0, 0, false },                  // plate (unused)
+        { 0.42f, 0.45f, 0.72f, 0.95f, 0.85f, 0.85f, 2.7f, 34.0f, 0.25f, 14, 0, 0, 0, false },     // room
+        { 0.62f, 1.00f, 0.85f, 0.70f, 0.90f, 1.00f, 1.0f, 60.0f, 0.30f, 0, 0, 0, 0, true },       // chamber: dense 480L-style ER burst
+        { 1.15f, 1.00f, 0.75f, 1.00f, 0.45f, 1.00f, 11.0f, 96.0f, 0.45f, 12, 0, 0, 0, false },    // hall
+        { 1.70f, 1.90f, 0.70f, 1.25f, 0.35f, 1.00f, 21.0f, 165.0f, 0.55f, 12, 0, 0, 0, false },   // church
+        { 2.50f, 1.40f, 0.50f, 1.45f, 0.50f, 0.90f, 38.0f, 330.0f, 0.65f, 10, 185.0f, 270.0f, 0.55f, false } // stadium
     };
     return c[algo];
 }
@@ -227,6 +258,10 @@ struct FdnAlgo {
     static constexpr int L = 8;
     Line lines[L], difL[4], difR[4], er;
     OnePole damp[L];
+    BandDecay band[L];
+    static constexpr int kDense = 128;
+    float erNormDense = 1.0f;
+    float jit[kDense] = {}, sgnL[kDense] = {}, sgnR[kDense] = {};
     float lenMs[L] = { 31.3f, 37.9f, 41.3f, 47.1f, 53.9f, 61.7f, 67.3f, 79.9f };
     float difMs[4] = { 4.77f, 3.59f, 12.73f, 9.30f };
     std::vector<float> tapMs, tapGL, tapGR;
@@ -254,7 +289,13 @@ struct FdnAlgo {
             tapMs.push_back (c.slapMs1); tapGL.push_back (c.slapGain); tapGR.push_back (c.slapGain * 0.5f);
             tapMs.push_back (c.slapMs2); tapGL.push_back (c.slapGain * 0.45f); tapGR.push_back (c.slapGain * 0.8f);
         }
+        if (c.denseER) {
+            // mostly positive reflections keep the low end; independent L/R patterns keep the stereo wide
+            for (int k = 0; k < kDense; ++k) { jit[k] = rnd() * 2.0f - 1.0f; sgnL[k] = rnd() < 0.25f ? -0.6f : 1.0f; sgnR[k] = rnd() < 0.25f ? -0.6f : 1.0f; }
+            tapMs.assign (kDense, 0.0f); tapGL.assign (kDense, 0.0f); tapGR.assign (kDense, 0.0f);
+        }
         maxTap = 0; for (float m : tapMs) maxTap = std::max (maxTap, m);
+        if (c.denseER) maxTap = 250.0f / kMaxSize;
         er.init ((int) (maxTap * kMaxSize * maxFs * 0.001f) + 16);
     }
     float maxTap = 0;
@@ -264,19 +305,38 @@ struct FdnAlgo {
         for (int i = 0; i < L; ++i) lines[i].clearRecent ((int) (lenMs[i] * k + c.modMs * 2 * fs * 0.001f) + 16);
         for (int i = 0; i < 4; ++i) { difL[i].clearRecent ((int) (difMs[i] * 1.07f * k) + 16); difR[i].clearRecent ((int) (difMs[i] * 1.07f * k) + 16); }
         er.clearRecent ((int) (maxTap * kMaxSize * fs * 0.001f) + 16);
-        for (auto& d : damp) d.reset(); phase = hpL = hpR = 0;
+        for (auto& d : damp) d.reset();
+        for (auto& bd : band) bd.reset();
+        phase = hpL = hpR = 0;
     }
 
     float k = 1, kEr = 1, gain[L] = {}, len[L] = {};
-    void update (float rt, float dampHz, float size) {
+    void update (float rt, float dampHz, float size, float lowMul, float highMul, float buildMs) {
         const FdnConfig& c = fdnConfig (algo);
         k = fs * 0.001f * c.size * size;
-        kEr = fs * 0.001f * size;
+        kEr = fs * 0.001f * (c.denseER ? 1.0f : size);
         const float rtA = std::max (0.05f, rt * c.rtMul);
         for (int i = 0; i < L; ++i) {
             len[i] = lenMs[i] * k;
-            gain[i] = std::pow (10.0f, -3.0f * (len[i] / fs) / rtA);
+            gain[i] = 1.0f;
             damp[i].setCut (fs, dampHz / c.dampMul);
+            band[i].setX (fs);
+            band[i].setGains (len[i] / fs, rtA, lowMul, highMul);
+        }
+        if (c.denseER) {           // reflections every ~1.8 ms for 'build' ms (480L-style spread): quick rise, gentle sag, short fade
+            const float len = clampf (buildMs, 3.0f, 230.0f), att = std::min (12.0f, len * 0.3f), spacing = 1.8f * (0.8f + 0.2f * size);
+            float sumSq = 0.0f;
+            for (int t = 0; t < kDense; ++t) {
+                float ms = 0.3f + t * spacing * (1.0f + 0.15f * jit[t]);
+                float env;
+                if (ms < att) env = ms / att;
+                else if (ms < len) env = 1.0f - 0.4f * (ms - att) / std::max (1.0f, len - att);
+                else env = std::max (0.0f, 0.6f * (1.0f - (ms - len) / 4.0f));
+                if (ms > 240.0f) env = 0.0f;
+                tapMs[(size_t) t] = std::min (ms, 240.0f); tapGL[(size_t) t] = env * sgnL[t]; tapGR[(size_t) t] = env * sgnR[t];
+                sumSq += env * env;
+            }
+            erNormDense = 1.0f / std::sqrt (std::max (1.0f, sumSq));
         }
     }
     inline void process (float inL, float inR, float mod, float erAmt, float& oL, float& oR) {
@@ -285,10 +345,12 @@ struct FdnAlgo {
         er.push (0.5f * (inL + inR));
         float eL = 0, eR = 0;
         for (size_t t = 0; t < tapMs.size(); ++t) { float v = er.read (std::max (1.0f, tapMs[t] * kEr)); eL += v * tapGL[t]; eR += v * tapGR[t]; }
-        const float erNorm = 1.0f / std::sqrt ((float) tapMs.size());
+        const float erNorm = c.denseER ? erNormDense * 1.4f : 1.0f / std::sqrt ((float) tapMs.size());
         eL *= erNorm * 1.6f; eR *= erNorm * 1.6f;
         // input diffusion
-        float xL = inL + 0.35f * eL, xR = inR + 0.35f * eR;
+        // dense-ER (chamber): the tail is fed mostly by the reflection burst, so 'build' also shapes the bloom
+        float xL = c.denseER ? 0.3f * inL + 0.9f * eL : inL + 0.35f * eL;
+        float xR = c.denseER ? 0.3f * inR + 0.9f * eR : inR + 0.35f * eR;
         const float g1 = 0.75f * c.diff, g2 = 0.62f * c.diff;
         xL = allpass (difL[0], difMs[0] * k, g1, xL); xL = allpass (difL[1], difMs[1] * k, g1, xL);
         xL = allpass (difL[2], difMs[2] * k, g2, xL); xL = allpass (difL[3], difMs[3] * k, g2, xL);
@@ -301,7 +363,7 @@ struct FdnAlgo {
         for (int i = 0; i < L; ++i) {
             float m = (i == 1) ? md * (1 + std::sin (phase)) : (i == 6) ? md * (1 + std::cos (phase * 1.31f)) : 0.0f;
             float v = lines[i].read (len[i] + m + 1.0f);
-            v = damp[i].lp (v) * gain[i];
+            v = band[i].process (damp[i].lp (v));
             y[i] = v; sum += v;
         }
         sum *= 2.0f / L;
@@ -509,6 +571,7 @@ struct Params {
     int oversampling = 1;                  // 1,2,3,4,6
     bool algoOn[kNumAlgos] = { true, false, false, false, false, false };
     float algoLevel[kNumAlgos] = { 1, 1, 1, 1, 1, 1 };
+    float lowMult = 1.0f, highMult = 1.0f, buildMs = 15.0f, inWidth = 1.0f;   // inWidth: 0 = mono input, 1 = true stereo
     float decaySec = 2.5f, size = 1.0f, predelayMs = 10, damping = 0.35f, tone = 0.75f, mod = 0.5f, early = 0.7f;
     float rvMix = 0.3f;
     float eqF[4] = { 100, 400, 2500, 8000 }, eqG[4] = { 0, 0, 0, 0 };
@@ -564,8 +627,8 @@ public:
         comp.setTimes (p.compAtk, p.compRel);
         const float dampHz = 20000.0f * std::pow (0.05f, p.damping);
         const float plateDampA = 1.0f - std::exp (-2.0f * kPi * std::min (dampHz, 0.45f * fs) / fs);
-        plate.update (p.decaySec, p.size);
-        for (int a = 1; a < kNumAlgos; ++a) fdn[a].update (p.decaySec, dampHz, p.size);
+        plate.update (p.decaySec, p.size, p.lowMult, p.highMult, p.buildMs);
+        for (int a = 1; a < kNumAlgos; ++a) fdn[a].update (p.decaySec, dampHz, p.size, p.lowMult, p.highMult, p.buildMs);
         const float preS = std::max (1.0f, p.predelayMs * 0.001f * fs);
         const float tL = clampf (p.delayMsL * 0.001f * fs, 1.0f, kMaxDelaySec * fs - 4);
         const float tR = clampf (p.delayMsR * 0.001f * fs, 1.0f, kMaxDelaySec * fs - 4);
@@ -577,6 +640,7 @@ public:
         auto panGains = [] (float pan, float& gl, float& gr) { float a = (clampf (pan, -1, 1) + 1) * 0.25f * kPi; gl = std::cos (a); gr = std::sin (a); };
         float pLl, pLr, pRl, pRr; panGains (p.dlPanL, pLl, pLr); panGains (p.dlPanR, pRl, pRr);
         const float width = clampf (p.dlWidth, 0.0f, 2.0f);
+        const float inW = clampf (p.inWidth, 0.0f, 1.0f);
         const float tgtRv = p.rvMix, tgtDl = p.delayOn ? p.delayMix : 0.0f, tgtOut = dbToGain (p.outGainDb);
 
         int nOn = 0; for (int a = 0; a < kNumAlgos; ++a) nOn += p.algoOn[a] ? 1 : 0;
@@ -594,6 +658,7 @@ public:
                 float pl = preL.read (preS), pr = preR.read (preS);
                 preL.push (xL); preR.push (xR);
                 pl = tone[0].lp (pl); pr = tone[1].lp (pr);
+                { const float mid = 0.5f * (pl + pr), side = 0.5f * (pl - pr) * inW; pl = mid + side; pr = mid - side; }
                 float wL = 0, wR = 0;
                 for (int a = 0; a < kNumAlgos; ++a) {
                     sAlgo[a] += smA * (tgtAlgo[a] - sAlgo[a]);
@@ -604,7 +669,7 @@ public:
                     if (algoDirty[a]) { if (a == Plate) plate.clear(); else fdn[a].clear(); algoDirty[a] = false; }
                     running[a] = true;
                     float oL, oR;
-                    if (a == Plate) plate.process (0.5f * (pl + pr), plateDampA, p.mod, oL, oR);
+                    if (a == Plate) plate.process (pl, pr, plateDampA, p.mod, p.early, oL, oR);
                     else fdn[a].process (pl, pr, p.mod, p.early, oL, oR);
                     wL += oL * sAlgo[a]; wR += oR * sAlgo[a];
                 }
