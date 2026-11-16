@@ -303,19 +303,28 @@ inline float warmSat (float x, float k, float b) {        // unity small-signal 
 }
 
 struct Compressor {
-    float fs = 48000, aA = 0, aR = 0, aM = 0, inPk = 0;
-    float aOptA = 0, aOptRf = 0, aOptRs = 0, aMem = 0, aRms = 0;
-    float envV = 0, envF = 0, envO = 0, mem = 0, rms = 0, grTotal = 0;
+    // Time settings are "time to complete": attack = time to reach full gain reduction,
+    // release = time for gain reduction to return to 0 dB (exponential, ~99.75 % at that time, then snapped to 0).
+    // FET follows 1176 specs: attack 20 us - 800 us, release 50 ms - 1.1 s.
+    // Opto follows LA-2A behaviour: fixed ~10 ms attack, about half the release in 60 ms,
+    // the rest over 1.5 - 15 s depending on how long and hard it has been compressing.
+    static constexpr float kFetAtkMin = 0.02f, kFetAtkMax = 0.8f, kFetRelMin = 50.0f, kFetRelMax = 1100.0f;   // ms
+    float fs = 48000, aM = 0, inPk = 0;
+    float aA = 0, aR = 0, aFA = 0, aFR = 0, aOA = 0, aOFast = 0, aOSlow1 = 0, aOSlow2 = 0, aMem = 0, aRms = 0;
+    float envV = 0, envF = 0, envOf = 0, envOs = 0, mem = 0, rms = 0, grTotal = 0;
     Biquad tubeLp[2], tubeLow[2], dc[2];
-    void reset() { envV = envF = envO = mem = rms = grTotal = inPk = 0; for (int c = 0; c < 2; ++c) { tubeLp[c].reset(); tubeLow[c].reset(); dc[c].reset(); } }
-    static float coef (float ms, float fs) { return std::exp (-1.0f / (std::max (0.02f, ms) * 0.001f * fs)); }
+    void reset() { envV = envF = envOf = envOs = mem = rms = grTotal = inPk = 0; for (int c = 0; c < 2; ++c) { tubeLp[c].reset(); tubeLow[c].reset(); dc[c].reset(); } }
+    static float tc (float tauMs, float fs) { return std::exp (-1.0f / (std::max (0.001f, tauMs) * 0.001f * fs)); }
+    static float done (float ms, float fs) { return tc (ms / 6.0f, fs); }        // reaches ~99.75 % in 'ms'
     void setTimes (float atkMs, float relMs) {
-        aA = coef (atkMs, fs); aR = coef (relMs, fs);
-        aOptA = coef (std::max (3.0f, atkMs), fs);
-        aOptRf = coef (relMs * 0.5f, fs);                  // opto: fast first part of the release...
-        aOptRs = coef (relMs * 6.0f, fs);                  // ...and a slow tail after heavy compression
-        aMem = coef (1500.0f, fs); aRms = coef (8.0f, fs);
-        aM = coef (300.0f, fs);                            // meter fall
+        aA = done (atkMs, fs); aR = done (relMs, fs);
+        aFA = done (clampf (atkMs, kFetAtkMin, kFetAtkMax), fs);
+        aFR = done (clampf (relMs, kFetRelMin, kFetRelMax), fs);
+        aOA = done (10.0f, fs);
+        aOFast = tc (33.0f, fs);                         // with the 60/40 blend: ~50 % back in 60 ms
+        aOSlow1 = tc (300.0f, fs); aOSlow2 = tc (6000.0f, fs);
+        aMem = tc (2000.0f, fs); aRms = tc (5.0f, fs);
+        aM = tc (300.0f, fs);                            // meter fall
         for (int c = 0; c < 2; ++c) {
             tubeLp[c].lowpass (fs, 17000.0f, 0.6f);
             tubeLow[c].peak (fs, 90.0f, 0.7f, 0.8f);
@@ -327,35 +336,34 @@ struct Compressor {
         inPk = lvl > inPk ? lvl : inPk * aM;
         return lvl;
     }
-    inline float stepFet (float db, float thr, float ratio) {
-        float gr = gainComputer (db, thr, ratio, 2.0f);
-        envF = gr > envF ? aA * envF + (1 - aA) * gr : aR * envF + (1 - aR) * gr;
-        return envF;
+    static inline float follow (float env, float target, float att, float rel) {
+        env = target > env ? att * env + (1 - att) * target : rel * env + (1 - rel) * target;
+        return (target <= 0.0f && env < 0.05f) ? 0.0f : env;
     }
     inline float stepOpto (float db, float thr, float ratio) {
         float gr = gainComputer (db, thr, ratio, 12.0f);
-        mem = aMem * mem + (1 - aMem) * (gr > 3.0f ? 1.0f : 0.0f);
-        const float r = mem * aOptRs + (1 - mem) * aOptRf;
-        envO = gr > envO ? aOptA * envO + (1 - aOptA) * gr : r * envO + (1 - r) * gr;
-        return envO;
+        mem = aMem * mem + (1 - aMem) * clampf (gr / 10.0f, 0.0f, 1.0f);   // longer/harder compression = slower tail
+        const float aSlow = aOSlow1 + (aOSlow2 - aOSlow1) * mem;
+        envOf = follow (envOf, gr, aOA, aOFast);
+        envOs = follow (envOs, gr, aOA, aSlow);
+        return 0.6f * envOf + 0.4f * envOs;
     }
     inline void process (float& L, float& R, int type, bool vintage, float thr, float ratio, float makeup, float mix) {
         const float lvl = meter (L, R);
         const float pkDb = 20.0f * std::log10 (lvl + 1e-9f);
         float yL = L, yR = R, gr = 0;
         if (type == CompVCA) {
-            float g = gainComputer (pkDb, thr, ratio, 6.0f);
-            envV = g > envV ? aA * envV + (1 - aA) * g : aR * envV + (1 - aR) * g;
+            envV = follow (envV, gainComputer (pkDb, thr, ratio, 6.0f), aA, aR);
             gr = envV;
             float k = dbToGain (-gr); yL *= k; yR *= k;
             if (vintage) { yL = warmSat (yL, 1.5f, 0.05f); yR = warmSat (yR, 1.5f, 0.05f); }
         }
         if (type == CompFET || type == CompFetOpto) {
             const float t = type == CompFetOpto ? thr + 6.0f : thr;      // in the chain the FET only catches peaks
-            float g = stepFet (pkDb, t, ratio);
-            gr += g;
-            float k = dbToGain (-g); yL *= k; yR *= k;
-            if (vintage) { float d = 1.2f + 0.12f * g; yL = warmSat (yL, d, 0.12f); yR = warmSat (yR, d, 0.12f); }
+            envF = follow (envF, gainComputer (pkDb, t, ratio, 2.0f), aFA, aFR);
+            gr += envF;
+            float k = dbToGain (-envF); yL *= k; yR *= k;
+            if (vintage) { float d = 1.2f + 0.12f * envF; yL = warmSat (yL, d, 0.12f); yR = warmSat (yR, d, 0.12f); }
         }
         if (type == CompOpto || type == CompFetOpto) {
             float l2 = std::max (std::fabs (yL), std::fabs (yR));
