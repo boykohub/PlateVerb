@@ -728,7 +728,25 @@ struct SlotParams {
     int matA = 0, matB = 0; float matBlend = 0.0f;     // surface (rooms, IR) or plate material, see Materials.h
     float dirt = kDirtDefault;                          // 1..100; 30 = the original sound
     float hiCutHz = 20000.0f;                           // steep high cut like early digital reverbs' bandwidth; >= 19.5 kHz = off
+    int converter = 0;                                  // ConverterMode: A/D + D/A resolution around the reverb
 };
+
+// Converters of early digital reverbs. 0 = modern 24-bit (no effect). 1 = plain 12-bit.
+// 2 and 3 = 12-bit converters with gain ranging ("flying comma"): the signal is switched up by 6 dB steps
+// before conversion when it is quiet, so the 12-bit grain follows the signal level and the quiet tail stays
+// clean down to 15-bit (EMT 250: three switch steps) or 16-bit (Lexicon 224: four steps) resolution.
+enum ConverterMode { Conv24 = 0, Conv12, Conv15Ranging, Conv16Ranging };
+inline float convert (float x, int mode) {
+    if (mode == Conv24) return x;
+    x = clampf (x, -1.0f, 1.0f);
+    float step = 1.0f / 2048.0f;                        // 12 bits over -1..+1
+    if (mode != Conv12) {
+        const int maxShift = mode == Conv15Ranging ? 3 : 4;
+        const float a = std::fabs (x); float lim = 0.5f;
+        for (int e = 0; e < maxShift && a < lim; ++e) { step *= 0.5f; lim *= 0.5f; }
+    }
+    return std::round (x / step) * step;                // no dither: silence stays silent
+}
 
 // 8th-order Chebyshev (0.5 dB ripple) lowpass: about 17 dB down 11 % above the cutoff and 37 dB down at 1.3x,
 // close to the anti-alias filters of 1970s/80s digital reverbs (EMT 250: 10.8 kHz, Lexicon 224: 8 kHz)
@@ -933,9 +951,11 @@ public:
                         }
                     } else {
                         float pl, pr; c.input (xL, xR, preS[s], inW[s], true, pl, pr);
+                        if (sp.converter != Conv24) { pl = convert (pl, sp.converter); pr = convert (pr, sp.converter); }   // A/D
                         if (s == Plate) plate.process (pl, pr, plateDampA, sp.mod, sp.early, oL, oR);
                         else tank[s].process (pl, pr, sp.mod, sp.early, oL, oR);
                     }
+                    if (sp.converter != Conv24) { oL = convert (oL, sp.converter); oR = convert (oR, sp.converter); }       // D/A
                     if (grit[s] > 0.0f) {                     // converter grit: requantised (like early digital reverbs)
                         const float q = gritQ[s];
                         oL = std::round (oL / q) * q; oR = std::round (oR / q) * q;   // no dither: silence stays silent
