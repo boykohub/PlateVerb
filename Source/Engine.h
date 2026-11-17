@@ -696,7 +696,7 @@ struct Transformer {
     void set (int model, float freq, float amount) {
         const auto& m = transformerModel (model);
         const float emph = 12.0f * amount;
-        drive = dbToGain (2.0f + amount * 14.0f * m.sat);
+        drive = 0.05f + 2.5f * amount * m.sat;            // linear drive: amount 0 = practically clean
         bias = m.asym * (0.5f + 1.5f * amount);
         biasOff = std::tanh (bias);
         norm = 1.0f / (drive * (1.0f - biasOff * biasOff));
@@ -729,6 +729,7 @@ struct SlotParams {
     float dirt = kDirtDefault;                          // 1..100; 30 = the original sound
     float hiCutHz = 20000.0f;                           // steep high cut like early digital reverbs' bandwidth; >= 19.5 kHz = off
     int converter = 0;                                  // ConverterMode: A/D + D/A resolution around the reverb
+    float richness = 0.0f;                              // 0..1 analog harmonic colour on this slot's reverb only; 0 = clean
 };
 
 // Converters of early digital reverbs. 0 = modern 24-bit (no effect). 1 = plain 12-bit.
@@ -738,7 +739,8 @@ struct SlotParams {
 enum ConverterMode { Conv24 = 0, Conv12, Conv15Ranging, Conv16Ranging };
 inline float convert (float x, int mode) {
     if (mode == Conv24) return x;
-    x = clampf (x, -1.0f, 1.0f);
+    // no clamp at full scale: the reverb's internal level is not the hardware's converter level, and
+    // clipping here distorted loud tails (up to 20 % THD); only the bit grain is modelled
     float step = 1.0f / 2048.0f;                        // 12 bits over -1..+1
     if (mode != Conv12) {
         const int maxShift = mode == Conv15Ranging ? 3 : 4;
@@ -772,6 +774,33 @@ struct HiCut {
     inline float process (int c, float x) { if (! on) return x; for (auto& b : s[c]) x = b.process (x); return x * gain; }
 };
 
+// Richness: transformer/tape-style harmonic colour on the wet signal of one slot.
+// Only the part of the signal below ~1.5 kHz drives the nonlinearity (like iron, whose distortion is
+// strongest in the lows), and only the distortion products are added, so the tone is unchanged:
+// y = x + (sat (lo) - lo). Mostly 3rd harmonic with some 2nd. 0 = bypassed (bit-exact clean).
+// Measured on the plate with a -12 dBFS sine, THD at 1 kHz / 100 Hz: 25 % = 0.07 / 0.4 %,
+// 50 % = 0.3 / 2 %, 100 % = 1.4 / 11 %. High frequencies stay almost clean.
+struct Richness {
+    OnePole lo[2]; Biquad dc[2]; float d = 0, b = 0, tb = 0, nrm = 1, last = -1, lastFs = -1; bool on = false;
+    void reset() { for (int c = 0; c < 2; ++c) { lo[c].reset(); dc[c].reset(); } }
+    void set (float fs, float r) {
+        r = clampf (r, 0.0f, 1.0f);
+        if (r == last && fs == lastFs) return;
+        if (! on && r > 0.0f) reset();
+        last = r; lastFs = fs; on = r > 0.0f;
+        d = 3.0f * std::pow (r, 1.5f) + 1.0e-4f;
+        b = 0.08f * std::sqrt (r);
+        tb = std::tanh (b); nrm = 1.0f / (d * (1.0f - tb * tb));
+        for (int c = 0; c < 2; ++c) { lo[c].setCut (fs, 1500.0f); dc[c].highpass (fs, 8.0f, 0.7f); }
+    }
+    inline float process (int c, float x) {
+        if (! on) return x;
+        const float l = lo[c].lp (x);
+        const float nl = (std::tanh (d * l + b) - tb) * nrm;
+        return x + dc[c].process (nl - l);
+    }
+};
+
 struct Params {
     int oversampling = 1;                  // 1,2,3,4
     SlotParams slot[kNumSlots];
@@ -785,7 +814,7 @@ struct Params {
 
 // ---------------------------------------------------------------- one slot's signal chain
 struct SlotChain {
-    Line preL, preR; OnePole tone[2]; Biquad eq[2][4]; HiCut hc; Compressor comp;
+    Line preL, preR; OnePole tone[2]; Biquad eq[2][4]; HiCut hc; Compressor comp; Richness rich;
     Line dfL[2], dfR[2], mdL, mdR; RandLfo mlfo[2];               // IR slot: diffusion and modulation
     float sLvl = 0; bool running = false, dirty = true;
     static constexpr float kDfMs[4] = { 1.37f, 3.11f, 1.63f, 2.79f };
@@ -801,7 +830,7 @@ struct SlotChain {
         mdL.clearRecent ((int) (0.002f * fs) + 16); mdR.clearRecent ((int) (0.002f * fs) + 16);
         tone[0].reset(); tone[1].reset();
         for (int c = 0; c < 2; ++c) for (int b = 0; b < 4; ++b) eq[c][b].reset();
-        hc.reset();
+        hc.reset(); rich.reset();
         comp.reset();
     }
     void update (float fs, const SlotParams& p) {
@@ -813,6 +842,7 @@ struct SlotChain {
             tone[c].setCut (fs, 400.0f * std::pow (50.0f, p.tone));
         }
         hc.set (fs, p.hiCutHz);
+        rich.set (fs, p.richness);
         comp.fs = fs; comp.setTimes (p.comp.atkMs, p.comp.relMs);
         mlfo[0].setRate (fs, 0.7f); mlfo[1].setRate (fs, 0.9f);
     }
@@ -960,6 +990,7 @@ public:
                         const float q = gritQ[s];
                         oL = std::round (oL / q) * q; oR = std::round (oR / q) * q;   // no dither: silence stays silent
                     }
+                    oL = c.rich.process (0, oL); oR = c.rich.process (1, oR);
                     c.post (oL, oR, xL, xR, sp.comp);
                     wL += oL * c.sLvl; wR += oR * c.sLvl;
                 }

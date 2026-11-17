@@ -544,7 +544,7 @@ public:
         }
         const char* rv[][2] = { { "decay", "DECAY" }, { "lowMult", "LOW DEC" }, { "highMult", "HIGH DEC" }, { "size", "SIZE" },
                                 { "predelay", "PRE-DLY" }, { "build", "BUILD" }, { "early", "EARLY" }, { "diff", "DIFFUSE" },
-                                { "damping", "DAMPING" }, { "tone", "TONE" }, { "hiCut", "HI CUT" }, { "mod", "MOD" }, { "inWidth", "WIDTH" }, { "dirt", "DIRT" } };
+                                { "damping", "DAMPING" }, { "tone", "TONE" }, { "hiCut", "HI CUT" }, { "mod", "MOD" }, { "inWidth", "WIDTH" }, { "dirt", "DIRT" }, { "rich", "RICHNESS" } };
         for (auto& e : rv) addSlider (e[0], e[1], Fader, true);
         addSlider ("mix", "MIX", Fader, false);
         addCombo ("matA", {}, "MATERIAL A", true);
@@ -743,8 +743,8 @@ public:
         sliderBase ("matMix").setBounds (rv.getX() + 260, rv.getY() + 34, 150, 28);
         comboBase ("matB").setBounds (rv.getX() + 524, rv.getY() + 34, 232, 28);
         comboBase ("conv").setBounds (rv.getX() + 770, rv.getY() + 34, 172, 28);
-        const char* rvIds[] = { "decay", "lowMult", "highMult", "size", "predelay", "build", "early", "diff", "damping", "tone", "hiCut", "mod", "inWidth", "dirt", "mix" };
-        for (int i = 0; i < 15; ++i) sliderBase (rvIds[i]).setBounds (rv.getX() + 16 + i * 62, rv.getY() + 106, 38, 160);
+        const char* rvIds[] = { "decay", "lowMult", "highMult", "size", "predelay", "build", "early", "diff", "damping", "tone", "hiCut", "mod", "inWidth", "dirt", "rich", "mix" };
+        for (int i = 0; i < 16; ++i) sliderBase (rvIds[i]).setBounds (rv.getX() + 14 + i * 58 + (i == 15 ? 4 : 0), rv.getY() + 106, 38, 160);
         // row C (collapsible): EQ, compressor, delay
         const bool vis = ! collapsed;
         Rectangle<int> eq (16, 716, 300, 290); addSection (eq, "REVERB EQ", true, vis);
