@@ -21,3 +21,20 @@ target_compile_definitions(PlateVerb PUBLIC
 target_link_libraries(PlateVerb
   PRIVATE juce::juce_audio_utils juce::juce_dsp
   PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_lto_flags)
+
+# ---------------------------------------------------------------- ChannelStrip (second plugin)
+juce_add_plugin(ChannelStrip
+  COMPANY_NAME "Boyko"
+  PLUGIN_MANUFACTURER_CODE Boyk
+  PLUGIN_CODE Chs1
+  FORMATS VST3
+  PRODUCT_NAME "ChannelStrip")
+
+target_sources(ChannelStrip PRIVATE ChannelStrip/Source/CSPlugin.cpp)
+target_include_directories(ChannelStrip PRIVATE Source ChannelStrip/Source)
+target_compile_features(ChannelStrip PRIVATE cxx_std_17)
+target_compile_definitions(ChannelStrip PUBLIC
+  JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0)
+target_link_libraries(ChannelStrip
+  PRIVATE juce::juce_audio_processors juce::juce_dsp
+  PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_lto_flags)
