@@ -17,7 +17,7 @@ juce_add_plugin(PlateVerb
 target_sources(PlateVerb PRIVATE Source/PluginProcessor.cpp)
 target_compile_features(PlateVerb PRIVATE cxx_std_17)
 target_compile_definitions(PlateVerb PUBLIC
-  JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0)
+  JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0 JUCE_PLUGINHOST_VST3=1)
 target_link_libraries(PlateVerb
   PRIVATE juce::juce_audio_utils juce::juce_dsp
   PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_lto_flags)
@@ -34,7 +34,7 @@ target_sources(ChannelStrip PRIVATE ChannelStrip/Source/CSPlugin.cpp)
 target_include_directories(ChannelStrip PRIVATE Source ChannelStrip/Source)
 target_compile_features(ChannelStrip PRIVATE cxx_std_17)
 target_compile_definitions(ChannelStrip PUBLIC
-  JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0)
+  JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0 JUCE_PLUGINHOST_VST3=1)
 target_link_libraries(ChannelStrip
   PRIVATE juce::juce_audio_processors juce::juce_dsp
   PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_lto_flags)
