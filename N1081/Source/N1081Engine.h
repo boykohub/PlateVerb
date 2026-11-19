@@ -109,11 +109,19 @@ struct Params {
     int    freqIdx[4] = { 2, 4, 5, 3 };
     double gainDb [4] = { 0, 0, 0, 0 };
     bool   alt    [4] = { false, false, false, false };   // LF/HF: peak mode, LMF/HMF: Hi-Q
+    double qMul   [4] = { 1, 1, 1, 1 };                   // free Q from the graph: 1 = hardware curve
 };
 
 struct BandSpec { Kind kind; double f0; double gain; double Q; };
 
+inline BandSpec bandSpecHw (const Params& p, int b);
 inline BandSpec bandSpec (const Params& p, int b)
+{
+    BandSpec s = bandSpecHw (p, b);
+    s.Q *= p.qMul[b];
+    return s;
+}
+inline BandSpec bandSpecHw (const Params& p, int b)
 {
     const double g = p.gainDb[b];
     switch (b) {
@@ -402,6 +410,37 @@ struct Comp2254 {
         }
         L = dryL * (1 - p.mix) + y[0] * p.mix;
         R = dryR * (1 - p.mix) + y[1] * p.mix;
+    }
+};
+
+
+// ================================================================== gate / expander (stereo linked)
+// Peak detector with 3 dB hysteresis, hold, attack (opening) and release (closing) as "time to complete",
+// range = how far it closes. Key filter keeps low-frequency bleed from opening it.
+struct GateParams { double thrDb = -50, rangeDb = 40, atkMs = 0.5, holdMs = 50, relMs = 150; int keyHpf = 0; };
+
+struct Gate {
+    double fs = 96000, env = 0, gainDb = 0, holdLeft = 0; bool open = false;
+    Biquad key[2]; double keyHz = -1;
+    void prepare (double rate) { fs = rate; keyHz = -1; reset(); }
+    void reset() { env = 0; gainDb = 0; holdLeft = 0; open = false; for (auto& k : key) k.reset(); }
+    inline void process (double& L, double& R, const GateParams& p, double& outAtten)
+    {
+        if (p.keyHpf > 0 && keyHz != kScHpf[p.keyHpf]) { keyHz = kScHpf[p.keyHpf]; for (auto& k : key) k.c = bilinear (0, 0, 1, 1, 1 / 0.707, 1, keyHz, fs); }
+        double kL = L, kR = R;
+        if (p.keyHpf > 0) { kL = key[0].process (kL); kR = key[1].process (kR); }
+        const double lvl = std::max (std::fabs (kL), std::fabs (kR));
+        env = lvl > env ? lvl : env * std::exp (-1.0 / (0.010 * fs));        // 10 ms peak decay
+        const double db = 20.0 * std::log10 (env + 1e-12);
+        if (db > p.thrDb) { open = true; holdLeft = p.holdMs * 0.001 * fs; }
+        else if (db < p.thrDb - 3.0) { if (holdLeft > 0) holdLeft -= 1; else open = false; }
+        const double target = open ? 0.0 : -p.rangeDb;
+        const double ms = target > gainDb ? p.atkMs : p.relMs;
+        const double a = 1.0 - std::exp (-4.6 / (std::max (0.01, ms) * 0.001 * fs));   // ~99 % in 'ms'
+        gainDb += (target - gainDb) * a;
+        const double g = std::pow (10.0, gainDb / 20.0);
+        L *= g; R *= g;
+        outAtten = -gainDb;
     }
 };
 
