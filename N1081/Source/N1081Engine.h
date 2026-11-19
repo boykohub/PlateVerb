@@ -278,4 +278,131 @@ struct Channel {
     }
 };
 
+
+// ================================================================== 2254-style diode-bridge limiter/compressor
+// Published 2254 behaviour: input transformer -> ~40 dB pad -> diode-bridge gain cell -> class A make-up amp ->
+// output transformer; separate compressor and limiter sidechains acting on the same bridge; feedback detection;
+// soft knee over ~10 dB; compressor attack 5 ms, recovery 400/800/1500 ms/auto; limiter recovery 100/200/800 ms/auto.
+static const double kCompRatios[5]  = { 1.5, 2, 3, 4, 6 };
+static const double kCompRecMs[3]   = { 400, 800, 1500 };      // index 3 = auto
+static const double kLimRecMs[3]    = { 100, 200, 800 };       // index 3 = auto
+static const double kScHpf[6]       = { 0, 50, 80, 120, 160, 250 };
+constexpr double kDbuOffset = 18.0;                              // 0 dBFS = +18 dBu
+inline double compThrDbu (int step) { return -20.0 + 2.0 * step; }   // 16 steps, -20 ... +10 dBu
+inline double limThrDbu  (int step) { return  4.0 + 2.0 * step; }    //  9 steps,  +4 ... +20 dBu
+inline double compGainDb (int step) { return  2.0 * step; }          // 11 steps,   0 ... +20 dB
+
+struct CompParams2254 {
+    bool compOn = true, limOn = false, fastAtk = false;
+    int thr = 8, ratio = 2, rec = 1, gain = 0, lim = 4, limRec = 1, scHpf = 0;
+    double mix = 1.0;
+};
+
+struct Comp2254 {
+    double fs = 96000;
+    Transformer inXf[2], outXf[2];
+    double envC = 0, envCs = 0, envL = 0, envLs = 0, lastOut[2] = { 0, 0 }, gr = 0;
+    double hpZ1[2] = { 0, 0 }, hpZ2[2] = { 0, 0 };
+    Biquad sc[2]; double scHz = 0;
+    double dcX[2] = { 0, 0 }, dcY[2] = { 0, 0 };
+    double rect = 0, rectIn = 0, rectDecay = 0.9999;
+
+    void prepare (double rate)
+    {
+        fs = rate;
+        rectDecay = std::exp (-1.0 / (0.025 * fs));          // ~25 ms reservoir: ripple-free from 40 Hz up
+        for (int c = 0; c < 2; ++c) {
+            inXf[c].prepare (fs, 16.0, 60000.0, 3.0, 1.2);    // 2254 input transformer
+            outXf[c].prepare (fs, 14.0, 55000.0, 3.0, 0.9);   // output transformer
+        }
+        scHz = -1; reset();
+    }
+    void reset()
+    {
+        envC = envCs = envL = envLs = gr = rect = rectIn = 0;
+        for (int c = 0; c < 2; ++c) { inXf[c].reset(); outXf[c].reset(); sc[c].reset(); lastOut[c] = 0; dcX[c] = dcY[c] = 0; }
+    }
+    double coef (double ms) const { return 1.0 - std::exp (-1.0 / (std::max (0.01, ms) * 0.001 * fs)); }
+
+    static double knee (double over, double slope, double k = 10.0)   // soft knee over k dB
+    {
+        if (over <= -k * 0.5) return 0;
+        if (over >= k * 0.5) return over * slope;
+        const double t = over + k * 0.5;
+        return slope * t * t / (2 * k);
+    }
+
+    // L/R in/out, "volts" (1.0 = 0 dBFS). Linked stereo like a strapped pair.
+    inline void process (double& L, double& R, const CompParams2254& p)
+    {
+        if (p.scHpf > 0 && scHz != kScHpf[p.scHpf]) {
+            scHz = kScHpf[p.scHpf];
+            for (auto& b : sc) b.c = bilinear (0, 0, 1, 1, 1 / 0.707, 1, scHz, fs);
+        }
+        const double dryL = L, dryR = R;
+        double x[2] = { inXf[0].process (L), inXf[1].process (R) };
+
+        // Feedback detection: the sidechain hears the bridge output. Computed as the held input peak times
+        // the present gain, so the loop reacts to what comes out now (no stale peaks -> no overshoot).
+        double kL = x[0], kR = x[1];
+        if (p.scHpf > 0) { kL = sc[0].process (kL); kR = sc[1].process (kR); }
+        const double det = std::max (std::fabs (kL), std::fabs (kR));
+        rect = det > rect ? det : rect * rectDecay;
+        const double detDbu = 20.0 * std::log10 (rect + 1e-9) + kDbuOffset - 3.0 - envC;   // sine peak -> rms reading
+        const double inPk = std::max (std::fabs (x[0]), std::fabs (x[1]));
+        rectIn = inPk > rectIn ? inPk : rectIn * rectDecay;
+        const double inDbu = 20.0 * std::log10 (rectIn + 1e-9) + kDbuOffset - 3.0;
+
+        // compressor: feedback form, GR = (out - thr) * (ratio - 1)
+        double grC = 0;
+        if (p.compOn) {
+            const double tgt = knee (detDbu - compThrDbu (p.thr), kCompRatios[p.ratio] - 1.0);   // feedback: GR = (out - thr)(R - 1)
+            const double aA = coef (p.fastAtk ? 1.5 : 5.0);
+            if (p.rec < 3) {
+                const double aR = coef (kCompRecMs[p.rec] / 4.6);       // time to recover ~99 %
+                envC += (tgt - envC) * (tgt > envC ? aA : aR);
+                grC = envC;
+            } else {                                                      // auto: fast 50 ms + slow 5 s composite
+                envC  += (tgt - envC)  * (tgt > envC  ? aA : coef (50.0 / 4.6));
+                envCs += (tgt - envCs) * (tgt > envCs ? coef (300.0) : coef (5000.0 / 4.6));
+                grC = std::max (envC, envCs);
+            }
+        }
+        // limiter: fast feed-back peak catcher, > 100:1
+        double grL = 0;
+        if (p.limOn) {
+            const double tgt = knee (inDbu - limThrDbu (p.lim), 0.99, 2.0);           // > 100:1
+            const double aA = coef (p.fastAtk ? 0.3 : 2.0);
+            if (p.limRec < 3) { envL += (tgt - envL) * (tgt > envL ? aA : coef (kLimRecMs[p.limRec] / 4.6)); grL = envL; }
+            else {
+                envL  += (tgt - envL)  * (tgt > envL  ? aA : coef (50.0 / 4.6));
+                envLs += (tgt - envLs) * (tgt > envLs ? coef (200.0) : coef (5000.0 / 4.6));
+                grL = std::max (envL, envLs);
+            }
+        }
+        gr = std::max (0.0, grC + std::max (0.0, grL - grC * 0.5));      // both sidechains drive one bridge
+        gr = std::min (gr, 40.0);
+        const double g = std::pow (10.0, -gr / 20.0);
+        const double grN = std::min (1.0, gr / 20.0);
+        const double mk = std::pow (10.0, compGainDb (p.gain) / 20.0);
+
+        double y[2];
+        for (int c = 0; c < 2; ++c) {
+            // diode bridge: the diodes see the padded input; their bending grows with the control current
+            // (gain reduction), slight imbalance adds even order. ~0.2 % at +15 dBu with heavy reduction.
+            const double v = x[c] * 0.8;
+            const double a3 = 0.002 + 0.010 * grN, a2 = 0.001 + 0.004 * grN;
+            double u = g * (x[c] + (a2 * v * std::fabs (v) - a3 * v * v * v) / 0.8);
+            // class A make-up amp + output transformer
+            double w = u * mk;
+            w = softClip (w * kVolt + 0.003 * (w * kVolt) * (w * kVolt)) / kVolt;
+            w = outXf[c].process (w);
+            const double d = w - dcX[c] + 0.99995 * dcY[c]; dcX[c] = w; dcY[c] = d;
+            y[c] = d;
+        }
+        L = dryL * (1 - p.mix) + y[0] * p.mix;
+        R = dryR * (1 - p.mix) + y[1] * p.mix;
+    }
+};
+
 } // namespace n1081
