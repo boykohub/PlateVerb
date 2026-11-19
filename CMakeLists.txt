@@ -38,3 +38,20 @@ target_compile_definitions(ChannelStrip PUBLIC
 target_link_libraries(ChannelStrip
   PRIVATE juce::juce_audio_processors juce::juce_dsp
   PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_lto_flags)
+
+# ---------------------------------------------------------------- N1081 (third plugin: Neve 1081 circuit model)
+juce_add_plugin(N1081
+  COMPANY_NAME "Boyko"
+  PLUGIN_MANUFACTURER_CODE Boyk
+  PLUGIN_CODE N181
+  FORMATS VST3
+  PRODUCT_NAME "N1081")
+
+target_sources(N1081 PRIVATE N1081/Source/N1081Plugin.cpp)
+target_include_directories(N1081 PRIVATE N1081/Source)
+target_compile_features(N1081 PRIVATE cxx_std_17)
+target_compile_definitions(N1081 PUBLIC
+  JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0)
+target_link_libraries(N1081
+  PRIVATE juce::juce_audio_processors juce::juce_dsp
+  PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_lto_flags)

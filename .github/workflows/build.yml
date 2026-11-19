@@ -15,3 +15,7 @@ jobs:
         with:
           name: ChannelStrip-VST3
           path: build/ChannelStrip_artefacts/Release/VST3
+      - uses: actions/upload-artifact@v4
+        with:
+          name: N1081-VST3
+          path: build/N1081_artefacts/Release/VST3
