@@ -824,6 +824,7 @@ struct SlotParams {
     int converter = 0;                                  // ConverterMode: A/D + D/A resolution around the reverb
     float richness = 0.0f;                              // 0..1 analog harmonic colour on this slot's reverb only; 0 = clean
     float spinHz = 0.8f, xoverHz = 300.0f;              // 480: rate of the random delay movement; bass-multiply crossover
+    float trimDb = 0.0f;                                // output trim (presets use it to play at the level of the IR they were fitted to)
 };
 
 // Converters of early digital reverbs. 0 = modern 24-bit (no effect). 1 = plain 12-bit.
@@ -1055,9 +1056,9 @@ public:
         if (cfg == CfgSingle) {
             int nOn = 0; for (int s = 0; s < kNumSlots; ++s) nOn += p.slot[s].on ? 1 : 0;
             const float norm = nOn > 0 ? 1.0f / std::sqrt ((float) nOn) : 0.0f;
-            for (int s = 0; s < kNumSlots; ++s) tgtLvl[s] = p.slot[s].on ? p.slot[s].level * norm : 0.0f;
+            for (int s = 0; s < kNumSlots; ++s) tgtLvl[s] = p.slot[s].on ? p.slot[s].level * dbToGain (p.slot[s].trimDb) * norm : 0.0f;
         } else
-            for (int s = 0; s < kNumSlots; ++s) tgtLvl[s] = (s == mA || s == mB) ? p.slot[s].level : 0.0f;
+            for (int s = 0; s < kNumSlots; ++s) tgtLvl[s] = (s == mA || s == mB) ? p.slot[s].level * dbToGain (p.slot[s].trimDb) : 0.0f;
         const HwParams& hw = p.hw;
         const bool hwInOn = hw.on && hw.inAnalog, hwOutOn = hw.on && hw.outAnalog;
         const bool wantAux = auxL != nullptr && auxR != nullptr;

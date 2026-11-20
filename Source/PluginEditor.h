@@ -1,165 +1,240 @@
 // Flexiverb editor (included by PluginProcessor.cpp)
-// A hardware-style front panel after the classic LARC remote: LED display with a three-band decay graph,
-// six long faders with pages, soft keys for the "virtual screens" (Advanced, IR, Hardware, Outputs),
-// a fold-away side panel (EQ / Compressor / Delay) and a LOOK panel for colours, gradient, lighting and contrast.
-
+// Three complete looks (Remote, Studio, Ivory) on one layout, each adjustable in ADVANCED > LOOK:
+// interface, side panel and lettering colours with their own gradients, display colour, 3D depth and contrast.
 #include <complex>
+#include <juce_dsp/juce_dsp.h>
+#include "FlexFonts.h"
+
+// ============================================================================ fonts
+struct FlexFonts
+{
+    Typeface::Ptr regular, medium, semibold, bold, seg;
+    FlexFonts()
+    {
+        regular  = Typeface::createSystemTypefaceFor (flexfonts::InterRegular,  (size_t) flexfonts::InterRegularSize);
+        medium   = Typeface::createSystemTypefaceFor (flexfonts::InterMedium,   (size_t) flexfonts::InterMediumSize);
+        semibold = Typeface::createSystemTypefaceFor (flexfonts::InterSemiBold, (size_t) flexfonts::InterSemiBoldSize);
+        bold     = Typeface::createSystemTypefaceFor (flexfonts::InterBold,     (size_t) flexfonts::InterBoldSize);
+        seg      = Typeface::createSystemTypefaceFor (flexfonts::Dseg14,        (size_t) flexfonts::Dseg14Size);
+    }
+    static FlexFonts& get() { static FlexFonts f; return f; }
+};
+enum class W { Regular, Medium, Semibold, Bold };
+static Font ui (float h, W w = W::Medium, float kern = 0.0f)
+{
+    auto& f = FlexFonts::get();
+    auto tf = w == W::Bold ? f.bold : w == W::Semibold ? f.semibold : w == W::Regular ? f.regular : f.medium;
+    return Font (FontOptions (tf).withHeight (h).withKerningFactor (kern));
+}
+static Font segFont (float h) { return Font (FontOptions (FlexFonts::get().seg).withHeight (h)); }
 
 // ============================================================================ theme
+enum class Style { Remote = 0, Studio, Ivory };
+
 struct Theme
 {
-    Colour panel { 0xff454441 }, led { 0xffff3b1f };
-    float grad = 0.6f, light = 0.6f, contrast = 0.5f; bool flat = false;
+    Style style = Style::Remote;
+    Colour iface { 0xff2b2c2e }, side { 0xff232426 }, font { 0xffe9e4d8 }, led { 0xffff3b1f };
+    float ifaceGrad = 0.5f, sideGrad = 0.5f, fontGrad = 0.25f, depth = 0.6f, contrast = 0.5f;
 
-    float g() const { return flat ? 0.0f : grad; }
-    float l() const { return flat ? 0.12f : light; }
+    static Colour amber() { return Colour (0xffffb43c); }
     static Colour shade (Colour c, float k) { return k >= 0.0f ? c.interpolatedWith (Colours::white, jmin (1.0f, k)) : c.interpolatedWith (Colours::black, jmin (1.0f, -k)); }
-    float deep() const { return -0.45f - 0.4f * contrast; }
-    Colour chassis() const { return shade (panel, -0.35f); }
-    Colour rail() const    { return shade (panel, -0.18f); }
-    Colour side() const    { return shade (panel, -0.12f); }
-    Colour bay() const     { return shade (panel, deep() * 0.8f); }
-    Colour bezel() const   { return shade (panel, deep()); }
-    Colour screen() const  { return shade (led, -0.93f); }
-    Colour ledOff() const  { return shade (led, -0.80f); }
-    Colour label() const   { return shade (Colour (0xffd8d2c2), 0.15f * contrast - 0.05f); }
-    Colour dim() const     { return shade (Colour (0xffa29c8e), -0.2f + 0.25f * contrast); }
-    Colour title() const   { return shade (Colour (0xffece6d8), 0.1f * contrast); }
-    Colour scale() const   { return shade (Colour (0xff8d877a), 0.3f * contrast - 0.1f); }
-    static Colour bandLo()  { return Colour (0xffff7a45); }
-    static Colour bandMid() { return Colour (0xffffc94d); }
-    static Colour bandHi()  { return Colour (0xff5ec8ff); }
-
-    // a panel face: vertical gradient (gradient amount) with a light top edge and a dark bottom edge (lighting)
-    void fillRaised (Graphics& gr, Rectangle<float> r, Colour base, float corner, float amt = 1.0f) const
+    bool light() const { return iface.getPerceivedBrightness() > 0.55f; }
+    Colour well() const     { return shade (iface, light() ? -0.72f - 0.15f * contrast : -0.45f - 0.35f * contrast); }
+    Colour screen() const   { return shade (led, -0.94f).interpolatedWith (Colour (0xff0a0a0b), 0.4f); }
+    Colour dimFont() const  { return font.withAlpha (0.55f + 0.25f * contrast); }
+    Colour keyFace() const
     {
-        const float lt = l();
-        if (lt > 0.01f)
+        if (style == Style::Ivory) return shade (iface, -0.06f);
+        if (style == Style::Studio) return shade (iface, 0.10f);
+        return shade (iface, -0.25f);
+    }
+    float radius() const { return style == Style::Studio ? 6.0f : style == Style::Ivory ? 4.0f : 3.0f; }
+
+    void defaults (Style s)
+    {
+        style = s;
+        if (s == Style::Remote) { iface = Colour (0xff2b2c2e); side = Colour (0xff222325); font = Colour (0xffe9e4d8); led = Colour (0xffff3b1f); ifaceGrad = 0.45f; sideGrad = 0.45f; fontGrad = 0.2f; depth = 0.65f; contrast = 0.5f; }
+        if (s == Style::Studio) { iface = Colour (0xff303338); side = Colour (0xff26292d); font = Colour (0xfff2f2f4); led = Colour (0xffffb43c); ifaceGrad = 0.25f; sideGrad = 0.2f; fontGrad = 0.0f; depth = 0.35f; contrast = 0.55f; }
+        if (s == Style::Ivory)  { iface = Colour (0xffd9d1bf); side = Colour (0xffc9bfa9); font = Colour (0xff3a342b); led = Colour (0xffffa23a); ifaceGrad = 0.4f; sideGrad = 0.4f; fontGrad = 0.15f; depth = 0.55f; contrast = 0.5f; }
+    }
+
+    // a face lit from above: gradient (amount) and a soft shadow and highlight (depth)
+    void face (Graphics& g, Rectangle<float> r, Colour base, float grad, float corner, bool shadow = true) const
+    {
+        if (shadow && depth > 0.01f)
         {
             Path p; p.addRoundedRectangle (r, corner);
-            DropShadow (Colours::black.withAlpha (0.25f + 0.45f * lt), roundToInt (2 + 8 * lt), { 0, roundToInt (1 + 3 * lt) }).drawForPath (gr, p);
+            DropShadow (Colours::black.withAlpha (0.18f + 0.42f * depth), roundToInt (2 + 14 * depth), { 0, roundToInt (1 + 5 * depth) }).drawForPath (g, p);
         }
-        gr.setGradientFill (ColourGradient (shade (base, 0.14f * g() * amt), r.getX(), r.getY(), shade (base, -0.18f * g() * amt), r.getX(), r.getBottom(), false));
-        gr.fillRoundedRectangle (r, corner);
-        gr.setColour (Colours::white.withAlpha (0.04f + 0.27f * lt)); gr.drawHorizontalLine ((int) r.getY() + 1, r.getX() + corner, r.getRight() - corner);
-        gr.setColour (Colours::black.withAlpha (0.5f)); gr.drawHorizontalLine ((int) r.getBottom() - 1, r.getX() + corner, r.getRight() - corner);
-    }
-    // a recess: dark well with an inner shadow along the top and a light lip at the bottom
-    void fillSunken (Graphics& gr, Rectangle<float> r, Colour base, float corner) const
-    {
-        gr.setGradientFill (ColourGradient (shade (base, 0.07f * g()), r.getX(), r.getY(), shade (base, -0.1f * g()), r.getX(), r.getBottom(), false));
-        gr.fillRoundedRectangle (r, corner);
-        const float d = 2.0f + 5.0f * l();
-        gr.setGradientFill (ColourGradient (Colours::black.withAlpha (0.55f), r.getX(), r.getY(), Colours::transparentBlack, r.getX(), r.getY() + d, false));
-        gr.fillRoundedRectangle (r.withHeight (d + corner), corner);
-        gr.setColour (Colours::white.withAlpha (0.03f + 0.2f * l())); gr.drawHorizontalLine ((int) r.getBottom(), r.getX() + corner, r.getRight() - corner);
-    }
-    void drawLed (Graphics& gr, Point<float> c, float r, bool on) const
-    {
-        if (on)
+        g.setGradientFill (ColourGradient (shade (base, 0.10f * grad + 0.03f), r.getX(), r.getY(), shade (base, -0.16f * grad), r.getX(), r.getBottom(), false));
+        g.fillRoundedRectangle (r, corner);
+        if (depth > 0.01f)
         {
-            gr.setColour (led.withAlpha (0.25f + 0.2f * l())); gr.fillEllipse (c.x - r * 2.2f, c.y - r * 2.2f, r * 4.4f, r * 4.4f);
-            gr.setColour (led); gr.fillEllipse (c.x - r, c.y - r, r * 2, r * 2);
-            gr.setColour (Colours::white.withAlpha (0.55f)); gr.fillEllipse (c.x - r * 0.45f, c.y - r * 0.6f, r * 0.7f, r * 0.55f);
+            g.setGradientFill (ColourGradient (Colours::white.withAlpha (0.05f + 0.16f * depth), r.getX(), r.getY(), Colours::transparentWhite, r.getX(), r.getY() + jmin (18.0f, r.getHeight() * 0.5f), false));
+            g.drawRoundedRectangle (r.reduced (0.5f), corner, 1.0f);
         }
-        else
-        {
-            gr.setColour (ledOff()); gr.fillEllipse (c.x - r, c.y - r, r * 2, r * 2);
-            gr.setColour (Colours::black.withAlpha (0.6f)); gr.drawEllipse (c.x - r, c.y - r, r * 2, r * 2, 0.8f);
-        }
+        g.setColour (Colours::black.withAlpha (0.35f)); g.drawRoundedRectangle (r.expanded (0.5f), corner + 0.5f, 0.8f);
     }
-    void drawScrew (Graphics& gr, Point<float> c) const
+    // a recess: inner shadow at the top, a faint light lip at the bottom
+    void recess (Graphics& g, Rectangle<float> r, Colour base, float corner) const
     {
-        gr.setGradientFill (ColourGradient (Colour (0xffa5a5a5), c.x - 3, c.y - 3, Colour (0xff3a3a3a), c.x + 4, c.y + 5, true));
-        gr.fillEllipse (c.x - 6, c.y - 6, 12, 12);
-        gr.setColour (Colour (0xff1a1a1a)); gr.drawEllipse (c.x - 6, c.y - 6, 12, 12, 1.0f);
-        gr.fillRect (c.x - 4.0f, c.y - 1.0f, 8.0f, 2.0f);
+        g.setColour (base); g.fillRoundedRectangle (r, corner);
+        const float d = 3.0f + 9.0f * depth;
+        g.setGradientFill (ColourGradient (Colours::black.withAlpha (0.25f + 0.4f * depth), r.getX(), r.getY(), Colours::transparentBlack, r.getX(), r.getY() + d, false));
+        g.fillRoundedRectangle (r, corner);
+        g.setColour (Colours::white.withAlpha (0.03f + 0.10f * depth)); g.drawHorizontalLine ((int) r.getBottom(), r.getX() + corner, r.getRight() - corner);
+        g.setColour (Colours::black.withAlpha (0.45f)); g.drawRoundedRectangle (r, corner, 0.8f);
     }
-    // LED-style text with a soft glow
-    void ledText (Graphics& gr, const String& t, Rectangle<float> r, Justification j, float h, float alpha = 1.0f, Colour c = {}) const
+    // lettering with its own colour gradient
+    void text (Graphics& g, const String& s, Rectangle<float> r, Justification j, const Font& f, Colour c = {}, float alpha = 1.0f) const
+    {
+        const Colour col = (c.isTransparent() ? font : c).withMultipliedAlpha (alpha);
+        g.setFont (f);
+        if (fontGrad > 0.01f)
+        {
+            const float cy = r.getCentreY(), h = f.getHeight() * 0.5f;
+            g.setGradientFill (ColourGradient (shade (col, 0.35f * fontGrad), 0, cy - h, shade (col, -0.45f * fontGrad), 0, cy + h, false));
+        }
+        else g.setColour (col);
+        g.drawText (s, r, j, false);
+    }
+    // LED text: soft glow behind the characters
+    void ledText (Graphics& g, const String& s, Rectangle<float> r, Justification j, const Font& f, float alpha = 1.0f, Colour c = {}) const
     {
         const Colour col = c.isTransparent() ? led : c;
-        gr.setFont (Font (FontOptions (Font::getDefaultMonospacedFontName(), h, Font::bold)));
-        const float gl = 0.10f + 0.14f * l();
-        gr.setColour (col.withAlpha (gl * alpha));
-        for (auto o : { Point<float> (-1.2f, 0), Point<float> (1.2f, 0), Point<float> (0, -1.2f), Point<float> (0, 1.2f) })
-            gr.drawText (t, r.translated (o.x, o.y), j, false);
-        gr.setColour (col.withAlpha (alpha)); gr.drawText (t, r, j, false);
+        g.setFont (f);
+        g.setColour (col.withAlpha (0.10f * alpha));
+        for (auto o : { Point<float> (-1.2f, 0), Point<float> (1.2f, 0), Point<float> (0, -1.2f), Point<float> (0, 1.2f) }) g.drawText (s, r.translated (o.x, o.y), j, false);
+        g.setColour (col.withAlpha (alpha)); g.drawText (s, r, j, false);
     }
 };
 
-static Font uiFont (float h, bool bold = false) { return Font (FontOptions (h, bold ? Font::bold : Font::plain)); }
-static Font monoFont (float h) { return Font (FontOptions (Font::getDefaultMonospacedFontName(), h, Font::bold)); }
-
-static const Colour kPanelChoices[] = { Colour (0xff454441), Colour (0xff2a2a2b), Colour (0xff8a8578), Colour (0xff1b2430), Colour (0xff5a3a2e), Colour (0xff3c4a3e) };
-static const Colour kLedChoices[]   = { Colour (0xffff3b1f), Colour (0xffffb000), Colour (0xff5fe07a), Colour (0xff5ec8ff) };
+// a faint grain so large painted areas don't look like flat plastic
+static Image& grainImage()
+{
+    static Image img = []
+    {
+        Image im (Image::ARGB, 128, 128, true);
+        Random r (4711);
+        for (int y = 0; y < 128; ++y) for (int x = 0; x < 128; ++x)
+        { const float v = r.nextFloat(); im.setPixelAt (x, y, (v > 0.5f ? Colours::white : Colours::black).withAlpha ((float) std::abs (v - 0.5f) * 0.10f)); }
+        return im;
+    }();
+    return img;
+}
+static void grain (Graphics& g, Rectangle<int> r, float amount)
+{
+    if (amount <= 0.01f) return;
+    Graphics::ScopedSaveState ss (g);
+    g.reduceClipRegion (r);
+    g.setOpacity (amount);
+    g.setTiledImageFill (grainImage(), 0, 0, 1.0f);
+    g.fillRect (r);
+}
 
 // ============================================================================ look & feel
 class FlexLook : public LookAndFeel_V4
 {
 public:
-    Theme theme;
+    Theme t;
     FlexLook() { refresh(); }
     void refresh()
     {
-        const auto& t = theme;
+        setColour (ComboBox::textColourId, t.style == Style::Studio ? t.font : t.led);
         setColour (ComboBox::backgroundColourId, t.screen());
-        setColour (ComboBox::textColourId, t.led);
         setColour (ComboBox::outlineColourId, Colours::black);
-        setColour (ComboBox::arrowColourId, t.led);
-        setColour (PopupMenu::backgroundColourId, Theme::shade (t.panel, -0.6f));
-        setColour (PopupMenu::textColourId, Colour (0xffe6e1d5));
-        setColour (PopupMenu::highlightedBackgroundColourId, t.led.withAlpha (0.85f));
-        setColour (PopupMenu::highlightedTextColourId, Colours::black);
-        setColour (BubbleComponent::backgroundColourId, t.screen());
-        setColour (BubbleComponent::outlineColourId, t.led.withAlpha (0.6f));
-        setColour (TooltipWindow::textColourId, t.led);
-        setColour (AlertWindow::backgroundColourId, Theme::shade (t.panel, -0.5f));
-        setColour (AlertWindow::textColourId, Colour (0xffe6e1d5));
-        setColour (TextEditor::backgroundColourId, t.screen());
-        setColour (TextEditor::textColourId, t.led);
-        setColour (TextButton::textColourOffId, Colour (0xff1d1c1a));
+        setColour (PopupMenu::backgroundColourId, Colour (0xff1c1d1f));
+        setColour (PopupMenu::textColourId, Colour (0xffe8e6e1));
+        setColour (PopupMenu::highlightedBackgroundColourId, Theme::amber());
+        setColour (PopupMenu::highlightedTextColourId, Colour (0xff1a1a1a));
+        setColour (PopupMenu::headerTextColourId, Colour (0xff9a968e));
+        setColour (BubbleComponent::backgroundColourId, Colour (0xff1c1d1f));
+        setColour (BubbleComponent::outlineColourId, Colour (0xff3a3b3e));
+        setColour (TooltipWindow::textColourId, Colour (0xffe8e6e1));
+        setColour (AlertWindow::backgroundColourId, Colour (0xff1c1d1f));
+        setColour (AlertWindow::textColourId, Colour (0xffe8e6e1));
+        setColour (TextEditor::backgroundColourId, Colour (0xff111113));
+        setColour (TextEditor::textColourId, Colour (0xffe8e6e1));
+        setColour (TextEditor::outlineColourId, Colour (0xff3a3b3e));
+        setColour (TextButton::buttonColourId, Colour (0xff2c2d30));
+        setColour (TextButton::textColourOffId, Colour (0xffe8e6e1));
     }
-    Font getComboBoxFont (ComboBox&) override { return monoFont (15.0f); }
-    Font getPopupMenuFont() override { return uiFont (15.0f); }
-    Font getSliderPopupFont (Slider&) override { return monoFont (15.0f); }
+    Font getPopupMenuFont() override { return ui (14.0f, W::Medium); }
+    Font getComboBoxFont (ComboBox&) override { return ui (13.0f, W::Semibold); }
+    Font getSliderPopupFont (Slider&) override { return ui (13.0f, W::Semibold); }
+    Font getAlertWindowMessageFont() override { return ui (14.0f); }
+    Font getTextButtonFont (TextButton&, int) override { return ui (13.0f, W::Semibold); }
+    void drawPopupMenuBackground (Graphics& g, int w, int h) override
+    {
+        g.fillAll (Colour (0xff1c1d1f));
+        g.setColour (Colour (0xff3a3b3e)); g.drawRect (0, 0, w, h);
+    }
 
     void drawComboBox (Graphics& g, int w, int h, bool, int, int, int, int, ComboBox&) override
     {
         auto r = Rectangle<float> (0, 0, (float) w, (float) h);
-        g.setColour (Colours::black.withAlpha (0.6f)); g.fillRoundedRectangle (r, 3.0f);
-        theme.fillSunken (g, r.reduced (1.5f), theme.screen(), 2.0f);
-        Path a; const float cx = (float) w - 12.0f, cy = (float) h * 0.5f;
-        a.addTriangle (cx - 4.5f, cy - 2.5f, cx + 4.5f, cy - 2.5f, cx, cy + 3.0f);
-        g.setColour (theme.led); g.fillPath (a);
+        t.recess (g, r.reduced (0.5f), t.style == Style::Studio ? Theme::shade (t.iface, -0.35f) : t.screen(), t.radius());
+        Path a; const float cx = (float) w - 13.0f, cy = (float) h * 0.5f;
+        a.startNewSubPath (cx - 4.0f, cy - 2.0f); a.lineTo (cx, cy + 2.5f); a.lineTo (cx + 4.0f, cy - 2.0f);
+        g.setColour (t.style == Style::Studio ? t.font.withAlpha (0.7f) : t.led); g.strokePath (a, PathStrokeType (1.6f, PathStrokeType::curved, PathStrokeType::rounded));
     }
     void positionComboBoxText (ComboBox& box, Label& label) override
     {
-        label.setBounds (6, 1, box.getWidth() - 26, box.getHeight() - 2);
+        label.setBounds (8, 0, box.getWidth() - 28, box.getHeight());
         label.setFont (getComboBoxFont (box));
     }
 
+    // realistic knob: printed scale, knurled skirt, machined cap with a highlight, pointer line
     void drawRotarySlider (Graphics& g, int x, int y, int w, int h, float pos, float a0, float a1, Slider&) override
     {
-        auto b = Rectangle<int> (x, y, w, h).toFloat().reduced (2.0f);
-        const float r = jmin (b.getWidth(), b.getHeight()) * 0.5f;
+        auto b = Rectangle<int> (x, y, w, h).toFloat();
+        const float R = jmin (b.getWidth(), b.getHeight()) * 0.5f;
         const auto c = b.getCentre();
         const float ang = a0 + pos * (a1 - a0);
-        Path track; track.addCentredArc (c.x, c.y, r - 1.5f, r - 1.5f, 0.0f, a0, a1, true);
-        g.setColour (Colours::black.withAlpha (0.65f));
-        g.strokePath (track, PathStrokeType (3.0f, PathStrokeType::curved, PathStrokeType::rounded));
-        Path val; val.addCentredArc (c.x, c.y, r - 1.5f, r - 1.5f, 0.0f, a0, ang, true);
-        g.setColour (theme.led.withAlpha (0.9f));
-        g.strokePath (val, PathStrokeType (3.0f, PathStrokeType::curved, PathStrokeType::rounded));
-        const float kr = r - 7.0f;
-        const float lt = theme.l();
-        if (lt > 0.01f) { g.setColour (Colours::black.withAlpha (0.25f + 0.4f * lt)); g.fillEllipse (c.x - kr, c.y - kr + 1.0f + 3.0f * lt, kr * 2, kr * 2); }
-        g.setGradientFill (ColourGradient (Theme::shade (Colour (0xff4a4a4c), 0.2f * lt + 0.1f * theme.g()), c.x - kr * 0.3f, c.y - kr * 0.7f,
-                                           Colour (0xff141415), c.x + kr * 0.5f, c.y + kr, true));
-        g.fillEllipse (c.x - kr, c.y - kr, kr * 2, kr * 2);
-        g.setColour (Colours::white.withAlpha (0.06f + 0.25f * lt)); g.drawEllipse (c.x - kr + 1.0f, c.y - kr + 1.0f, kr * 2 - 2.0f, kr * 2 - 2.0f, 1.0f);
-        g.setColour (Colour (0xfff2ede0));
-        g.drawLine (Line<float> (c.getPointOnCircumference (kr * 0.25f, ang), c.getPointOnCircumference (kr * 0.9f, ang)), 2.5f);
+        // scale dots
+        for (int i = 0; i <= 10; ++i)
+        {
+            const float a = a0 + (a1 - a0) * (float) i / 10.0f;
+            const auto p = c.getPointOnCircumference (R - 2.0f, a);
+            const float d = (i == 0 || i == 5 || i == 10) ? 2.4f : 1.6f;
+            g.setColour (t.font.withAlpha (0.55f)); g.fillEllipse (p.x - d * 0.5f, p.y - d * 0.5f, d, d);
+        }
+        const float sk = R - 7.0f;          // skirt radius
+        const float cp = sk * 0.74f;        // cap radius
+        // shadow
+        if (t.depth > 0.01f)
+        {
+            Path s; s.addEllipse (c.x - sk, c.y - sk, sk * 2, sk * 2);
+            DropShadow (Colours::black.withAlpha (0.35f + 0.45f * t.depth), roundToInt (3 + 9 * t.depth), { 0, roundToInt (2 + 4 * t.depth) }).drawForPath (g, s);
+        }
+        const bool aluminium = t.style != Style::Remote;
+        // skirt with knurling
+        const Colour skBase = aluminium ? Colour (0xff3a3b3d) : Colour (0xff141415);
+        g.setGradientFill (ColourGradient (Theme::shade (skBase, 0.18f), c.x, c.y - sk, Theme::shade (skBase, -0.35f), c.x, c.y + sk, false));
+        g.fillEllipse (c.x - sk, c.y - sk, sk * 2, sk * 2);
+        for (int i = 0; i < 60; ++i)
+        {
+            const float a = ang + MathConstants<float>::twoPi * (float) i / 60.0f;
+            g.setColour ((i % 2 ? Colours::black : Colours::white).withAlpha (i % 2 ? 0.30f : 0.07f));
+            g.drawLine (Line<float> (c.getPointOnCircumference (cp + 1.0f, a), c.getPointOnCircumference (sk - 0.5f, a)), 1.0f);
+        }
+        // pointer on the skirt
+        g.setColour (Colour (0xfff4f1ea));
+        g.drawLine (Line<float> (c.getPointOnCircumference (cp - 1.0f, ang), c.getPointOnCircumference (sk - 1.0f, ang)), 2.2f);
+        // cap: machined face, conical sheen
+        const Colour capBase = aluminium ? Colour (0xffb9bcc0) : Colour (0xff2a2b2d);
+        ColourGradient cg (Theme::shade (capBase, 0.35f), c.x - cp * 0.6f, c.y - cp * 0.8f, Theme::shade (capBase, -0.35f), c.x + cp * 0.6f, c.y + cp * 0.9f, false);
+        g.setGradientFill (cg); g.fillEllipse (c.x - cp, c.y - cp, cp * 2, cp * 2);
+        // concentric machining rings
+        for (float rr = cp * 0.2f; rr < cp; rr += 1.6f)
+        { g.setColour ((aluminium ? Colours::white : Colours::white).withAlpha (aluminium ? 0.035f : 0.025f)); g.drawEllipse (c.x - rr, c.y - rr, rr * 2, rr * 2, 0.6f); }
+        g.setGradientFill (ColourGradient (Colours::white.withAlpha (aluminium ? 0.45f : 0.18f), c.x, c.y - cp, Colours::transparentWhite, c.x, c.y, false));
+        g.drawEllipse (c.x - cp + 0.6f, c.y - cp + 0.6f, cp * 2 - 1.2f, cp * 2 - 1.2f, 1.0f);
+        g.setColour (Colours::black.withAlpha (0.5f)); g.drawEllipse (c.x - cp, c.y - cp, cp * 2, cp * 2, 0.8f);
+        // pointer line on the cap
+        g.setColour (aluminium ? Colour (0xff1d1d1f) : Colour (0xfff4f1ea));
+        g.drawLine (Line<float> (c.getPointOnCircumference (cp * 0.25f, ang), c.getPointOnCircumference (cp - 2.0f, ang)), 2.0f);
     }
 
     void drawLinearSlider (Graphics& g, int x, int y, int w, int h, float sliderPos, float minPos, float maxPos,
@@ -168,56 +243,49 @@ public:
         if (style == Slider::LinearHorizontal)
         {
             const float cy = (float) y + (float) h * 0.5f;
-            g.setColour (Colours::black.withAlpha (0.8f)); g.fillRoundedRectangle ((float) x, cy - 2.5f, (float) w, 5.0f, 2.5f);
-            g.setColour (theme.led); g.fillRoundedRectangle ((float) x, cy - 2.5f, sliderPos - (float) x, 5.0f, 2.5f);
-            g.setColour (Colour (0xffe6e1d5)); g.fillEllipse (sliderPos - 7.0f, cy - 7.0f, 14.0f, 14.0f);
-            g.setColour (Colours::black.withAlpha (0.5f)); g.drawEllipse (sliderPos - 7.0f, cy - 7.0f, 14.0f, 14.0f, 1.0f);
+            t.recess (g, { (float) x, cy - 3.0f, (float) w, 6.0f }, Colour (0xff0d0d0e), 3.0f);
+            g.setColour (Theme::amber()); g.fillRoundedRectangle ((float) x + 1.0f, cy - 2.0f, sliderPos - (float) x - 1.0f, 4.0f, 2.0f);
+            Rectangle<float> cap (sliderPos - 8.0f, cy - 8.0f, 16.0f, 16.0f);
+            if (t.depth > 0.01f) { Path p; p.addEllipse (cap); DropShadow (Colours::black.withAlpha (0.5f), 4, { 0, 2 }).drawForPath (g, p); }
+            g.setGradientFill (ColourGradient (Colour (0xfff2f2f2), cap.getX(), cap.getY(), Colour (0xffb9b9bb), cap.getX(), cap.getBottom(), false));
+            g.fillEllipse (cap);
             return;
         }
         if (style != Slider::LinearVertical) { LookAndFeel_V4::drawLinearSlider (g, x, y, w, h, sliderPos, minPos, maxPos, style, s); return; }
         const float cx = (float) x + (float) w * 0.5f;
-        // printed scale on both sides of the slot
-        g.setColour (theme.scale());
-        for (int i = 0; i <= 10; ++i)
+        // printed scale
+        for (int i = 0; i <= 20; ++i)
         {
-            const float ty = (float) y + (float) h * (float) i / 10.0f;
-            const float len = (i % 5 == 0) ? 12.0f : 7.0f;
-            g.drawLine (cx - 14.0f - len, ty, cx - 14.0f, ty, 1.0f);
-            g.drawLine (cx + 14.0f, ty, cx + 14.0f + len, ty, 1.0f);
+            const float ty = (float) y + (float) h * (float) i / 20.0f;
+            const bool major = i % 5 == 0;
+            g.setColour (t.font.withAlpha (major ? 0.55f : 0.28f));
+            g.fillRect (cx - 21.0f - (major ? 8.0f : 4.0f), ty - 0.5f, major ? 8.0f : 4.0f, 1.0f);
+            g.fillRect (cx + 21.0f, ty - 0.5f, major ? 8.0f : 4.0f, 1.0f);
         }
         // slot
-        g.setColour (Colour (0xff050505)); g.fillRoundedRectangle (cx - 4.0f, (float) y - 6.0f, 8.0f, (float) h + 12.0f, 4.0f);
-        g.setColour (Colours::white.withAlpha (0.05f + 0.15f * theme.l())); g.drawVerticalLine ((int) (cx + 4.0f), (float) y - 4.0f, (float) (y + h) + 4.0f);
-        // black cap with a white line
-        Rectangle<float> cap (cx - 24.0f, sliderPos - 18.0f, 48.0f, 36.0f);
-        const float lt = theme.l();
-        if (lt > 0.01f) { g.setColour (Colours::black.withAlpha (0.35f + 0.4f * lt)); g.fillRoundedRectangle (cap.translated (0.0f, 2.0f + 4.0f * lt).expanded (1.0f), 4.0f); }
-        ColourGradient cg (Theme::shade (Colour (0xff3a3a3c), 0.15f * lt), cap.getX(), cap.getY(), Theme::shade (Colour (0xff333335), 0.1f * lt), cap.getX(), cap.getBottom(), false);
-        cg.addColour (0.30, Colour (0xff1a1a1b)); cg.addColour (0.50, Colour (0xff0d0d0e)); cg.addColour (0.70, Colour (0xff1a1a1b));
-        if (theme.flat) cg = ColourGradient (Colour (0xff1a1a1b), cap.getX(), cap.getY(), Colour (0xff1a1a1b), cap.getX(), cap.getBottom(), false);
-        g.setGradientFill (cg); g.fillRoundedRectangle (cap, 3.0f);
-        g.setColour (Colours::white.withAlpha (0.08f + 0.3f * lt)); g.drawHorizontalLine ((int) cap.getY() + 1, cap.getX() + 3.0f, cap.getRight() - 3.0f);
-        g.setColour (Colour (0xfff2ede0)); g.fillRect (cap.getX() + 6.0f, cap.getCentreY() - 1.5f, cap.getWidth() - 12.0f, 3.0f);
+        t.recess (g, { cx - 3.5f, (float) y - 8.0f, 7.0f, (float) h + 16.0f }, Colour (0xff050505), 3.5f);
+        // cap
+        const bool slim = t.style == Style::Studio;
+        Rectangle<float> cap = slim ? Rectangle<float> (cx - 15.0f, sliderPos - 11.0f, 30.0f, 22.0f) : Rectangle<float> (cx - 19.0f, sliderPos - 15.0f, 38.0f, 30.0f);
+        if (t.depth > 0.01f)
+        {
+            Path p; p.addRoundedRectangle (cap, slim ? 5.0f : 2.5f);
+            DropShadow (Colours::black.withAlpha (0.45f + 0.35f * t.depth), roundToInt (3 + 8 * t.depth), { 0, roundToInt (2 + 6 * t.depth) }).drawForPath (g, p);
+        }
+        Colour capCol = t.style == Style::Ivory ? Colour (0xffe9e2d2) : slim ? Colour (0xffc9ccd0) : Colour (0xff1e1f20);
+        ColourGradient cg (Theme::shade (capCol, 0.22f), cap.getX(), cap.getY(), Theme::shade (capCol, -0.28f), cap.getX(), cap.getBottom(), false);
+        if (! slim) { cg.addColour (0.48, Theme::shade (capCol, -0.12f)); cg.addColour (0.52, Theme::shade (capCol, 0.06f)); }
+        g.setGradientFill (cg); g.fillRoundedRectangle (cap, slim ? 5.0f : 2.5f);
+        g.setColour (Colours::white.withAlpha (0.10f + 0.25f * t.depth)); g.drawHorizontalLine ((int) cap.getY() + 1, cap.getX() + 3.0f, cap.getRight() - 3.0f);
+        g.setColour (Colours::black.withAlpha (0.5f)); g.drawRoundedRectangle (cap, slim ? 5.0f : 2.5f, 0.8f);
+        g.setColour (t.style == Style::Remote ? Colour (0xfff4f1ea) : Colour (0xff1d1d1f));
+        g.fillRect (cap.getX() + 5.0f, cap.getCentreY() - 1.0f, cap.getWidth() - 10.0f, 2.0f);
     }
-    int getSliderThumbRadius (Slider& s) override { return s.isVertical() ? 18 : (s.isHorizontal() ? 8 : LookAndFeel_V4::getSliderThumbRadius (s)); }
-
-    // plain TextButtons (popup menus' parents, alert windows): cream keys
-    void drawButtonBackground (Graphics& g, Button& b, const Colour&, bool over, bool down) override
-    {
-        auto r = b.getLocalBounds().toFloat().reduced (1.0f);
-        if (down) r = r.translated (0.0f, 1.0f);
-        theme.fillRaised (g, r, Colour (0xffcfc9bb), 3.0f, 1.4f);
-        if (over && ! down) { g.setColour (Colours::white.withAlpha (0.12f)); g.fillRoundedRectangle (r, 3.0f); }
-    }
-    void drawButtonText (Graphics& g, TextButton& b, bool, bool) override
-    {
-        g.setColour (Colour (0xff1d1c1a)); g.setFont (uiFont (13.0f, true));
-        g.drawText (b.getButtonText(), b.getLocalBounds(), Justification::centred, false);
-    }
+    int getSliderThumbRadius (Slider& s) override { return s.isVertical() ? 15 : (s.isHorizontal() ? 8 : LookAndFeel_V4::getSliderThumbRadius (s)); }
 };
 static const Theme& themeOf (Component& c)
 {
-    if (auto* l = dynamic_cast<FlexLook*> (&c.getLookAndFeel())) return l->theme;
+    if (auto* l = dynamic_cast<FlexLook*> (&c.getLookAndFeel())) return l->t;
     static Theme t; return t;
 }
 
@@ -257,54 +325,123 @@ static String withUnit (RangedAudioParameter& p)
     return t + (l.isEmpty() || l == "%" || l == "x" || ! num ? "" : " ") + (num ? l : String());
 }
 
-// a key with an LED above (or beside) it: dark keys for algorithms and tabs, cream keys for functions
-class LedKey : public Button
+// every key in the plugin: one height (26 px), as wide as its text, lit amber when on
+static constexpr int kKeyH = 26;
+class Key : public Button
 {
 public:
-    enum Style { Dark, Cream };
-    LedKey (const String& text = {}, Style s = Dark, bool ledAbove = true) : Button (text), style (s), above (ledAbove) {}
-    Style style; bool above; bool showLed = true, verticalText = false; std::function<bool()> ledState;
+    explicit Key (const String& text = {}) : Button (text) {}
+    std::function<bool()> lit;                 // lit state, if not the toggle state
+    std::function<void()> onRightClick;
+    bool marked = false;                       // a thin amber underline (the algorithm being edited)
+    int idealWidth() const { return jmax (28, roundToInt (ui (12.0f, W::Semibold, 0.04f).getStringWidthFloat (getButtonText())) + 26); }
+    void mouseDown (const MouseEvent& e) override
+    {
+        if (e.mods.isPopupMenu() && onRightClick) { onRightClick(); return; }
+        Button::mouseDown (e);
+    }
     void paintButton (Graphics& g, bool over, bool down) override
     {
         const auto& t = themeOf (*this);
-        auto r = getLocalBounds().toFloat();
-        Rectangle<float> key = r;
-        const bool lit = ledState ? ledState() : getToggleState();
-        if (showLed)
+        auto r = getLocalBounds().toFloat().reduced (0.5f, 0.5f);
+        r = r.withSizeKeepingCentre (r.getWidth(), (float) kKeyH - 1.0f);
+        const bool on = lit ? lit() : getToggleState();
+        const float rad = t.radius();
+        if (down) r = r.translated (0.0f, 0.6f);
+        if (on)
         {
-            if (above) { t.drawLed (g, { r.getCentreX(), r.getY() + 5.0f }, 4.0f, lit); key = r.withTrimmedTop (13.0f); }
-            else { t.drawLed (g, { r.getX() + 5.0f, r.getCentreY() }, 3.6f, lit); key = r.withTrimmedLeft (14.0f); }
+            g.setColour (Theme::amber().withAlpha (0.18f + 0.18f * t.depth)); g.fillRoundedRectangle (r.expanded (2.5f), rad + 2.0f);
+            g.setGradientFill (ColourGradient (Colour (0xffffd27a), r.getX(), r.getY(), Colour (0xffe8961f), r.getX(), r.getBottom(), false));
+            g.fillRoundedRectangle (r, rad);
+            g.setColour (Colours::white.withAlpha (0.35f)); g.drawHorizontalLine ((int) r.getY() + 1, r.getX() + rad, r.getRight() - rad);
+            g.setColour (Colour (0xff7a4a08).withAlpha (0.8f)); g.drawRoundedRectangle (r, rad, 0.8f);
         }
-        key = key.reduced (1.0f);
-        if (down) key = key.translated (0.0f, 1.0f);
-        t.fillRaised (g, key, style == Dark ? Colour (0xff262627) : Colour (0xffcfc9bb), 3.0f, 1.4f);
-        if (over && ! down) { g.setColour (Colours::white.withAlpha (0.08f)); g.fillRoundedRectangle (key, 3.0f); }
-        g.setColour (style == Dark ? Colour (0xffece6d8) : Colour (0xff1d1c1a));
-        const String txt = getButtonText();
-        g.setFont (uiFont (txt.length() > 9 ? 10.5f : 11.5f, true));
-        if (verticalText)
+        else
         {
-            Graphics::ScopedSaveState ss (g);
-            g.addTransform (AffineTransform::rotation (MathConstants<float>::halfPi, key.getCentreX(), key.getCentreY()));
-            g.drawText (txt, key.withSizeKeepingCentre (key.getHeight(), key.getWidth()), Justification::centred, false);
+            t.face (g, r, t.keyFace(), 1.0f, rad, ! down);
+            if (over) { g.setColour (Colours::white.withAlpha (0.06f)); g.fillRoundedRectangle (r, rad); }
         }
-        else g.drawText (txt, key, Justification::centred, false);
+        if (getProperties().contains ("swatch"))
+        {
+            auto chip = r.reduced (5.0f, 5.0f);
+            g.setColour (Colour ((uint32) (int) getProperties()["swatch"])); g.fillRoundedRectangle (chip, 2.5f);
+            g.setColour (Colours::black.withAlpha (0.45f)); g.drawRoundedRectangle (chip, 2.5f, 0.8f);
+            return;
+        }
+        const Colour tc = on ? Colour (0xff2a1a04) : t.font;
+        g.setColour (tc); g.setFont (ui (12.0f, W::Semibold, 0.04f));
+        g.drawText (getButtonText(), r, Justification::centred, false);
+        if (marked) { g.setColour (on ? Colour (0xff7a4a08) : Theme::amber()); g.fillRoundedRectangle (r.getX() + 8.0f, r.getBottom() - 4.0f, r.getWidth() - 16.0f, 2.0f, 1.0f); }
     }
 };
 
-// knob with its label above and an LED value readout below
+// a bool parameter on a key
+class ParamKey : public Key
+{
+public:
+    ParamKey (AudioProcessorValueTreeState& st, const String& id, const String& text) : Key (text)
+    {
+        setClickingTogglesState (true);
+        att = std::make_unique<AudioProcessorValueTreeState::ButtonAttachment> (st, id, *this);
+    }
+    std::unique_ptr<AudioProcessorValueTreeState::ButtonAttachment> att;
+};
+
+// a row of keys that behaves as one control (segmented)
+class Segmented : public Component
+{
+public:
+    std::function<void (int)> onPick; std::function<int()> current;
+    void build (const StringArray& names)
+    {
+        keys.clear();
+        for (int i = 0; i < names.size(); ++i)
+        {
+            auto* k = keys.add (new Key (names[i]));
+            k->lit = [this, i] { return current && current() == i; };
+            k->onClick = [this, i] { if (onPick) onPick (i); repaintAll(); };
+            addAndMakeVisible (k);
+        }
+    }
+    int idealWidth() const { int w = 0; for (auto* k : keys) w += k->idealWidth() + 4; return w; }
+    void resized() override { int x = 0; for (auto* k : keys) { k->setBounds (x, 0, k->idealWidth(), getHeight()); x += k->idealWidth() + 4; } }
+    void repaintAll() { for (auto* k : keys) k->repaint(); }
+    OwnedArray<Key> keys;
+};
+// a choice parameter as a segmented control
+class ParamSegmented : public Segmented
+{
+public:
+    ParamSegmented (AudioProcessorValueTreeState& st, const String& id, const StringArray& names)
+    {
+        build (names);
+        current = [this] { return value; };
+        if (auto* p = st.getParameter (id))
+        {
+            pa = std::make_unique<ParameterAttachment> (*p, [this] (float v) { value = roundToInt (v); repaintAll(); }, nullptr);
+            pa->sendInitialUpdate();
+            onPick = [this] (int i) { pa->setValueAsCompleteGesture ((float) i); };
+        }
+    }
+    int value = 0;
+private:
+    std::unique_ptr<ParameterAttachment> pa;
+};
+
+// knob with its label above and its value below
 class KnobBox : public Component
 {
 public:
-    KnobBox (const String& lab) : label (lab)
+    explicit KnobBox (const String& lab) : label (lab)
     {
         knob.setSliderStyle (Slider::RotaryHorizontalVerticalDrag);
         knob.setTextBoxStyle (Slider::NoTextBox, false, 0, 0);
         knob.setPopupDisplayEnabled (true, true, nullptr);
-        knob.setMouseDragSensitivity (320);
+        knob.setMouseDragSensitivity (300);
+        knob.setRotaryParameters (MathConstants<float>::pi * 1.25f, MathConstants<float>::pi * 2.75f, true);
         addAndMakeVisible (knob);
     }
-    FineSlider knob; String label, overrideText; RangedAudioParameter* prm = nullptr; bool onScreen = false;
+    FineSlider knob; String label; RangedAudioParameter* prm = nullptr; bool onScreen = false;
     std::unique_ptr<AudioProcessorValueTreeState::SliderAttachment> att;
     void attach (AudioProcessorValueTreeState& st, const String& id)
     {
@@ -315,8 +452,7 @@ public:
     }
     void resized() override
     {
-        auto r = getLocalBounds();
-        r.removeFromTop (16); r.removeFromBottom (20);
+        auto r = getLocalBounds(); r.removeFromTop (16); r.removeFromBottom (18);
         const int d = jmin (r.getWidth(), r.getHeight());
         knob.setBounds (r.withSizeKeepingCentre (d, d));
     }
@@ -324,15 +460,13 @@ public:
     {
         const auto& t = themeOf (*this);
         const float a = isEnabled() ? 1.0f : 0.35f;
-        g.setColour ((onScreen ? t.led : t.label()).withMultipliedAlpha (a)); g.setFont (uiFont (10.5f, true));
-        g.drawText (label, getLocalBounds().removeFromTop (15), Justification::centred, false);
-        auto vb = getLocalBounds().removeFromBottom (18).toFloat().reduced (2.0f, 0.0f);
-        if (! onScreen) { g.setColour (t.screen().withMultipliedAlpha (a)); g.fillRoundedRectangle (vb, 2.0f); }
-        t.ledText (g, overrideText.isNotEmpty() ? overrideText : (prm != nullptr ? withUnit (*prm) : String()), vb, Justification::centred, 14.0f, a);
+        t.text (g, label, getLocalBounds().removeFromTop (15).toFloat(), Justification::centred, ui (10.5f, W::Semibold, 0.06f), onScreen ? t.led : Colour(), a);
+        t.text (g, prm != nullptr ? withUnit (*prm) : String(), getLocalBounds().removeFromBottom (16).toFloat(), Justification::centred, ui (11.5f, W::Medium),
+                onScreen || t.style != Style::Studio ? (t.style == Style::Ivory && ! onScreen ? t.font : t.led) : t.font.withAlpha (0.8f), a);
     }
 };
 
-// one of the six long faders, with its label strip
+// one of the six long faders: name and live value as plain text below
 class FaderBox : public Component
 {
 public:
@@ -340,7 +474,7 @@ public:
     {
         fader.setSliderStyle (Slider::LinearVertical);
         fader.setTextBoxStyle (Slider::NoTextBox, false, 0, 0);
-        fader.setPopupDisplayEnabled (true, true, nullptr);
+        fader.setPopupDisplayEnabled (false, false, nullptr);
         fader.setMouseDragSensitivity (360);
         fader.setSliderSnapsToMousePosition (false);
         addAndMakeVisible (fader);
@@ -355,155 +489,116 @@ public:
         fader.setDoubleClickReturnValue (true, prm->convertFrom0to1 (prm->getDefaultValue()));
         repaint();
     }
-    void resized() override { auto r = getLocalBounds(); r.removeFromBottom (30); fader.setBounds (r.reduced (0, 4)); }
-    void paint (Graphics& g) override
-    {
-        auto strip = getLocalBounds().removeFromBottom (24).toFloat().withSizeKeepingCentre (jmin (96.0f, (float) getWidth() - 8.0f), 22.0f);
-        const auto& t = themeOf (*this);
-        t.fillRaised (g, strip, Colour (0xffd9d4c7), 2.0f, 0.6f);
-        g.setColour (Colour (0xff1d1c1a)); g.setFont (uiFont (11.5f, true));
-        g.drawText (label, strip, Justification::centred, false);
-    }
-};
-
-// a choice parameter as a row of keys (radio)
-class ChoiceKeys : public Component
-{
-public:
-    ChoiceKeys (AudioProcessorValueTreeState& st, const String& id, const StringArray& names, LedKey::Style s = LedKey::Dark, bool ledAbove = true)
-    {
-        auto* p = st.getParameter (id);
-        for (int i = 0; i < names.size(); ++i)
-        {
-            auto* k = keys.add (new LedKey (names[i], s, ledAbove));
-            k->ledState = [this, i] { return current == i; };
-            k->onClick = [this, i] { if (pa) pa->setValueAsCompleteGesture ((float) i); };
-            addAndMakeVisible (k);
-        }
-        if (p != nullptr)
-        {
-            pa = std::make_unique<ParameterAttachment> (*p, [this] (float v) { current = roundToInt (v); for (auto* k : keys) k->repaint(); }, nullptr);
-            pa->sendInitialUpdate();
-        }
-    }
-    bool vertical = false; int gap = 6;
-    void resized() override
-    {
-        auto r = getLocalBounds();
-        const int n = jmax (1, keys.size());
-        for (int i = 0; i < n; ++i)
-        {
-            if (vertical) { const int h = (r.getHeight() - gap * (n - 1)) / n; keys[i]->setBounds (r.getX(), r.getY() + i * (h + gap), r.getWidth(), h); }
-            else { const int w = (r.getWidth() - gap * (n - 1)) / n; keys[i]->setBounds (r.getX() + i * (w + gap), r.getY(), w, r.getHeight()); }
-        }
-    }
-    int current = 0;
-private:
-    OwnedArray<LedKey> keys;
-    std::unique_ptr<ParameterAttachment> pa;
-};
-
-// a bool parameter on an LED key
-class ToggleKey : public LedKey
-{
-public:
-    ToggleKey (AudioProcessorValueTreeState& st, const String& id, const String& text, Style s = Dark, bool ledAbove = true) : LedKey (text, s, ledAbove)
-    {
-        setClickingTogglesState (true);
-        att = std::make_unique<AudioProcessorValueTreeState::ButtonAttachment> (st, id, *this);
-    }
-    std::unique_ptr<AudioProcessorValueTreeState::ButtonAttachment> att;
-};
-
-// ============================================================================ virtual screen (page drawn on the LED display glass)
-class VirtualScreen : public Component
-{
-public:
-    String title, footer;
-    std::function<void()> onClose;
-    VirtualScreen()
-    {
-        close.setButtonText ("CLOSE"); close.showLed = false; close.style = LedKey::Cream;
-        close.onClick = [this] { if (onClose) onClose(); };
-        addAndMakeVisible (close);
-    }
-    int keepClearRight = 0;      // the soft keys sit over the top right corner
-    void resized() override { close.setBounds (getWidth() - keepClearRight - 106, 12, 90, 30); }
+    void resized() override { auto r = getLocalBounds(); r.removeFromBottom (40); fader.setBounds (r.reduced (0, 10)); }
     void paint (Graphics& g) override
     {
         const auto& t = themeOf (*this);
-        auto r = getLocalBounds().toFloat();
-        t.fillSunken (g, r, t.bezel(), 4.0f);
-        auto in = r.reduced (9.0f);
-        g.setColour (t.screen()); g.fillRoundedRectangle (in, 2.0f);
-        g.setGradientFill (ColourGradient (Colours::black.withAlpha (0.5f), in.getCentreX(), in.getCentreY(), Colours::transparentBlack, in.getX(), in.getY(), true));
-        g.fillRoundedRectangle (in, 2.0f);
-        t.ledText (g, title, in.withHeight (40.0f).withTrimmedLeft (16.0f), Justification::centredLeft, 24.0f);
-        if (footer.isNotEmpty())
-            t.ledText (g, footer, in.removeFromBottom (30.0f).withTrimmedLeft (16.0f).withTrimmedRight (16.0f), Justification::centredLeft, 13.0f, 0.75f);
-        g.setColour (t.led.withAlpha (0.25f)); g.drawHorizontalLine ((int) in.getY() + 44, in.getX() + 12.0f, in.getRight() - 12.0f - (float) keepClearRight);
-        for (auto& c : captions) t.ledText (g, c.second, c.first.toFloat(), Justification::centredLeft, 13.0f, 0.8f);
+        auto r = getLocalBounds().removeFromBottom (38).toFloat();
+        t.text (g, label, r.removeFromTop (18.0f), Justification::centred, ui (11.0f, W::Semibold, 0.08f));
+        t.text (g, prm != nullptr ? withUnit (*prm) : String(), r.removeFromTop (18.0f), Justification::centred, ui (12.5f, W::Medium),
+                t.style == Style::Ivory ? Theme::shade (t.font, 0.1f) : t.led);
     }
-    std::vector<std::pair<Rectangle<int>, String>> captions;
-private:
-    LedKey close;
 };
 
-// ============================================================================ EQ curve of the edited slot
-class EqGraph : public Component
-{
-public:
-    explicit EqGraph (AudioProcessorValueTreeState& s) : st (s) {}
-    int slot = 0;
-    void paint (Graphics& g) override
-    {
-        const auto& t = themeOf (*this);
-        auto r = getLocalBounds().toFloat();
-        t.fillSunken (g, r, t.bezel(), 3.0f);
-        auto in = r.reduced (7.0f);
-        g.setColour (t.screen()); g.fillRect (in);
-        const double fs = 48000.0;
-        pv::Biquad b[4];
-        auto raw = [this] (const String& id) { auto* v = st.getRawParameterValue (id); return v ? v->load() : 0.0f; };
-        float f[4], gn[4];
-        for (int i = 0; i < 4; ++i) { f[i] = raw (sid (slot, nid ("eqF", i))); gn[i] = raw (sid (slot, nid ("eqG", i))); }
-        b[0].lowShelf ((float) fs, f[0], gn[0]); b[1].peak ((float) fs, f[1], 0.9f, gn[1]); b[2].peak ((float) fs, f[2], 0.9f, gn[2]); b[3].highShelf ((float) fs, f[3], gn[3]);
-        auto xOf = [&] (double hz) { return in.getX() + (float) (std::log (hz / 20.0) / std::log (1000.0)) * in.getWidth(); };
-        auto yOf = [&] (double db) { return in.getCentreY() - (float) (db / 18.0) * in.getHeight() * 0.5f; };
-        for (double hz : { 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0 })
-        { g.setColour (Colours::white.withAlpha (0.06f)); g.drawVerticalLine ((int) xOf (hz), in.getY(), in.getBottom()); }
-        g.setColour (Colours::white.withAlpha (0.15f)); g.drawHorizontalLine ((int) yOf (0), in.getX(), in.getRight());
-        Path p; const int N = (int) in.getWidth() * 2;
-        for (int i = 0; i <= N; ++i)
-        {
-            const double hz = 20.0 * std::pow (1000.0, (double) i / N);
-            const std::complex<double> z = std::polar (1.0, -2.0 * MathConstants<double>::pi * hz / fs);
-            double db = 0;
-            for (auto& q : b)
-            {
-                const auto num = (double) q.b0 + (double) q.b1 * z + (double) q.b2 * z * z, den = 1.0 + (double) q.a1 * z + (double) q.a2 * z * z;
-                db += 20.0 * std::log10 (std::abs (num / den) + 1e-12);
-            }
-            const float y = jlimit (in.getY(), in.getBottom(), yOf (db));
-            if (i == 0) p.startNewSubPath (xOf (hz), y); else p.lineTo (xOf (hz), y);
-        }
-        Path fill (p); fill.lineTo (in.getRight(), yOf (0)); fill.lineTo (in.getX(), yOf (0)); fill.closeSubPath();
-        g.setColour (t.led.withAlpha (0.13f)); g.fillPath (fill);
-        g.setColour (t.led); g.strokePath (p, PathStrokeType (2.0f, PathStrokeType::curved, PathStrokeType::rounded));
-    }
-private:
-    AudioProcessorValueTreeState& st;
-};
-
-// ============================================================================ main panel (fixed design size, scaled by the editor)
+// ============================================================================ main panel
 class MainPanel : public Component, private Timer
 {
 public:
-    static constexpr int H = 820, WFull = 1440, WShort = 1124;
+    static constexpr int H = 820, WFull = 1440, WShort = 1092;
     enum { kDefaultId = 1, kBuiltinBase = 2, kUserBase = 2000, kSaveId = 9000, kDeleteId = 9001, kFolderId = 9002 };
-    enum Page { PageNone = 0, PageAdvanced, PageIr, PageHardware, PageOutputs };
+    enum Mode { Live = 0, Decay, Screen480 };
     std::function<void()> onSizeChanged;
     std::function<void (float)> onScaleChosen;
+
+    explicit MainPanel (PlateVerbProcessor& p) : proc (p), fft (12)
+    {
+        auto& st = proc.apvts;
+        loadLook();
+        editSlot = jlimit (0, pv::kNumSlots - 1, (int) st.state.getProperty ("editSlot", 0));
+        drawerOpen = (bool) st.state.getProperty ("drawerOpen", true);
+        drawerTab = jlimit (0, 2, (int) st.state.getProperty ("drawerTab", 0));
+        mode = jlimit (0, 2, (int) st.state.getProperty ("dispMode", 0));
+
+        // ---- header
+        presetBox.onChange = [this] { presetChosen(); };
+        presetBox.setTextWhenNothingSelected ("Default");
+        addAndMakeVisible (presetBox);
+        for (auto* k : { &presetPrev, &presetNext, &presetSave, &advKey, &drawerKey }) addAndMakeVisible (*k);
+        presetPrev.setButtonText ("<"); presetNext.setButtonText (">"); presetSave.setButtonText ("SAVE");
+        advKey.setButtonText ("ADVANCED"); drawerKey.setButtonText ("EQ  COMP  DELAY");
+        presetPrev.onClick = [this] { stepPreset (-1); };
+        presetNext.onClick = [this] { stepPreset (1); };
+        presetSave.onClick = [this] { savePreset(); };
+        advKey.lit = [this] { return advOpen; };
+        advKey.onClick = [this] { advOpen = ! advOpen; updateVisibility(); };
+        drawerKey.lit = [this] { return drawerOpen; };
+        drawerKey.onClick = [this] { setDrawer (! drawerOpen); };
+
+        // ---- algorithms: click = this one only, right-click = add / remove alongside the others
+        const int order[] = { pv::Plate, pv::Room, pv::Chamber, pv::Hall, pv::IR };
+        const char* names[] = { "PLATE", "ROOM", "CHAMBER", "HALL", "IR PLAYER" };
+        for (int i = 0; i < 5; ++i)
+        {
+            const int s = order[i];
+            auto* k = algoKeys.add (new Key (names[i]));
+            k->lit = [this, s] { return raw (sid (s, "on")) > 0.5f; };
+            k->onClick = [this, s] { soloSlot (s); };
+            k->onRightClick = [this, s] { proc.setParam (sid (s, "on"), raw (sid (s, "on")) > 0.5f ? 0.0f : 1.0f); selectSlot (s); repaintKeys(); };
+            k->setTooltip ("Click: use this algorithm only.  Right-click: add it to the others (or remove it).");
+            addAndMakeVisible (k);
+            algoSlot[i] = s;
+        }
+        // ---- display mode, pages
+        modeSeg.build ({ "LIVE", "DECAY", "480L" });
+        modeSeg.current = [this] { return mode; };
+        modeSeg.onPick = [this] (int m) { mode = m; proc.apvts.state.setProperty ("dispMode", m, nullptr); repaint (dispArea); };
+        addAndMakeVisible (modeSeg);
+        pageSeg.build ({ "PAGE 1", "PAGE 2" });
+        pageSeg.current = [this] { return page2 ? 1 : 0; };
+        pageSeg.onPick = [this] (int pg) { page2 = pg == 1; bindFaders(); };
+        addAndMakeVisible (pageSeg);
+
+        // ---- faders + output
+        for (int i = 0; i < 6; ++i) addAndMakeVisible (faders.add (new FaderBox()));
+        outKnob = addKnob (*this, "out", "OUTPUT", false);
+
+        // ---- drawer: EQ / compressor / delay
+        drawerSeg.build ({ "EQ", "COMP", "DELAY" });
+        drawerSeg.current = [this] { return drawerTab; };
+        drawerSeg.onPick = [this] (int i) { drawerTab = i; proc.apvts.state.setProperty ("drawerTab", i, nullptr); updateVisibility(); };
+        addAndMakeVisible (drawerSeg);
+        const char* bn[] = { "LOW", "LO-MID", "HI-MID", "HIGH" };
+        for (int b = 0; b < 4; ++b) { eqF[b] = addKnob (*this, nid ("eqF", b), String (bn[b]) + " FREQ", true); eqG[b] = addKnob (*this, nid ("eqG", b), String (bn[b]) + " GAIN", true); }
+        compOn.setButtonText ("COMP"); compOn.setClickingTogglesState (true); addAndMakeVisible (compOn);
+        compDuck.setButtonText ("DUCK"); compDuck.setClickingTogglesState (true); addAndMakeVisible (compDuck);
+        compType.addItemList (compTypeNames(), 1); addAndMakeVisible (compType);
+        compTone.addItemList (StringArray { "Clean", "Vintage" }, 1); addAndMakeVisible (compTone);
+        const char* cpn[][2] = { { "cpThr", "THRESHOLD" }, { "cpRatio", "RATIO" }, { "cpAtk", "ATTACK" }, { "cpRel", "RELEASE" }, { "cpMakeup", "MAKEUP" }, { "cpMix", "MIX" } };
+        for (int i = 0; i < 6; ++i) compK[i] = addKnob (*this, cpn[i][0], cpn[i][1], true);
+        dlOn = std::make_unique<ParamKey> (st, "dlOn", "DELAY"); addAndMakeVisible (*dlOn);
+        dlSync = std::make_unique<ParamKey> (st, "dlSync", "SYNC"); addAndMakeVisible (*dlSync);
+        dlPing = std::make_unique<ParamKey> (st, "dlPing", "PING-PONG"); addAndMakeVisible (*dlPing);
+        const char* dln[][2] = { { "dlTimeL", "TIME L" }, { "dlTimeR", "TIME R" }, { "dlFb", "FEEDBACK" }, { "dlMix", "MIX" },
+                                 { "dlAtk", "ATTACK" }, { "dlPanL", "PAN L" }, { "dlPanR", "PAN R" }, { "dlWidth", "WIDTH" },
+                                 { "dlLow", "LOW" }, { "dlMid", "MID" }, { "dlMidF", "MID FREQ" }, { "dlHigh", "HIGH" } };
+        for (int i = 0; i < 12; ++i) dlK[i] = addKnob (*this, dln[i][0], dln[i][1], false);
+        dlDivL.addItemList (divNames(), 1); dlDivR.addItemList (divNames(), 1);
+        addAndMakeVisible (dlDivL); addAndMakeVisible (dlDivR);
+        dlDivLAtt = std::make_unique<APVTS::ComboBoxAttachment> (st, "dlDivL", dlDivL);
+        dlDivRAtt = std::make_unique<APVTS::ComboBoxAttachment> (st, "dlDivR", dlDivR);
+
+        buildIr(); buildAdvanced();
+
+        for (auto* prm : proc.getParameters()) lastValues.add (prm->getValue());
+        buildPresetMenu();
+        bindSlot (editSlot);
+        setSize (designWidth(), H);
+        updateVisibility();
+        startTimerHz (30);
+    }
+    ~MainPanel() override { stopTimer(); }
+    int designWidth() const { return drawerOpen ? WFull : WShort; }
+    FlexLook& getLook() { return look; }
     void showScale (float sc)
     {
         static const float v[] = { 0.75f, 0.9f, 1.0f, 1.25f, 1.5f, 1.75f, 2.0f };
@@ -511,240 +606,144 @@ public:
         sizeBox.setSelectedItemIndex (best, dontSendNotification);
     }
 
-    explicit MainPanel (PlateVerbProcessor& p) : proc (p), eqGraph (p.apvts)
-    {
-        auto& st = proc.apvts;
-        loadLook();
-        editSlot = jlimit (0, pv::kNumSlots - 1, (int) st.state.getProperty ("editSlot", 0));
-        sideOpen = (bool) st.state.getProperty ("sideOpen", true);
-        sideTab = jlimit (0, 2, (int) st.state.getProperty ("sideTab", 0));
-
-        // ---- rail
-        presetBox.onChange = [this] { presetChosen(); };
-        presetBox.setTextWhenNothingSelected ("Default");
-        addAndMakeVisible (presetBox);
-        for (auto* b : { &presetPrev, &presetNext, &presetSave, &lookBtn }) { b->style = LedKey::Cream; addAndMakeVisible (*b); }
-        presetPrev.setButtonText ("<"); presetNext.setButtonText (">"); presetSave.setButtonText ("SAVE"); lookBtn.setButtonText ("LOOK");
-        presetPrev.showLed = presetNext.showLed = presetSave.showLed = false;
-        presetPrev.onClick = [this] { stepPreset (-1); };
-        presetNext.onClick = [this] { stepPreset (1); };
-        presetSave.onClick = [this] { savePreset(); };
-        lookBtn.ledState = [this] { return lookPanel.isVisible(); };
-        lookBtn.onClick = [this] { lookPanel.setVisible (! lookPanel.isVisible()); if (lookPanel.isVisible()) lookPanel.toFront (false); lookBtn.repaint(); };
-        analogKey = std::make_unique<ToggleKey> (st, "hwOn", "ANALOG", LedKey::Cream);
-        addAndMakeVisible (*analogKey);
-
-        // ---- algorithms: the key switches the algorithm on / off and opens it for editing
-        const int order[] = { pv::Plate, pv::Room, pv::Chamber, pv::Hall, pv::Lex480, pv::IR };
-        for (int i = 0; i < pv::kNumSlots; ++i)
-        {
-            const int s = order[i];
-            auto* k = algoKeys.add (new ToggleKey (st, sid (s, "on"), kSlotNames[s], LedKey::Dark));
-            k->onClick = [this, s] { selectSlot (s); };
-            addAndMakeVisible (k);
-            algoOrder[i] = s;
-        }
-
-        // ---- soft keys
-        const char* softNames[] = { "PAGE 1/2", "ADVANCED", "HARDWARE", "OUTPUTS" };
-        for (int i = 0; i < 4; ++i)
-        {
-            auto* k = softKeys.add (new LedKey (softNames[i], LedKey::Cream, false));
-            addAndMakeVisible (k);
-        }
-        softKeys[0]->ledState = [this] { return page2; };
-        softKeys[0]->onClick = [this] { page2 = ! page2; bindFaders(); repaint(); };
-        softKeys[1]->ledState = [this] { return screenPage == PageAdvanced || screenPage == PageIr; };
-        softKeys[1]->onClick = [this] { showPage (editSlot == pv::IR ? PageIr : PageAdvanced); };
-        softKeys[2]->ledState = [this] { return screenPage == PageHardware; };
-        softKeys[2]->onClick = [this] { showPage (PageHardware); };
-        softKeys[3]->ledState = [this] { return screenPage == PageOutputs; };
-        softKeys[3]->onClick = [this] { showPage (PageOutputs); };
-
-        // ---- faders
-        for (int i = 0; i < 6; ++i) addAndMakeVisible (faders.add (new FaderBox()));
-
-        // ---- bottom row
-        outType = std::make_unique<ChoiceKeys> (st, "hwOut", StringArray { "ANALOG", "DIGITAL" }, LedKey::Dark, false);
-        addAndMakeVisible (*outType);
-        outKnob = addKnob (*this, "out", "OUTPUT", false);
-
-        // ---- side panel: tabs, EQ, compressor, delay
-        const char* tabNames[] = { "EQ", "COMP", "DELAY" };
-        for (int i = 0; i < 3; ++i)
-        {
-            auto* k = tabKeys.add (new LedKey (tabNames[i], LedKey::Dark));
-            k->ledState = [this, i] { return sideTab == i; };
-            k->onClick = [this, i] { sideTab = i; proc.apvts.state.setProperty ("sideTab", i, nullptr); updateSide(); };
-            addAndMakeVisible (k);
-            auto* v = vTabs.add (new LedKey (tabNames[i], LedKey::Dark, true)); v->verticalText = true;
-            v->ledState = [this, i] { return sideTab == i; };
-            v->onClick = [this, i] { sideTab = i; proc.apvts.state.setProperty ("sideTab", i, nullptr); setSideOpen (true); };
-            addChildComponent (v);
-        }
-        foldBtn.style = LedKey::Dark; foldBtn.showLed = false;
-        foldBtn.onClick = [this] { setSideOpen (! sideOpen); };
-        addAndMakeVisible (foldBtn);
-        addAndMakeVisible (eqGraph);
-        const char* bn[] = { "LOW", "LO-MID", "HI-MID", "HIGH" };
-        for (int b = 0; b < 4; ++b) { eqF[b] = addKnob (*this, nid ("eqF", b), String (bn[b]) + " HZ", true); eqG[b] = addKnob (*this, nid ("eqG", b), String (bn[b]) + " dB", true); }
-        compOn = std::make_unique<LedKey> ("COMP", LedKey::Dark); compOn->setClickingTogglesState (true); addAndMakeVisible (*compOn);
-        compDuck = std::make_unique<LedKey> ("DUCK", LedKey::Cream); compDuck->setClickingTogglesState (true); addAndMakeVisible (*compDuck);
-        compType.addItemList (compTypeNames(), 1); addAndMakeVisible (compType);
-        compTone.addItemList (StringArray { "Clean", "Vintage" }, 1); addAndMakeVisible (compTone);
-        const char* cpn[][2] = { { "cpThr", "THRESH" }, { "cpRatio", "RATIO" }, { "cpAtk", "ATTACK" }, { "cpRel", "RELEASE" }, { "cpMakeup", "MAKEUP" }, { "cpMix", "MIX" } };
-        for (int i = 0; i < 6; ++i) compK[i] = addKnob (*this, cpn[i][0], cpn[i][1], true);
-        dlOn = std::make_unique<ToggleKey> (st, "dlOn", "DELAY", LedKey::Dark); addAndMakeVisible (*dlOn);
-        dlSync = std::make_unique<ToggleKey> (st, "dlSync", "SYNC", LedKey::Cream); addAndMakeVisible (*dlSync);
-        dlPing = std::make_unique<ToggleKey> (st, "dlPing", "PING", LedKey::Cream); addAndMakeVisible (*dlPing);
-        const char* dln[][2] = { { "dlTimeL", "TIME L" }, { "dlTimeR", "TIME R" }, { "dlFb", "FEEDBACK" }, { "dlMix", "MIX" },
-                                 { "dlAtk", "ATTACK" }, { "dlPanL", "PAN L" }, { "dlPanR", "PAN R" }, { "dlWidth", "WIDTH" },
-                                 { "dlLow", "LOW" }, { "dlMid", "MID" }, { "dlMidF", "MID HZ" }, { "dlHigh", "HIGH" } };
-        for (int i = 0; i < 12; ++i) dlK[i] = addKnob (*this, dln[i][0], dln[i][1], false);
-        dlDivL.addItemList (divNames(), 1); dlDivR.addItemList (divNames(), 1);
-        addAndMakeVisible (dlDivL); addAndMakeVisible (dlDivR);
-        dlDivLAtt = std::make_unique<APVTS::ComboBoxAttachment> (st, "dlDivL", dlDivL);
-        dlDivRAtt = std::make_unique<APVTS::ComboBoxAttachment> (st, "dlDivR", dlDivR);
-
-        // ---- virtual screens
-        buildAdvanced(); buildIr(); buildHardware(); buildOutputs();
-        for (auto* v : { &scrAdvanced, &scrIr, &scrHardware, &scrOutputs }) { v->onClose = [this] { showPage (PageNone); }; addChildComponent (*v); }
-
-        // ---- LOOK popover
-        buildLook();
-        addChildComponent (lookPanel);
-
-        for (auto* prm : proc.getParameters()) lastValues.add (prm->getValue());
-        buildPresetMenu();
-        bindSlot (editSlot);
-        setSize (designWidth(), H);
-        updateSide();
-        startTimerHz (25);
-    }
-    ~MainPanel() override { stopTimer(); }
-    int designWidth() const { return sideOpen ? WFull : WShort; }
-    FlexLook& getLook() { return look; }
-
     // ---------------------------------------------------------------- painting
     void paint (Graphics& g) override
     {
-        const auto& t = look.theme;
-        auto all = getLocalBounds().toFloat();
-        g.setGradientFill (ColourGradient (Theme::shade (t.chassis(), 0.14f * t.g()), 0, 0, Theme::shade (t.chassis(), -0.18f * t.g()), 0, all.getBottom(), false));
+        const auto& t = look.t;
+        // chassis
+        g.setGradientFill (ColourGradient (Theme::shade (t.iface, -0.30f), 0, 0, Theme::shade (t.iface, -0.45f), 0, (float) getHeight(), false));
         g.fillAll();
-        // rail
-        t.fillRaised (g, railArea.toFloat(), t.rail(), 4.0f, 1.2f);
-        t.drawScrew (g, { (float) railArea.getX() + 16.0f, (float) railArea.getCentreY() });
-        t.drawScrew (g, { (float) railArea.getRight() - 16.0f, (float) railArea.getCentreY() });
-        g.setColour (t.title()); g.setFont (uiFont (19.0f, true));
-        g.drawText ("F L E X I V E R B", railArea.getX() + 34, railArea.getY(), 230, railArea.getHeight(), Justification::centredLeft);
-        g.setColour (t.dim()); g.setFont (uiFont (10.5f, true));
-        if (sideOpen) g.drawText ("DIGITAL EFFECTS SYSTEM", railArea.getX() + 250, railArea.getY(), 200, railArea.getHeight(), Justification::centredLeft);
-        g.setColour (shownDsp > 70.0f ? Colour (0xffff8a65) : t.dim()); g.setFont (uiFont (10.5f, true));
-        g.drawText ("DSP " + String (shownDsp, 1) + " %", dspArea, Justification::centredLeft);
+        // header
+        t.face (g, headArea.toFloat(), Theme::shade (t.iface, -0.12f), t.ifaceGrad, t.radius() + 2.0f);
+        t.text (g, "FLEXIVERB", headArea.toFloat().withTrimmedLeft (22.0f).withWidth (200.0f), Justification::centredLeft, ui (17.0f, W::Bold, 0.32f));
+        t.text (g, "DSP " + String (shownDsp, 1) + "%", dspArea.toFloat(), Justification::centredRight, ui (11.0f, W::Medium), t.dimFont());
         // control surface
-        t.fillRaised (g, surfArea.toFloat(), t.panel, 4.0f);
-        g.setColour (t.label()); g.setFont (uiFont (10.5f, true));
-        g.drawText ("ALGORITHM", surfArea.getX() + 18, algoKeys[0]->getY() + 13, 100, algoKeys[0]->getHeight() - 13, Justification::centredLeft);
+        t.face (g, surfArea.toFloat(), t.iface, t.ifaceGrad, t.radius() + 2.0f);
+        grain (g, surfArea.reduced (2), t.style == Style::Studio ? 0.25f : 0.8f);
         // display
         paintDisplay (g);
         // fader bay
-        t.fillSunken (g, bayArea.toFloat(), t.bay(), 4.0f);
-        // bottom row: meters
+        t.recess (g, bayArea.toFloat(), Theme::shade (t.iface, t.light() ? -0.10f : -0.22f), t.radius() + 1.0f);
         paintMeters (g);
-        g.setColour (t.label()); g.setFont (uiFont (10.5f, true));
-        g.drawText ("OUTPUT", outType->getX() - 64, outType->getY(), 58, outType->getHeight(), Justification::centredRight);
-        // side panel
-        if (sideOpen)
+        // drawer
+        if (drawerOpen)
         {
-            t.fillRaised (g, sideArea.toFloat(), t.side(), 4.0f);
-            if (sideTab == 1) paintCompMeters (g);
-            if (sideTab == 2)
-            {
-                g.setColour (t.label()); g.setFont (uiFont (10.5f, true));
-                g.drawText ("ATTACK / PAN / WIDTH", sideArea.getX() + 16, dlK[5]->getY() - 20, 200, 14, Justification::centredLeft);
-                g.drawText ("ANALOG EQ", sideArea.getX() + 16, dlK[8]->getY() - 20, 160, 14, Justification::centredLeft);
-                g.setColour (Colours::black.withAlpha (0.35f));
-                g.drawHorizontalLine (dlK[5]->getY() - 26, (float) sideArea.getX() + 12.0f, (float) sideArea.getRight() - 12.0f);
-                g.drawHorizontalLine (dlK[8]->getY() - 26, (float) sideArea.getX() + 12.0f, (float) sideArea.getRight() - 12.0f);
-            }
+            t.face (g, drawerArea.toFloat(), t.side, t.sideGrad, t.radius() + 2.0f);
+            grain (g, drawerArea.reduced (2), t.style == Style::Studio ? 0.25f : 0.8f);
+            if (drawerTab == 1) paintCompMeters (g);
+            if (drawerTab == 0)
+                for (int b = 0; b < 3; ++b)
+                { g.setColour (Colours::black.withAlpha (0.18f)); g.drawVerticalLine (eqF[b]->getRight() + 1, (float) eqF[b]->getY() + 8.0f, (float) eqG[b]->getBottom() - 8.0f); }
         }
-        else t.fillRaised (g, sideArea.toFloat(), t.side(), 4.0f);
     }
 
     void paintDisplay (Graphics& g)
     {
-        const auto& t = look.theme;
-        t.fillSunken (g, dispArea.toFloat(), t.bezel(), 4.0f);
-        auto in = dispArea.toFloat().reduced (9.0f);
-        g.setColour (t.screen()); g.fillRoundedRectangle (in, 2.0f);
-        g.setGradientFill (ColourGradient (Colours::transparentBlack, in.getCentreX(), in.getCentreY(), Colours::black.withAlpha (0.45f), in.getX(), in.getY(), true));
-        g.fillRoundedRectangle (in, 2.0f);
-        if (screenPage != PageNone) return;                     // a virtual screen covers it
-        auto txt = in.reduced (14.0f, 8.0f);
-        auto graph = txt.removeFromRight (jmin (430.0f, txt.getWidth() * 0.48f));
-        txt.removeFromRight (16.0f);
-        // header line
-        const int cfg = (int) raw ("config");
-        const int mA = (int) raw ("machA"), mB = (int) raw ("machB");
-        String mach = cfg == pv::CfgSingle ? String ("SINGLE") : (editSlot == mA ? String ("MACH A") : editSlot == mB ? String ("MACH B") : String ("NOT IN USE"));
-        t.ledText (g, mach + "  " + String (kSlotNames[editSlot]) + "  PG " + String (page2 ? 2 : 1) + "/2", txt.removeFromTop (22.0f), Justification::centredLeft, 17.0f, 0.8f);
-        // name
-        t.ledText (g, displayName(), txt.removeFromTop (46.0f), Justification::centredLeft, 38.0f);
-        // the six fader values
-        txt.removeFromTop (6.0f);
-        const float cw = txt.getWidth() / 3.0f, rh = jmin (24.0f, txt.getHeight() / 2.0f);
-        for (int i = 0; i < 6; ++i)
-        {
-            Rectangle<float> c (txt.getX() + (float) (i % 3) * cw, txt.getY() + (float) (i / 3) * rh, cw - 12.0f, rh);
-            t.ledText (g, faders[i]->label, c, Justification::centredLeft, 16.0f, 0.65f);
-            t.ledText (g, faders[i]->prm != nullptr ? withUnit (*faders[i]->prm) : String(), c, Justification::centredRight, 16.0f);
-        }
-        paintDecay (g, graph);
+        const auto& t = look.t;
+        t.recess (g, dispArea.toFloat(), Colour (0xff050505), t.radius() + 1.0f);
+        auto in = dispArea.toFloat().reduced (6.0f);
+        g.setColour (t.screen()); g.fillRoundedRectangle (in, t.radius());
+        if (advOpen || editSlot == pv::IR) { glass (g, in); return; }          // the IR window or ADVANCED covers it
+        if (mode == Live) paintLive (g, in.reduced (14.0f, 10.0f));
+        else if (mode == Decay) paintDecay (g, in.reduced (14.0f, 10.0f));
+        else paint480 (g, in.reduced (18.0f, 12.0f));
+        glass (g, in);
+    }
+    static void glass (Graphics& g, Rectangle<float> r)
+    {
+        g.setGradientFill (ColourGradient (Colours::white.withAlpha (0.045f), r.getX(), r.getY(), Colours::transparentWhite, r.getX(), r.getY() + r.getHeight() * 0.45f, false));
+        g.fillRoundedRectangle (r, 3.0f);
     }
 
-    // three-band decay (low / mid / high) of the edited slot: smooth curves with a soft fill, like the 1081's EQ graph
-    void paintDecay (Graphics& g, Rectangle<float> r)
+    // ---- LIVE: scrolling three-band level history (left) and a 1/3-octave spectrum (right), from the plugin's output
+    void paintLive (Graphics& g, Rectangle<float> r)
     {
-        const auto& t = look.theme;
-        const Colour bc[3] = { Theme::bandLo(), Theme::bandMid(), Theme::bandHi() };
+        const auto& t = look.t;
+        auto head = r.removeFromTop (20.0f);
+        t.ledText (g, programName(), head, Justification::centredLeft, ui (13.0f, W::Semibold, 0.06f));
+        const Colour bc[3] = { Colour (0xffff7a45), Colour (0xffffc94d), Colour (0xff5ec8ff) };
         const char* nm[] = { "LOW", "MID", "HIGH" };
-        auto legend = r.removeFromTop (16.0f);
-        float rt[3] = { 0, 0, 0 };
-        if (editSlot == pv::IR) { rt[1] = wave.rt; rt[0] = wave.rt * raw (sid (editSlot, "lowMult")); rt[2] = wave.rt * raw (sid (editSlot, "highMult")); }
-        else { const float d = raw (sid (editSlot, "decay")); rt[0] = d * raw (sid (editSlot, "lowMult")); rt[1] = d; rt[2] = d * raw (sid (editSlot, "highMult")); }
-        g.setFont (uiFont (10.5f, true));
         for (int i = 0; i < 3; ++i)
         {
-            auto c = legend.removeFromLeft (legend.getWidth() / (float) (3 - i));
-            g.setColour (bc[i]); g.fillEllipse (c.getX(), c.getCentreY() - 3.5f, 7.0f, 7.0f);
-            g.drawText (String (nm[i]) + " " + (rt[i] > 0.0f ? String (rt[i], 2) + " s" : String ("--")), c.withTrimmedLeft (11.0f), Justification::centredLeft, false);
+            Rectangle<float> c (head.getRight() - 200.0f + (float) i * 66.0f, head.getY(), 64.0f, head.getHeight());
+            g.setColour (bc[i]); g.fillEllipse (c.getX(), c.getCentreY() - 3.0f, 6.0f, 6.0f);
+            g.setFont (ui (10.5f, W::Semibold, 0.06f)); g.setColour (bc[i].withAlpha (0.9f)); g.drawText (nm[i], c.withTrimmedLeft (10.0f), Justification::centredLeft);
         }
-        auto axis = r.removeFromBottom (13.0f);
-        auto plot = r.reduced (0.0f, 3.0f);
+        r.removeFromTop (6.0f);
+        auto spec = r.removeFromRight (r.getWidth() * 0.36f);
+        r.removeFromRight (18.0f);
+        // history
+        const float floorDb = -66.0f;
         g.setColour (Colours::white.withAlpha (0.05f));
-        for (int k = 1; k < 4; ++k) g.drawHorizontalLine ((int) (plot.getY() + plot.getHeight() * (float) k / 4.0f), plot.getX(), plot.getRight());
-        if (! wave.valid || wave.lo.empty())
+        for (int k = 1; k < 4; ++k) g.drawHorizontalLine ((int) (r.getY() + r.getHeight() * (float) k / 4.0f), r.getX(), r.getRight());
+        const int N = (int) histLen;
+        for (int b = 2; b >= 0; --b)
         {
-            t.ledText (g, editSlot == pv::IR ? "NO IR LOADED" : "...", plot, Justification::centred, 14.0f, 0.6f);
-            return;
+            Path p; bool started = false;
+            for (int i = 0; i < N; ++i)
+            {
+                const float v = hist[b][(size_t) ((histPos + i) % N)];
+                const float x = r.getX() + r.getWidth() * (float) i / (float) (N - 1);
+                const float y = r.getBottom() - r.getHeight() * jlimit (0.0f, 1.0f, (v - floorDb) / -floorDb);
+                if (! started) { p.startNewSubPath (x, y); started = true; } else p.lineTo (x, y);
+            }
+            Path f (p); f.lineTo (r.getRight(), r.getBottom()); f.lineTo (r.getX(), r.getBottom()); f.closeSubPath();
+            g.setGradientFill (ColourGradient (bc[b].withAlpha (0.30f), 0, r.getY(), bc[b].withAlpha (0.02f), 0, r.getBottom(), false));
+            g.fillPath (f);
+            g.setColour (bc[b]); g.strokePath (p, PathStrokeType (1.8f, PathStrokeType::curved, PathStrokeType::rounded));
         }
-        const float total = (float) wave.lo.size() * wave.binMs;
-        const float floorDb = -80.0f;
+        // spectrum bars
+        const int nb = (int) bars.size();
+        const float bw = spec.getWidth() / (float) nb;
+        for (int i = 0; i < nb; ++i)
+        {
+            const float v = jlimit (0.0f, 1.0f, (bars[(size_t) i] - floorDb) / -floorDb), pk = jlimit (0.0f, 1.0f, (peaks[(size_t) i] - floorDb) / -floorDb);
+            auto bar = Rectangle<float> (spec.getX() + (float) i * bw + 1.0f, spec.getBottom() - spec.getHeight() * v, bw - 2.0f, spec.getHeight() * v);
+            const Colour c = i < nb / 4 ? bc[0] : i < (nb * 3) / 4 ? bc[1] : bc[2];
+            g.setGradientFill (ColourGradient (c.withAlpha (0.95f), 0, spec.getY(), c.withAlpha (0.25f), 0, spec.getBottom(), false));
+            g.fillRoundedRectangle (bar, 1.0f);
+            g.setColour (c); g.fillRect (bar.getX(), spec.getBottom() - spec.getHeight() * pk - 1.0f, bar.getWidth(), 1.5f);
+        }
+        g.setFont (ui (9.5f, W::Medium)); g.setColour (Colours::white.withAlpha (0.35f));
+        for (auto lab : { std::pair<float, const char*> (0.05f, "50"), { 0.33f, "500" }, { 0.66f, "5k" }, { 0.95f, "20k" } })
+            g.drawText (lab.second, (int) (spec.getX() + spec.getWidth() * lab.first) - 15, (int) spec.getBottom() + 1, 30, 11, Justification::centred);
+    }
+
+    // ---- DECAY: the edited algorithm's decay in three bands (static impulse response)
+    void paintDecay (Graphics& g, Rectangle<float> r, bool withName = true)
+    {
+        const auto& t = look.t;
+        auto head = r.removeFromTop (20.0f);
+        if (withName) t.ledText (g, programName(), head, Justification::centredLeft, ui (13.0f, W::Semibold, 0.06f));
+        const Colour bc[3] = { Colour (0xffff7a45), Colour (0xffffc94d), Colour (0xff5ec8ff) };
+        const char* nm[] = { "LOW", "MID", "HIGH" };
+        const float d = raw (sid (editSlot, "decay"));
+        const float rt[3] = { d * raw (sid (editSlot, "lowMult")), d, d * raw (sid (editSlot, "highMult")) };
+        for (int i = 0; i < 3; ++i)
+        {
+            Rectangle<float> c (head.getRight() - 330.0f + (float) i * 110.0f, head.getY(), 108.0f, head.getHeight());
+            g.setColour (bc[i]); g.fillEllipse (c.getX(), c.getCentreY() - 3.0f, 6.0f, 6.0f);
+            g.setFont (ui (10.5f, W::Semibold, 0.06f)); g.drawText (String (nm[i]) + "  " + String (rt[i], 2) + " s", c.withTrimmedLeft (10.0f), Justification::centredLeft);
+        }
+        r.removeFromTop (6.0f);
+        auto axis = r.removeFromBottom (14.0f);
+        if (! wave.valid || wave.lo.empty()) { t.ledText (g, "...", r, Justification::centred, ui (14.0f), 0.5f); return; }
+        const float total = (float) wave.lo.size() * wave.binMs, floorDb = -80.0f;
+        g.setColour (Colours::white.withAlpha (0.05f));
+        for (int k = 1; k < 4; ++k) g.drawHorizontalLine ((int) (r.getY() + r.getHeight() * (float) k / 4.0f), r.getX(), r.getRight());
         const float step = total > 6000 ? 2000.0f : total > 2500 ? 1000.0f : 500.0f;
-        g.setFont (uiFont (9.5f));
+        g.setFont (ui (9.5f, W::Medium));
         for (float ms = 0; ms <= total; ms += step)
         {
-            const float x = plot.getX() + plot.getWidth() * ms / total;
-            g.setColour (Colours::white.withAlpha (0.05f)); g.drawVerticalLine ((int) x, plot.getY(), plot.getBottom());
+            const float x = r.getX() + r.getWidth() * ms / total;
+            g.setColour (Colours::white.withAlpha (0.05f)); g.drawVerticalLine ((int) x, r.getY(), r.getBottom());
             g.setColour (Colours::white.withAlpha (0.35f));
-            g.drawText (ms >= 1000 ? String (ms / 1000.0f, 0) + " s" : String ((int) ms), (int) x - 20, (int) axis.getY(), 40, 12, Justification::centred);
+            g.drawText (ms >= 1000 ? String (ms / 1000.0f, 0) + " s" : String ((int) ms) + " ms", (int) x - 22, (int) axis.getY() + 1, 44, 12, Justification::centred);
         }
         const std::vector<float>* bv[3] = { &wave.lo, &wave.mid, &wave.hi };
-        const int N = (int) plot.getWidth();
+        const int N = (int) r.getWidth();
         for (int b = 0; b < 3; ++b)
         {
-            // peak per column, then a short moving average in dB: smooth like an analyser, not jagged
             std::vector<float> y ((size_t) N + 1);
             const auto& v = *bv[b];
             for (int k = 0; k <= N; ++k)
@@ -754,181 +753,214 @@ public:
                 float pk = 0; for (int i = a; i <= e; ++i) pk = jmax (pk, v[(size_t) i]);
                 y[(size_t) k] = jmax (floorDb, 20.0f * std::log10 (pk + 1e-9f));
             }
-            std::vector<float> s (y.size());
-            for (int k = 0; k <= N; ++k) { float acc = 0; int c = 0; for (int d = -3; d <= 3; ++d) { const int q = k + d; if (q >= 0 && q <= N) { acc += y[(size_t) q]; ++c; } } s[(size_t) k] = acc / (float) c; }
             Path p;
             for (int k = 0; k <= N; ++k)
             {
-                const float px = plot.getX() + (float) k, py = plot.getY() + plot.getHeight() * s[(size_t) k] / floorDb;
+                float acc = 0; int c = 0; for (int dd = -4; dd <= 4; ++dd) { const int q = k + dd; if (q >= 0 && q <= N) { acc += y[(size_t) q]; ++c; } }
+                const float px = r.getX() + (float) k, py = r.getY() + r.getHeight() * (acc / (float) c) / floorDb;
                 if (k == 0) p.startNewSubPath (px, py); else p.lineTo (px, py);
             }
-            Path f (p); f.lineTo (plot.getRight(), plot.getBottom()); f.lineTo (plot.getX(), plot.getBottom()); f.closeSubPath();
-            g.setColour (bc[b].withAlpha (0.12f)); g.fillPath (f);
-            g.setColour (bc[b]); g.strokePath (p, PathStrokeType (2.0f, PathStrokeType::curved, PathStrokeType::rounded));
+            Path f (p); f.lineTo (r.getRight(), r.getBottom()); f.lineTo (r.getX(), r.getBottom()); f.closeSubPath();
+            g.setGradientFill (ColourGradient (bc[b].withAlpha (0.24f), 0, r.getY(), bc[b].withAlpha (0.02f), 0, r.getBottom(), false));
+            g.fillPath (f);
+            g.setColour (bc[b]); g.strokePath (p, PathStrokeType (1.8f, PathStrokeType::curved, PathStrokeType::rounded));
+        }
+    }
+
+    // ---- 480L: the remote's alphanumeric display, 14-segment characters with unlit segments showing
+    void segLine (Graphics& g, const String& s, Rectangle<float> r, float h, int chars)
+    {
+        const auto& t = look.t;
+        String ghost; for (int i = 0; i < chars; ++i) ghost << "~";
+        String txt = s.toUpperCase().replace (" ", "!").substring (0, chars); while (txt.length() < chars) txt << "!";   // '!' = a blank cell in DSEG
+        g.setFont (segFont (h));
+        g.setColour (t.led.withAlpha (0.07f)); g.drawText (ghost, r, Justification::centredLeft, false);
+        t.ledText (g, txt, r, Justification::centredLeft, segFont (h));
+    }
+    void paint480 (Graphics& g, Rectangle<float> r)
+    {
+        const auto& t = look.t;
+        const int cfg = (int) raw ("config");
+        const String mach = cfg == pv::CfgSingle ? "A" : (editSlot == (int) raw ("machB") ? "B" : "A");
+        auto top = r.removeFromTop (r.getHeight() * 0.36f);
+        segLine (g, mach + " " + programName(), top, top.getHeight() * 0.62f, 24);
+        r.removeFromTop (8.0f);
+        g.setColour (t.led.withAlpha (0.18f)); g.drawHorizontalLine ((int) r.getY(), r.getX(), r.getRight());
+        r.removeFromTop (10.0f);
+        const float cw = r.getWidth() / 6.0f;
+        for (int i = 0; i < 6; ++i)
+        {
+            auto c = Rectangle<float> (r.getX() + (float) i * cw, r.getY(), cw - 10.0f, r.getHeight());
+            t.ledText (g, abbrev[i], c.removeFromTop (22.0f), Justification::centredLeft, ui (12.0f, W::Semibold, 0.1f), 0.7f);
+            String v = faders[i]->prm != nullptr ? faders[i]->prm->getCurrentValueAsText() : String();
+            v = v.replace (" ", "").replace ("%", "").substring (0, 5);
+            segLine (g, v, c.removeFromTop (c.getHeight() * 0.7f), jmin (34.0f, cw * 0.19f), 5);
         }
     }
 
     void paintMeters (Graphics& g)
     {
+        const auto& t = look.t;
         const float lv[3] = { proc.meterIn.load(), proc.meterMain.load(), proc.meterAux.load() };
         const char* nm[] = { "IN", "MAIN", "AUX" };
-        const auto& t = look.theme;
         for (int m = 0; m < 3; ++m)
         {
             auto r = meterArea[m].toFloat();
-            g.setColour (t.label()); g.setFont (uiFont (10.5f, true));
-            g.drawText (nm[m], r.removeFromLeft (40.0f), Justification::centredLeft);
-            r = r.withSizeKeepingCentre (r.getWidth(), 14.0f);
-            g.setColour (Colour (0xff0b0b0b)); g.fillRoundedRectangle (r, 2.0f);
+            t.text (g, nm[m], r.removeFromBottom (18.0f), Justification::centred, ui (10.5f, W::Semibold, 0.08f));
+            r = r.withSizeKeepingCentre (14.0f, r.getHeight());
+            t.recess (g, r, Colour (0xff070707), 2.0f);
             const float db = 20.0f * std::log10 (lv[m] + 1e-9f);
-            const int segs = 14; const float sw = (r.getWidth() - 4.0f) / (float) segs;
+            const int segs = 24; const float sh = (r.getHeight() - 4.0f) / (float) segs;
             for (int i = 0; i < segs; ++i)
             {
-                const float thr = -42.0f + 3.0f * (float) i;                 // -42 ... -3 dBFS, the last one = clip
-                const Colour c = i >= segs - 1 ? Colour (0xffff3b1f) : i >= segs - 4 ? Colour (0xffffb000) : Colour (0xff5fd068);
-                auto sr = Rectangle<float> (r.getX() + 2.0f + (float) i * sw, r.getY() + 2.5f, sw - 2.0f, r.getHeight() - 5.0f);
-                g.setColour (db >= thr ? c : Colour (0xff1d1d1d)); g.fillRoundedRectangle (sr, 1.0f);
+                const float thr = -48.0f + 2.0f * (float) i;
+                const Colour c = i >= segs - 1 ? Colour (0xffff3b1f) : i >= segs - 5 ? Colour (0xffffb43c) : Colour (0xff4fd06a);
+                auto sr = Rectangle<float> (r.getX() + 3.0f, r.getBottom() - 2.0f - (float) (i + 1) * sh + 1.0f, r.getWidth() - 6.0f, sh - 1.5f);
+                g.setColour (db >= thr ? c : c.withAlpha (0.08f)); g.fillRoundedRectangle (sr, 0.8f);
             }
         }
+        if (! auxBusNote.isEmpty()) t.text (g, auxBusNote, Rectangle<int> (meterArea[0].getX() - 10, meterArea[0].getY() - 22, 200, 16).toFloat(), Justification::centredLeft, ui (10.0f), t.dimFont());
     }
 
     void paintCompMeters (Graphics& g)
     {
-        const auto& t = look.theme;
+        const auto& t = look.t;
         const float lo = -80.0f;
         const float inDb = jlimit (lo, 0.0f, proc.compIn[editSlot].load());
         const float grDb = jlimit (0.0f, 30.0f, proc.compGr[editSlot].load());
         const float thr  = raw (sid (editSlot, "cpThr"));
         auto in = inMeter.toFloat(), gr = grMeter.toFloat();
-        g.setColour (t.screen()); g.fillRoundedRectangle (in, 2.0f); g.fillRoundedRectangle (gr, 2.0f);
-        const float inH = in.getHeight() * (inDb - lo) / -lo;
-        g.setColour (t.led.withAlpha (0.85f)); g.fillRect (in.getX() + 3.0f, in.getBottom() - inH, in.getWidth() - 6.0f, inH);
+        t.recess (g, in, Colour (0xff070707), 2.0f); t.recess (g, gr, Colour (0xff070707), 2.0f);
+        const float inH = (in.getHeight() - 4.0f) * (inDb - lo) / -lo;
+        g.setColour (Colour (0xff4fd06a)); g.fillRect (in.getX() + 3.0f, in.getBottom() - 2.0f - inH, in.getWidth() - 6.0f, inH);
         const float ty = in.getBottom() - in.getHeight() * (jlimit (lo, 0.0f, thr) - lo) / -lo;
-        g.setColour (Colours::white); g.fillRect (in.getX() - 4.0f, ty - 1.0f, in.getWidth() + 8.0f, 2.0f);
-        const float grH = gr.getHeight() * grDb / 30.0f;
-        g.setColour (Theme::bandHi()); g.fillRect (gr.getX() + 3.0f, gr.getY(), gr.getWidth() - 6.0f, grH);
-        g.setColour (t.label()); g.setFont (uiFont (10.5f, true));
-        g.drawText (raw (sid (editSlot, "cpDuck")) > 0.5f ? "DRY" : "IN", inMeter.getX() - 14, inMeter.getBottom() + 3, inMeter.getWidth() + 28, 14, Justification::centred);
-        g.drawText ("GR", grMeter.getX() - 14, grMeter.getBottom() + 3, grMeter.getWidth() + 28, 14, Justification::centred);
-        t.ledText (g, inDb <= lo + 0.1f ? String ("-inf") : String (inDb, 0), Rectangle<int> (inMeter.getX() - 16, inMeter.getY() - 18, inMeter.getWidth() + 32, 15).toFloat(), Justification::centred, 12.0f);
-        t.ledText (g, grDb < 0.05f ? String ("0") : String (-grDb, 1), Rectangle<int> (grMeter.getX() - 16, grMeter.getY() - 18, grMeter.getWidth() + 32, 15).toFloat(), Justification::centred, 12.0f);
+        g.setColour (Theme::amber()); g.fillRect (in.getX() - 4.0f, ty - 1.0f, in.getWidth() + 8.0f, 2.0f);
+        const float grH = (gr.getHeight() - 4.0f) * grDb / 30.0f;
+        g.setColour (Theme::amber()); g.fillRect (gr.getX() + 3.0f, gr.getY() + 2.0f, gr.getWidth() - 6.0f, grH);
+        t.text (g, raw (sid (editSlot, "cpDuck")) > 0.5f ? "DRY" : "IN", Rectangle<int> (inMeter.getX() - 14, inMeter.getBottom() + 4, inMeter.getWidth() + 28, 14).toFloat(), Justification::centred, ui (10.0f, W::Semibold));
+        t.text (g, "GR", Rectangle<int> (grMeter.getX() - 14, grMeter.getBottom() + 4, grMeter.getWidth() + 28, 14).toFloat(), Justification::centred, ui (10.0f, W::Semibold));
     }
 
     // ---------------------------------------------------------------- layout
     void resized() override
     {
-        const int W = getWidth();
-        railArea = { 14, 14, W - 28, 46 };
-        surfArea = { 14, 72, 1048, 734 };
-        sideArea = sideOpen ? Rectangle<int> (1074, 72, 352, 734) : Rectangle<int> (1074, 72, 36, 734);
-        // rail (right to left)
-        int x = railArea.getRight() - 34;
-        lookBtn.setBounds (x - 74, 19, 74, 40); x -= 84;
-        analogKey->setBounds (x - 86, 19, 86, 40); x -= 100;
-        presetSave.setBounds (x - 64, 24, 64, 30); x -= 70;
-        presetNext.setBounds (x - 32, 24, 32, 30); x -= 36;
-        presetPrev.setBounds (x - 32, 24, 32, 30); x -= 40;
-        presetBox.setBounds (x - 300, 24, 300, 30);
-        dspArea = { presetBox.getX() - 110, 24, 100, 30 };
-        // algorithm keys
-        for (int i = 0; i < algoKeys.size(); ++i) algoKeys[i]->setBounds (surfArea.getX() + 118 + i * 100, 84, 92, 48);
-        // display + soft keys
-        dispArea = { surfArea.getX() + 18, 142, surfArea.getWidth() - 36 - 142, 192 };
-        for (int i = 0; i < softKeys.size(); ++i) softKeys[i]->setBounds (dispArea.getRight() + 14, dispArea.getY() + 2 + i * 48, 128, 40);
+        const int Wd = getWidth();
+        headArea = { 14, 12, Wd - 28, 44 };
+        surfArea = { 14, 66, 1064, 742 };
+        drawerArea = { 1090, 66, 336, 742 };
+        // header (right to left): ADVANCED, drawer key, then the preset row in the middle
+        const int hy = headArea.getCentreY() - kKeyH / 2;
+        int x = headArea.getRight() - 14;
+        advKey.setBounds (x - advKey.idealWidth(), hy, advKey.idealWidth(), kKeyH); x -= advKey.idealWidth() + 8;
+        drawerKey.setBounds (x - drawerKey.idealWidth(), hy, drawerKey.idealWidth(), kKeyH); x -= drawerKey.idealWidth() + 18;
+        dspArea = { x - 80, hy, 80, kKeyH }; x -= 96;
+        presetSave.setBounds (x - presetSave.idealWidth(), hy, presetSave.idealWidth(), kKeyH); x -= presetSave.idealWidth() + 6;
+        presetNext.setBounds (x - 30, hy, 30, kKeyH); x -= 34;
+        presetPrev.setBounds (x - 30, hy, 30, kKeyH); x -= 36;
+        const int pw = jmin (380, x - (headArea.getX() + 200));
+        presetBox.setBounds (x - pw, hy, pw, kKeyH);
+        // algorithm row + display mode
+        int ax = surfArea.getX() + 16; const int ay = surfArea.getY() + 14;
+        for (auto* k : algoKeys) { k->setBounds (ax, ay, k->idealWidth(), kKeyH); ax += k->idealWidth() + 6; }
+        modeSeg.setBounds (surfArea.getRight() - 16 - modeSeg.idealWidth(), ay, modeSeg.idealWidth(), kKeyH);
+        // display
+        dispArea = { surfArea.getX() + 16, ay + kKeyH + 14, surfArea.getWidth() - 32, 300 };
+        // page row
+        const int py = dispArea.getBottom() + 12;
+        pageSeg.setBounds (surfArea.getX() + 16, py, pageSeg.idealWidth(), kKeyH);
         // fader bay
-        bayArea = { surfArea.getX() + 18, 348, surfArea.getWidth() - 36, 400 };
-        const int fw = bayArea.getWidth() / 6;
-        for (int i = 0; i < 6; ++i) faders[i]->setBounds (bayArea.getX() + i * fw + 4, bayArea.getY() + 14, fw - 8, bayArea.getHeight() - 22);
-        // bottom row
-        const int by = surfArea.getBottom() - 46;
-        for (int m = 0; m < 3; ++m) meterArea[m] = { surfArea.getX() + 18 + m * 210, by, 196, 34 };
-        outType->setBounds (surfArea.getX() + 720, by + 2, 200, 30);
-        outKnob->setBounds (surfArea.getRight() - 110, by - 26, 90, 64);
-        outKnob->setVisible (false);    // output level lives on the OUTPUTS screen (keeps the row tidy)
-        // virtual screens cover the display and the fader bay, not the soft keys
-        const Rectangle<int> scr (dispArea.getX(), dispArea.getY(), bayArea.getWidth(), bayArea.getBottom() - dispArea.getY());
-        for (auto* v : { &scrAdvanced, &scrIr, &scrHardware, &scrOutputs }) { v->keepClearRight = bayArea.getRight() - dispArea.getRight(); v->setBounds (scr); v->resized(); }
-        layoutAdvanced(); layoutIr(); layoutHardware(); layoutOutputs();
-        // side panel
-        layoutSide();
-        lookPanel.setBounds (W - 350, 64, 330, 370);
-        layoutLook();
+        bayArea = { surfArea.getX() + 16, py + kKeyH + 10, surfArea.getWidth() - 32, surfArea.getBottom() - 16 - (py + kKeyH + 10) };
+        const int fw = 104;
+        for (int i = 0; i < 6; ++i) faders[i]->setBounds (bayArea.getX() + 14 + i * fw, bayArea.getY() + 8, fw - 6, bayArea.getHeight() - 14);
+        const int mx = bayArea.getX() + 14 + 6 * fw + 40;
+        for (int m = 0; m < 3; ++m) meterArea[m] = { mx + m * 44, bayArea.getY() + 30, 40, bayArea.getHeight() - 50 };
+        outKnob->setBounds (mx + 160, bayArea.getY() + 40, 110, 128);
+        // IR window and ADVANCED cover the display (and ADVANCED also the faders)
+        irWin.setBounds (dispArea.reduced (6));
+        advWin.setBounds (dispArea.getX(), dispArea.getY(), dispArea.getWidth(), bayArea.getBottom() - dispArea.getY());
+        layoutIr(); layoutAdvanced();
+        // drawer
+        layoutDrawer();
     }
 
-    void layoutSide()
+    void layoutDrawer()
     {
-        const int sx = sideArea.getX();
-        foldBtn.setButtonText (sideOpen ? ">>" : "<<");
-        if (! sideOpen)
-        {
-            foldBtn.setBounds (sx + 3, sideArea.getY() + 8, 30, 30);
-            for (int i = 0; i < 3; ++i) vTabs[i]->setBounds (sx + 3, sideArea.getY() + 50 + i * 90, 30, 80);
-            return;
-        }
-        for (int i = 0; i < 3; ++i) tabKeys[i]->setBounds (sx + 12 + i * 98, sideArea.getY() + 10, 92, 42);
-        foldBtn.setBounds (sideArea.getRight() - 42, sideArea.getY() + 22, 32, 30);
-        const int y0 = sideArea.getY() + 66;
-        // EQ
-        eqGraph.setBounds (sx + 12, y0, 328, 150);
-        for (int b = 0; b < 4; ++b)
-        {
-            eqF[b]->setBounds (sx + 12 + b * 82, y0 + 166, 82, 96);
-            eqG[b]->setBounds (sx + 12 + b * 82, y0 + 276, 82, 96);
-        }
-        // compressor
-        compOn->setBounds (sx + 12, y0, 92, 46);
-        compDuck->setBounds (sx + 112, y0, 92, 46);
-        compType.setBounds (sx + 12, y0 + 64, 200, 28);
-        compTone.setBounds (sx + 220, y0 + 64, 120, 28);
-        for (int i = 0; i < 6; ++i) compK[i]->setBounds (sx + 12 + (i % 3) * 82, y0 + 110 + (i / 3) * 110, 82, 100);
-        inMeter = { sx + 274, y0 + 128, 16, 200 };
-        grMeter = { sx + 314, y0 + 128, 16, 200 };
-        // delay
-        dlOn->setBounds (sx + 12, y0, 100, 46); dlSync->setBounds (sx + 120, y0, 90, 46); dlPing->setBounds (sx + 218, y0, 90, 46);
-        for (int i = 0; i < 4; ++i) dlK[i]->setBounds (sx + 12 + i * 82, y0 + 60, 82, 96);
-        dlDivL.setBounds (sx + 16, y0 + 92, 74, 28); dlDivR.setBounds (sx + 98, y0 + 92, 74, 28);
-        for (int i = 0; i < 4; ++i) dlK[4 + i]->setBounds (sx + 12 + i * 82, y0 + 200, 82, 96);
-        for (int i = 0; i < 4; ++i) dlK[8 + i]->setBounds (sx + 12 + i * 82, y0 + 336, 82, 96);
+        const int dx = drawerArea.getX(), dy = drawerArea.getY();
+        drawerSeg.setBounds (dx + 16, dy + 14, drawerSeg.idealWidth(), kKeyH);
+        const int y0 = dy + 62, cw = (drawerArea.getWidth() - 24) / 4;
+        for (int b = 0; b < 4; ++b) { eqF[b]->setBounds (dx + 12 + b * cw, y0, cw, 110); eqG[b]->setBounds (dx + 12 + b * cw, y0 + 130, cw, 110); }
+        compOn.setBounds (dx + 16, y0, compOn.idealWidth(), kKeyH);
+        compDuck.setBounds (compOn.getRight() + 6, y0, compDuck.idealWidth(), kKeyH);
+        compType.setBounds (dx + 16, y0 + 40, 180, kKeyH);
+        compTone.setBounds (dx + 204, y0 + 40, 110, kKeyH);
+        const int kw = 82;
+        for (int i = 0; i < 6; ++i) compK[i]->setBounds (dx + 12 + (i % 3) * kw, y0 + 84 + (i / 3) * 120, kw, 110);
+        inMeter = { dx + 268, y0 + 96, 14, 200 }; grMeter = { dx + 300, y0 + 96, 14, 200 };
+        dlOn->setBounds (dx + 16, y0, dlOn->idealWidth(), kKeyH);
+        dlSync->setBounds (dlOn->getRight() + 6, y0, dlSync->idealWidth(), kKeyH);
+        dlPing->setBounds (dlSync->getRight() + 6, y0, dlPing->idealWidth(), kKeyH);
+        for (int i = 0; i < 4; ++i) dlK[i]->setBounds (dx + 12 + i * cw, y0 + 44, cw, 104);
+        dlDivL.setBounds (dx + 16, y0 + 84, cw - 8, kKeyH); dlDivR.setBounds (dx + 12 + cw + 4, y0 + 84, cw - 8, kKeyH);
+        for (int i = 0; i < 4; ++i) dlK[4 + i]->setBounds (dx + 12 + i * cw, y0 + 168, cw, 104);
+        for (int i = 0; i < 4; ++i) dlK[8 + i]->setBounds (dx + 12 + i * cw, y0 + 292, cw, 104);
     }
-    void updateSide()
+
+    void updateVisibility()
     {
-        const bool open = sideOpen;
-        for (auto* k : tabKeys) k->setVisible (open);
-        for (auto* k : vTabs) k->setVisible (! open);
-        const bool eq = open && sideTab == 0, cp = open && sideTab == 1, dl = open && sideTab == 2;
-        eqGraph.setVisible (eq);
+        const bool open = drawerOpen;
+        drawerSeg.setVisible (open);
+        const bool eq = open && drawerTab == 0, cp = open && drawerTab == 1, dl = open && drawerTab == 2;
         for (int b = 0; b < 4; ++b) { eqF[b]->setVisible (eq); eqG[b]->setVisible (eq); }
-        compOn->setVisible (cp); compDuck->setVisible (cp); compType.setVisible (cp); compTone.setVisible (cp);
+        compOn.setVisible (cp); compDuck.setVisible (cp); compType.setVisible (cp); compTone.setVisible (cp);
         for (auto* k : compK) k->setVisible (cp);
         dlOn->setVisible (dl); dlSync->setVisible (dl); dlPing->setVisible (dl);
         const bool sync = raw ("dlSync") > 0.5f;
         for (int i = 0; i < 12; ++i) dlK[i]->setVisible (dl && ! (sync && i < 2));
         dlDivL.setVisible (dl && sync); dlDivR.setVisible (dl && sync);
-        for (auto* k : tabKeys) k->repaint();
+        irWin.setVisible (editSlot == pv::IR && ! advOpen);
+        advWin.setVisible (advOpen);
+        const bool facesVisible = ! advOpen;
+        for (auto* f : faders) f->setVisible (facesVisible);
+        pageSeg.setVisible (facesVisible);
+        outKnob->setVisible (facesVisible);
+        modeSeg.setVisible (editSlot != pv::IR && ! advOpen);
+        if (advOpen) advWin.toFront (false);
+        advKey.repaint(); drawerKey.repaint(); drawerSeg.repaintAll();
         repaint();
     }
-    void setSideOpen (bool o)
+    void setDrawer (bool o)
     {
-        sideOpen = o;
-        proc.apvts.state.setProperty ("sideOpen", o, nullptr);
+        drawerOpen = o;
+        proc.apvts.state.setProperty ("drawerOpen", o, nullptr);
         setSize (designWidth(), H);
-        resized(); updateSide();
+        resized(); updateVisibility();
         if (onSizeChanged) onSizeChanged();
     }
 
    #if FLEX_TEST
-    void debugShow (int scr, int tab, int slot, bool lookOpen, bool open, int lookPreset)
+    void debugShow (int style, int slot, int dmode, bool adv, int advTab, bool drawer, int dtab, bool sig)
     {
-        selectSlot (slot); sideTab = tab; setSideOpen (open);
-        if (scr > 0) showPage ((Page) scr);
-        lookPanel.setVisible (lookOpen);
-        if (lookPreset == 1) { look.theme.panel = kPanelChoices[2]; look.theme.led = kLedChoices[1]; look.theme.grad = 0.9f; look.theme.light = 0.8f; lookChanged(); }
-        if (lookPreset == 2) { look.theme.panel = kPanelChoices[3]; look.theme.led = kLedChoices[3]; look.theme.flat = true; lookChanged(); }
-        if (lookPreset == 3) { look.theme.panel = kPanelChoices[1]; look.theme.led = kLedChoices[2]; look.theme.contrast = 1.0f; look.theme.light = 1.0f; lookChanged(); }
+        look.t.defaults ((Style) style); lookChanged (false);
+        selectSlot (slot); mode = dmode; advOpen = adv; advTabIdx = advTab; drawerTab = dtab; setDrawer (drawer);
+        updateAdvTabs(); updateVisibility();
+        if (sig)
+        {   // fill the live display with a believable history
+            Random rnd (3);
+            for (int i = 0; i < (int) histLen; ++i)
+            {
+                const float ph = (float) i / (float) histLen;
+                const float env = -10.0f - 40.0f * std::fmod (ph * 3.0f, 1.0f);
+                hist[0][(size_t) i] = env + 4.0f; hist[1][(size_t) i] = env + 1.0f + rnd.nextFloat(); hist[2][(size_t) i] = env - 8.0f + 2.0f * rnd.nextFloat();
+            }
+            histPos = 0;
+            for (size_t i = 0; i < bars.size(); ++i) { bars[i] = -12.0f - 30.0f * (float) i / (float) bars.size() + 6.0f * std::sin ((float) i * 0.9f); peaks[i] = bars[i] + 4.0f; }
+        }
         wave = proc.getWave (editSlot);
+        repaint();
     }
     void debugWave() { wave = proc.getWave (editSlot); repaint(); }
    #endif
+
 private:
     // ---------------------------------------------------------------- helpers
     float raw (const String& id) const { auto* v = proc.apvts.getRawParameterValue (id); return v != nullptr ? v->load() : 0.0f; }
@@ -941,42 +973,47 @@ private:
         if (perSlot) perSlotKnobs.push_back ({ k, id }); else k->attach (proc.apvts, id);
         return k;
     }
-    KnobBox* addScreenKnob (VirtualScreen& v, const String& id, const String& label, bool perSlot)
-    {
-        auto* k = addKnob (v, id, label, perSlot); k->onScreen = true; return k;
-    }
+    void repaintKeys() { for (auto* k : algoKeys) k->repaint(); }
 
-    String displayName()
+    String programName()
     {
-        if (editSlot == pv::IR)
-        {
-            if (proc.irLayout() == pv::IrNone) return "IR - NO FILE";
-            return proc.irInfo().upToLastOccurrenceOf (".", false, false).toUpperCase().substring (0, 22);
-        }
-        if (proc.userPresetName.isNotEmpty()) return proc.userPresetName.toUpperCase().substring (0, 22);
+        if (proc.userPresetName.isNotEmpty()) return proc.userPresetName.toUpperCase();
         const int cp = proc.getCurrentProgram();
-        if (cp > 0 && kPresets[cp - 1].slot == editSlot) return String (kPresets[cp - 1].name).toUpperCase().substring (0, 22);
-        const char* names[] = { "PLATE", "ROOM", "CHAMBER", "HALL", "IMPULSE RESPONSE", "RANDOM HALL" };
+        if (cp > 0 && kPresets[cp - 1].slot == editSlot) return String (kPresets[cp - 1].name).toUpperCase();
+        const char* names[] = { "PLATE", "ROOM", "CHAMBER", "HALL", "IR PLAYER", "RANDOM HALL" };
         return names[editSlot];
     }
 
-    // fader pages for the edited slot
+    // click: this algorithm only (everything else off); right-click adds it instead
+    void soloSlot (int s)
+    {
+        for (int k = 0; k < pv::kNumSlots; ++k) proc.setParam (sid (k, "on"), k == s ? 1.0f : 0.0f);
+        selectSlot (s);
+        repaintKeys();
+    }
+
     void bindFaders()
     {
-        struct F { const char* id; const char* lab; bool global; };
+        struct F { const char* id; const char* lab; const char* ab; bool global; };
         const bool is480 = editSlot == pv::Lex480, isIr = editSlot == pv::IR;
         std::vector<F> f;
         if (isIr)
-            f = page2 ? std::vector<F> { { "lowMult", "LOW DEC", false }, { "highMult", "HIGH DEC", false }, { "size", "SIZE", false },
-                                         { "build", "FADE IN", false }, { "damping", "DAMPING", false }, { "tone", "TONE", false } }
-                      : std::vector<F> { { "decay", "DECAY", false }, { "predelay", "PRE-DLY", false }, { "early", "EARLY", false },
-                                         { "inWidth", "WIDTH", false }, { "lv", "LEVEL", false }, { "mix", "MIX", true } };
+            f = page2 ? std::vector<F> { { "lowMult", "LOW DECAY", "LOW", false }, { "highMult", "HIGH DECAY", "HIGH", false }, { "size", "SIZE", "SIZ", false },
+                                         { "build", "FADE IN", "FIN", false }, { "damping", "DAMPING", "DMP", false }, { "tone", "TONE", "TON", false } }
+                      : std::vector<F> { { "decay", "DECAY", "RTM", false }, { "predelay", "PRE-DELAY", "PDL", false }, { "early", "EARLY", "ERL", false },
+                                         { "inWidth", "WIDTH", "WID", false }, { "lv", "LEVEL", "LVL", false }, { "mix", "MIX", "MIX", true } };
         else
-            f = page2 ? std::vector<F> { { "diff", "DIFFUSE", false }, { "early", "EARLY", false }, { "build", is480 ? "SPREAD" : "BUILD", false },
-                                         { "mod", is480 ? "WANDER" : "MOD", false }, { is480 ? "spin" : "damping", is480 ? "SPIN" : "DAMPING", false }, { "lv", "LEVEL", false } }
-                      : std::vector<F> { { "decay", "DECAY", false }, { "size", "SIZE", false }, { "predelay", "PRE-DLY", false },
-                                         { "lowMult", "BASS X", false }, { "highMult", "TREBLE X", false }, { "mix", "MIX", true } };
-        for (int i = 0; i < 6; ++i) faders[i]->attach (proc.apvts, f[(size_t) i].global ? String (f[(size_t) i].id) : sid (editSlot, f[(size_t) i].id), f[(size_t) i].lab);
+            f = page2 ? std::vector<F> { { "early", "SHAPE", "SHP", false }, { "build", "SPREAD", "SPR", false }, { "diff", "DIFFUSION", "DIF", false },
+                                         { is480 ? "spin" : "damping", is480 ? "SPIN" : "DAMPING", is480 ? "SPN" : "DMP", false },
+                                         { "mod", is480 ? "WANDER" : "MODULATION", is480 ? "WAN" : "MOD", false }, { "lv", "LEVEL", "LVL", false } }
+                      : std::vector<F> { { "decay", "RT MID", "RTM", false }, { "size", "SIZE", "SIZ", false }, { "predelay", "PREDELAY", "PDL", false },
+                                         { "lowMult", "BASS MULT", "BAS", false }, { "highMult", "TREBLE MULT", "TRB", false }, { "mix", "WET/DRY MIX", "MIX", true } };
+        for (int i = 0; i < 6; ++i)
+        {
+            faders[i]->attach (proc.apvts, f[(size_t) i].global ? String (f[(size_t) i].id) : sid (editSlot, f[(size_t) i].id), f[(size_t) i].lab);
+            abbrev[i] = f[(size_t) i].ab;
+        }
+        pageSeg.repaintAll();
         repaint();
     }
 
@@ -992,316 +1029,371 @@ private:
         };
         bindCombo (compType, compTypeAtt, "cpType"); bindCombo (compTone, compToneAtt, "cpTone");
         bindCombo (matA, matAAtt, "matA"); bindCombo (matB, matBAtt, "matB"); bindCombo (conv, convAtt, "conv");
-        bindCombo (irMatA, irMatAAtt, "matA"); bindCombo (irMatB, irMatBAtt, "matB");
-        compOnAtt.reset(); compOnAtt = std::make_unique<APVTS::ButtonAttachment> (proc.apvts, sid (s, "cpOn"), *compOn);
-        compDuckAtt.reset(); compDuckAtt = std::make_unique<APVTS::ButtonAttachment> (proc.apvts, sid (s, "cpDuck"), *compDuck);
+        compOnAtt.reset(); compOnAtt = std::make_unique<APVTS::ButtonAttachment> (proc.apvts, sid (s, "cpOn"), compOn);
+        compDuckAtt.reset(); compDuckAtt = std::make_unique<APVTS::ButtonAttachment> (proc.apvts, sid (s, "cpDuck"), compDuck);
         matMixAtt.reset(); matMixAtt = std::make_unique<APVTS::SliderAttachment> (proc.apvts, sid (s, "matMix"), matMix);
-        irMatMixAtt.reset(); irMatMixAtt = std::make_unique<APVTS::SliderAttachment> (proc.apvts, sid (s, "matMix"), irMatMix);
-        eqGraph.slot = s; eqGraph.repaint();
         proc.viewSlot.store (s);
         proc.apvts.state.setProperty ("editSlot", s, nullptr);
         lastWaveVersion = -1;
-        if (screenPage == PageAdvanced && s == pv::IR) showPage (PageIr);
-        else if (screenPage == PageIr && s != pv::IR) showPage (PageAdvanced);
-        spinK->setEnabled (s == pv::Lex480);
+        for (int i = 0; i < algoKeys.size(); ++i) algoKeys[i]->marked = algoSlot[i] == s;
+        if (spinK != nullptr) spinK->setEnabled (s == pv::Lex480);
         bindFaders();
-        for (auto* k : algoKeys) k->repaint();
-        repaint();
+        updateVisibility();
+        repaintKeys();
     }
     void selectSlot (int s) { if (s != editSlot) bindSlot (s); }
 
-    void showPage (Page pg)
+    // ---------------------------------------------------------------- IR window (its own window in the display)
+    struct Panel : Component
     {
-        screenPage = (screenPage == pg) ? PageNone : pg;
-        scrAdvanced.setVisible (screenPage == PageAdvanced); scrIr.setVisible (screenPage == PageIr);
-        scrHardware.setVisible (screenPage == PageHardware); scrOutputs.setVisible (screenPage == PageOutputs);
-        for (auto* k : softKeys) { k->repaint(); k->toFront (false); }
-        if (lookPanel.isVisible()) lookPanel.toFront (false);
-        repaint();
-    }
-
-    // ---------------------------------------------------------------- virtual screens
-    ComboBox matA, matB, conv, irMatA, irMatB, osBox, trModel;
-    Slider matMix, irMatMix;
-    std::unique_ptr<APVTS::ComboBoxAttachment> matAAtt, matBAtt, convAtt, irMatAAtt, irMatBAtt, osAtt, trModelAtt, compTypeAtt, compToneAtt, dlDivLAtt, dlDivRAtt;
-    std::unique_ptr<APVTS::SliderAttachment> matMixAtt, irMatMixAtt;
-    std::unique_ptr<APVTS::ButtonAttachment> compOnAtt, compDuckAtt;
-    KnobBox* advK[9] {}; KnobBox* spinK = nullptr; KnobBox* irK[8] {}; KnobBox* trK[2] {}; KnobBox* outScreenK = nullptr;
-    LedKey irLoad { "LOAD", LedKey::Cream }, irPrev { "<", LedKey::Cream }, irNext { ">", LedKey::Cream }, irClear { "CLEAR", LedKey::Cream };
-    std::unique_ptr<ToggleKey> irReverse, irPitch, hwXfIn, hwXfOut, hwNoise, hwOn2, trOn, auxMain;
-    std::unique_ptr<ChoiceKeys> hwIn, hwOut2, cfgKeys;
-    ComboBox machA, machB; std::unique_ptr<APVTS::ComboBoxAttachment> machAAtt, machBAtt;
-
-    void buildAdvanced()
-    {
-        auto& v = scrAdvanced; v.title = "ADVANCED";
-        const char* ids[][2] = { { "damping", "DAMPING" }, { "tone", "INPUT TONE" }, { "hiCut", "HI CUT" }, { "inWidth", "WIDTH" },
-                                 { "xover", "BASS XOVER" }, { "dirt", "DIRT" }, { "rich", "RICHNESS" }, { "mod", "MOD/WANDER" }, { "diff", "DIFFUSE" } };
-        for (int i = 0; i < 9; ++i) advK[i] = addScreenKnob (v, ids[i][0], ids[i][1], true);
-        spinK = addScreenKnob (v, "spin", "SPIN (480)", true);
-        for (auto* b : { &matA, &matB, &conv }) v.addAndMakeVisible (*b);
-        conv.addItemList (kConverterNames, 1);
-        matMix.setSliderStyle (Slider::LinearHorizontal); matMix.setTextBoxStyle (Slider::NoTextBox, false, 0, 0); v.addAndMakeVisible (matMix);
-        v.footer = "Materials, converter and dirt shape the algorithm only. The IR player stays clean.";
-    }
-    void layoutAdvanced()
-    {
-        auto& v = scrAdvanced; v.captions.clear();
-        const int w = v.getWidth() - v.keepClearRight;
-        for (int i = 0; i < 10; ++i)
+        MainPanel& m; bool overlay; explicit Panel (MainPanel& mp, bool ov) : m (mp), overlay (ov) {}
+        std::vector<std::pair<Rectangle<int>, String>> captions; String title;
+        std::function<void (Graphics&)> extra;
+        void paint (Graphics& g) override
         {
-            KnobBox* k = i < 9 ? advK[i] : spinK;
-            k->setBounds (24 + (i % 5) * ((w - 48) / 5), 64 + (i / 5) * 128, (w - 48) / 5, 112);
+            const auto& t = m.look.t;
+            auto r = getLocalBounds().toFloat();
+            if (overlay)
+            {
+                t.face (g, r, Theme::shade (t.iface, t.light() ? -0.04f : 0.04f), t.ifaceGrad, t.radius() + 1.0f, false);
+                grain (g, getLocalBounds().reduced (2), t.style == Style::Studio ? 0.25f : 0.8f);
+            }
+            else { g.setColour (t.screen()); g.fillRoundedRectangle (r, t.radius()); }
+            if (title.isNotEmpty())
+                (overlay ? t.text (g, title, r.reduced (18.0f, 0.0f).removeFromTop (44.0f), Justification::centredLeft, ui (13.0f, W::Bold, 0.18f))
+                         : t.ledText (g, title, r.reduced (16.0f, 0.0f).removeFromTop (38.0f), Justification::centredLeft, ui (13.0f, W::Bold, 0.12f)));
+            for (auto& c : captions)
+                (overlay ? t.text (g, c.second, c.first.toFloat(), Justification::centredLeft, ui (11.0f, W::Medium, 0.02f), t.dimFont())
+                         : t.ledText (g, c.second, c.first.toFloat(), Justification::centredLeft, ui (11.5f, W::Medium), 0.85f));
+            if (extra) extra (g);
         }
-        const int y = 330;
-        v.captions.push_back ({ { 24, y, 200, 18 }, "MATERIAL A" }); matA.setBounds (24, y + 22, 240, 30);
-        v.captions.push_back ({ { 280, y, 200, 18 }, "BLEND A-B" }); matMix.setBounds (280, y + 22, 170, 30);
-        v.captions.push_back ({ { 466, y, 200, 18 }, "MATERIAL B" }); matB.setBounds (466, y + 22, 240, 30);
-        v.captions.push_back ({ { 24, y + 70, 200, 18 }, "CONVERTER" }); conv.setBounds (24, y + 92, 260, 30);
-    }
+    };
+    Panel irWin { *this, false }, advWin { *this, true };
+    Key irLoad { "LOAD" }, irPrev { "<" }, irNext { ">" }, irClear { "CLEAR" };
+    std::unique_ptr<ParamKey> irReverse, irPitch;
+    KnobBox* irK[8] {};
+
     void buildIr()
     {
-        auto& v = scrIr; v.title = "IMPULSE RESPONSE";
-        for (auto* b : { &irLoad, &irPrev, &irNext, &irClear }) { b->showLed = false; v.addAndMakeVisible (*b); }
+        irWin.title = "IR PLAYER";
+        for (auto* b : { &irLoad, &irPrev, &irNext, &irClear }) irWin.addAndMakeVisible (*b);
         irLoad.onClick = [this] { chooseIr(); };
         irPrev.onClick = [this] { stepIr (-1); };
         irNext.onClick = [this] { stepIr (1); };
         irClear.onClick = [this] { proc.clearIr(); };
-        const char* irk[][2] = { { "irStart", "START" }, { "irXover", "ER/LR X" }, { "irFadeOut", "FADE OUT" }, { "irXfeed", "X-FEED" },
-                                 { "irXdelay", "X-DELAY" }, { "irAsym", "ASYM" } };
-        for (int i = 0; i < 6; ++i) irK[i] = addScreenKnob (v, irk[i][0], irk[i][1], false);
-        irK[6] = addScreenKnob (v, "diff", "DIFFUSE", true);
-        irK[7] = addScreenKnob (v, "mod", "MOD", true);
-        irReverse = std::make_unique<ToggleKey> (proc.apvts, "irReverse", "REVERSE", LedKey::Cream, false); v.addAndMakeVisible (*irReverse);
-        irPitch = std::make_unique<ToggleKey> (proc.apvts, "irPitch", "STRETCH PITCH", LedKey::Cream, false); v.addAndMakeVisible (*irPitch);
-        for (auto* b : { &irMatA, &irMatB }) v.addAndMakeVisible (*b);
-        irMatMix.setSliderStyle (Slider::LinearHorizontal); irMatMix.setTextBoxStyle (Slider::NoTextBox, false, 0, 0); v.addAndMakeVisible (irMatMix);
-        v.footer = "Clean path: no converter, dirt, richness or hardware colouring - only the IR and your EQ / comp.";
+        const char* irk[][2] = { { "irStart", "START" }, { "irXover", "ER / LR" }, { "irFadeOut", "FADE OUT" }, { "irXfeed", "X-FEED" },
+                                 { "irXdelay", "X-DELAY" }, { "irAsym", "ASYMMETRY" } };
+        for (int i = 0; i < 6; ++i) { irK[i] = addKnob (irWin, irk[i][0], irk[i][1], false); irK[i]->onScreen = true; }
+        irK[6] = addKnob (irWin, "diff", "DIFFUSION", true); irK[6]->onScreen = true;
+        irK[7] = addKnob (irWin, "mod", "MODULATION", true); irK[7]->onScreen = true;
+        irReverse = std::make_unique<ParamKey> (proc.apvts, "irReverse", "REVERSE"); irWin.addAndMakeVisible (*irReverse);
+        irPitch = std::make_unique<ParamKey> (proc.apvts, "irPitch", "STRETCH PITCH"); irWin.addAndMakeVisible (*irPitch);
+        irWin.extra = [this] (Graphics& g) { paintIrDecay (g); };
+        addChildComponent (irWin);
     }
     void layoutIr()
     {
-        auto& v = scrIr; v.captions.clear();
-        const int w = v.getWidth() - v.keepClearRight;
-        irLoad.setBounds (24, 56, 90, 32); irPrev.setBounds (120, 56, 36, 32); irNext.setBounds (160, 56, 36, 32); irClear.setBounds (204, 56, 90, 32);
-        v.captions.push_back ({ { 310, 56, w - 420, 32 }, {} });
-        for (int i = 0; i < 8; ++i) irK[i]->setBounds (24 + (i % 4) * ((w - 48) / 4), 104 + (i / 4) * 120, (w - 48) / 4, 108);
-        irReverse->setBounds (24, 352, 150, 32); irPitch->setBounds (186, 352, 190, 32);
-        v.captions.push_back ({ { 24, 398, 200, 18 }, "MATERIAL A" }); irMatA.setBounds (24, 420, 220, 30);
-        v.captions.push_back ({ { 260, 398, 200, 18 }, "BLEND" }); irMatMix.setBounds (260, 420, 150, 30);
-        v.captions.push_back ({ { 426, 398, 200, 18 }, "MATERIAL B" }); irMatB.setBounds (426, 420, 220, 30);
+        irWin.captions.clear();
+        int x = 16; const int y = 44;
+        for (auto* b : { &irLoad, &irPrev, &irNext, &irClear }) { b->setBounds (x, y, b->idealWidth(), kKeyH); x += b->idealWidth() + 6; }
+        irWin.captions.push_back ({ { x + 12, y, 420, kKeyH }, {} });
+        for (int i = 0; i < 8; ++i) irK[i]->setBounds (10 + (i % 4) * 92, 86 + (i / 4) * 96, 92, 92);
+        irReverse->setBounds (16, irWin.getHeight() - 8 - kKeyH, irReverse->idealWidth(), kKeyH);
+        irPitch->setBounds (irReverse->getRight() + 6, irWin.getHeight() - 8 - kKeyH, irPitch->idealWidth(), kKeyH);
     }
-    void buildHardware()
+    void paintIrDecay (Graphics& g)
     {
-        auto& v = scrHardware; v.title = "HARDWARE  -  480L SIGNAL CHAIN";
-        auto& st = proc.apvts;
-        hwOn2 = std::make_unique<ToggleKey> (st, "hwOn", "ANALOG", LedKey::Cream, false); v.addAndMakeVisible (*hwOn2);
-        hwIn = std::make_unique<ChoiceKeys> (st, "hwIn", StringArray { "IN ANALOG", "IN DIGITAL" }, LedKey::Dark, false); v.addAndMakeVisible (*hwIn);
-        hwOut2 = std::make_unique<ChoiceKeys> (st, "hwOut", StringArray { "OUT ANALOG", "OUT DIGITAL" }, LedKey::Dark, false); v.addAndMakeVisible (*hwOut2);
-        hwXfIn = std::make_unique<ToggleKey> (st, "hwXfIn", "XFMR IN", LedKey::Cream, false); v.addAndMakeVisible (*hwXfIn);
-        hwXfOut = std::make_unique<ToggleKey> (st, "hwXfOut", "XFMR OUT", LedKey::Cream, false); v.addAndMakeVisible (*hwXfOut);
-        hwNoise = std::make_unique<ToggleKey> (st, "hwNoise", "NOISE -98 dB", LedKey::Cream, false); v.addAndMakeVisible (*hwNoise);
-        osBox.addItemList (osNames(), 1); v.addAndMakeVisible (osBox); osAtt = std::make_unique<APVTS::ComboBoxAttachment> (st, "os", osBox);
-        trOn = std::make_unique<ToggleKey> (st, "trOn", "OUTPUT IRON", LedKey::Cream, false); v.addAndMakeVisible (*trOn);
-        trModel.addItemList (trNames(), 1); v.addAndMakeVisible (trModel); trModelAtt = std::make_unique<APVTS::ComboBoxAttachment> (st, "trModel", trModel);
-        trK[0] = addScreenKnob (v, "trFreq", "IRON FREQ", false);
-        trK[1] = addScreenKnob (v, "trAmt", "IRON AMOUNT", false);
-        v.footer = "Applies to the algorithms only. The dry signal and the IR player never pass through it.";
+        auto r = irWin.getLocalBounds().toFloat().withTrimmedLeft (400.0f).reduced (16.0f, 12.0f).withTrimmedTop (32.0f);
+        paintDecay (g, r, false);
     }
-    void layoutHardware()
+
+    // ---------------------------------------------------------------- ADVANCED (reverb details, hardware, outputs, look)
+    Segmented advTabs; int advTabIdx = 0;
+    ComboBox matA, matB, conv, osBox, trModel, machA, machB, sizeBox;
+    Slider matMix;
+    std::unique_ptr<APVTS::ComboBoxAttachment> matAAtt, matBAtt, convAtt, osAtt, trModelAtt, compTypeAtt, compToneAtt, dlDivLAtt, dlDivRAtt, machAAtt, machBAtt;
+    std::unique_ptr<APVTS::SliderAttachment> matMixAtt;
+    std::unique_ptr<APVTS::ButtonAttachment> compOnAtt, compDuckAtt;
+    KnobBox* advK[9] {}; KnobBox* spinK = nullptr; KnobBox* trK[2] {};
+    std::unique_ptr<ParamKey> hwOn, hwXfIn, hwXfOut, hwNoise, trOn, auxMain;
+    std::unique_ptr<ParamSegmented> hwIn, hwOut, cfgSeg;
+    Segmented styleSeg;
+    struct ColourRow { String name; std::function<Colour&()> col; std::function<float&()> grad; OwnedArray<Key> sw; Key more { "..." }; Slider gradS; };
+    OwnedArray<ColourRow> colourRows;
+    Slider depthS, contrastS;
+    std::vector<Component*> tabComps[4];
+
+    void buildAdvanced()
     {
-        auto& v = scrHardware; v.captions.clear();
-        hwOn2->setBounds (24, 60, 130, 34);
-        hwIn->setBounds (170, 60, 300, 34);
-        hwOut2->setBounds (486, 60, 300, 34);
-        hwXfIn->setBounds (24, 110, 130, 34); hwXfOut->setBounds (170, 110, 130, 34); hwNoise->setBounds (316, 110, 154, 34);
-        v.captions.push_back ({ { 486, 110, 140, 34 }, "OVERSAMPLING" }); osBox.setBounds (636, 112, 90, 30);
-        v.captions.push_back ({ { 24, 162, 860, 18 }, "IN:  XLR > input transformer (option) > LM833 receiver > 9-pole 20 kHz filter > 18-bit gain-ranging A/D" });
-        v.captions.push_back ({ { 24, 184, 860, 18 }, "OUT: 18-bit D/A (PCM53 + 2 LSB) > sample & hold > 9-pole 20 kHz filter > LLA5200 line driver > transformer (option)" });
-        v.captions.push_back ({ { 24, 222, 300, 18 }, "EXTRA: OUTPUT TRANSFORMER (whole output)" });
-        trOn->setBounds (24, 246, 160, 34); trModel.setBounds (196, 248, 300, 30);
-        trK[0]->setBounds (520, 226, 100, 110); trK[1]->setBounds (630, 226, 100, 110);
-    }
-    void buildOutputs()
-    {
-        auto& v = scrOutputs; v.title = "OUTPUTS  -  CONFIGURATION";
-        auto& st = proc.apvts;
-        cfgKeys = std::make_unique<ChoiceKeys> (st, "config", StringArray { "SINGLE", "CASCADE", "STEREO SPLIT", "MONO SPLIT" }, LedKey::Dark, true);
-        v.addAndMakeVisible (*cfgKeys);
+        auto& st = proc.apvts; auto& w = advWin;
+        advTabs.build ({ "REVERB", "HARDWARE", "OUTPUTS", "LOOK" });
+        advTabs.current = [this] { return advTabIdx; };
+        advTabs.onPick = [this] (int i) { advTabIdx = i; updateAdvTabs(); };
+        w.addAndMakeVisible (advTabs);
+        // REVERB
+        const char* ids[][2] = { { "damping", "DAMPING" }, { "tone", "INPUT TONE" }, { "hiCut", "HIGH CUT" }, { "inWidth", "WIDTH" },
+                                 { "xover", "BASS XOVER" }, { "dirt", "DIRT" }, { "rich", "RICHNESS" }, { "trim", "TRIM" }, { "diff", "DIFFUSION" } };
+        for (int i = 0; i < 9; ++i) { advK[i] = addKnob (w, ids[i][0], ids[i][1], true); tabComps[0].push_back (advK[i]); }
+        spinK = addKnob (w, "spin", "SPIN", true); tabComps[0].push_back (spinK);
+        conv.addItemList (kConverterNames, 1);
+        for (auto* c : { (Component*) &matA, (Component*) &matB, (Component*) &conv }) { w.addAndMakeVisible (c); tabComps[0].push_back (c); }
+        matMix.setSliderStyle (Slider::LinearHorizontal); matMix.setTextBoxStyle (Slider::NoTextBox, false, 0, 0); w.addAndMakeVisible (matMix); tabComps[0].push_back (&matMix);
+        // HARDWARE
+        hwOn = std::make_unique<ParamKey> (st, "hwOn", "ANALOG HARDWARE");
+        hwIn = std::make_unique<ParamSegmented> (st, "hwIn", StringArray { "IN ANALOG", "IN DIGITAL" });
+        hwOut = std::make_unique<ParamSegmented> (st, "hwOut", StringArray { "OUT ANALOG", "OUT DIGITAL" });
+        hwXfIn = std::make_unique<ParamKey> (st, "hwXfIn", "INPUT TRANSFORMERS");
+        hwXfOut = std::make_unique<ParamKey> (st, "hwXfOut", "OUTPUT TRANSFORMERS");
+        hwNoise = std::make_unique<ParamKey> (st, "hwNoise", "CONVERTER NOISE");
+        trOn = std::make_unique<ParamKey> (st, "trOn", "OUTPUT IRON");
+        osBox.addItemList (osNames(), 1); osAtt = std::make_unique<APVTS::ComboBoxAttachment> (st, "os", osBox);
+        trModel.addItemList (trNames(), 1); trModelAtt = std::make_unique<APVTS::ComboBoxAttachment> (st, "trModel", trModel);
+        trK[0] = addKnob (w, "trFreq", "IRON FREQ", false); trK[1] = addKnob (w, "trAmt", "IRON AMOUNT", false);
+        for (auto* c : std::initializer_list<Component*> { hwOn.get(), hwIn.get(), hwOut.get(), hwXfIn.get(), hwXfOut.get(), hwNoise.get(), trOn.get(), &osBox, &trModel, trK[0], trK[1] })
+        { w.addAndMakeVisible (c); tabComps[1].push_back (c); }
+        // OUTPUTS
+        cfgSeg = std::make_unique<ParamSegmented> (st, "config", StringArray { "SINGLE", "CASCADE", "STEREO SPLIT", "MONO SPLIT" });
         machA.addItemList (slotChoiceNames(), 1); machB.addItemList (slotChoiceNames(), 1);
-        v.addAndMakeVisible (machA); v.addAndMakeVisible (machB);
         machAAtt = std::make_unique<APVTS::ComboBoxAttachment> (st, "machA", machA);
         machBAtt = std::make_unique<APVTS::ComboBoxAttachment> (st, "machB", machB);
-        auxMain = std::make_unique<ToggleKey> (st, "auxToMain", "AUX > MAIN", LedKey::Cream, false); v.addAndMakeVisible (*auxMain);
-        outScreenK = addScreenKnob (v, "out", "OUTPUT", false);
-        v.footer = "Studio One: enable the plugin's Aux output (outputs 3-4) to get the Aux pair on its own channel.";
-    }
-    void layoutOutputs()
-    {
-        auto& v = scrOutputs; v.captions.clear();
-        cfgKeys->setBounds (24, 58, 640, 52);
-        v.captions.push_back ({ { 24, 126, 200, 18 }, "MACHINE A" }); machA.setBounds (24, 148, 200, 30);
-        v.captions.push_back ({ { 240, 126, 200, 18 }, "MACHINE B" }); machB.setBounds (240, 148, 200, 30);
-        auxMain->setBounds (460, 146, 150, 34);
-        outScreenK->setBounds (690, 54, 110, 120);
-        const int y = 204;
-        v.captions.push_back ({ { 24, y, 860, 18 },      "SINGLE:        all switched-on algorithms, the same on MAIN and AUX" });
-        v.captions.push_back ({ { 24, y + 22, 860, 18 }, "CASCADE:       A feeds B.  MAIN = A > B,  AUX = A only" });
-        v.captions.push_back ({ { 24, y + 44, 860, 18 }, "STEREO SPLIT:  both get the stereo input.  MAIN = A,  AUX = B" });
-        v.captions.push_back ({ { 24, y + 66, 860, 18 }, "MONO SPLIT:    left in > A,  right in > B.  MAIN = A,  AUX = B" });
-        v.captions.push_back ({ { 24, y + 104, 860, 18 }, "AUX > MAIN: with no Aux bus in the host, machine B is mixed into MAIN so you hear both." });
-    }
-
-    // ---------------------------------------------------------------- LOOK
-    Component lookPanel;
-    struct Swatch : public Button
-    {
-        Swatch (Colour c, bool round) : Button ({}), col (c), circle (round) {}
-        Colour col; bool circle; bool selected = false;
-        void paintButton (Graphics& g, bool over, bool) override
+        auxMain = std::make_unique<ParamKey> (st, "auxToMain", "AUX INTO MAIN");
+        for (auto* c : std::initializer_list<Component*> { cfgSeg.get(), &machA, &machB, auxMain.get() }) { w.addAndMakeVisible (c); tabComps[2].push_back (c); }
+        // LOOK
+        styleSeg.build ({ "REMOTE", "STUDIO", "IVORY" });
+        styleSeg.current = [this] { return (int) look.t.style; };
+        styleSeg.onPick = [this] (int s) { look.t.defaults ((Style) s); syncLookControls(); lookChanged(); };
+        w.addAndMakeVisible (styleSeg); tabComps[3].push_back (&styleSeg);
+        auto addRow = [this, &w] (const String& name, std::function<Colour&()> col, std::function<float&()> grad, std::initializer_list<uint32> sw)
         {
-            auto r = getLocalBounds().toFloat().reduced (3.0f);
-            g.setColour (col);
-            if (circle) g.fillEllipse (r); else g.fillRoundedRectangle (r, 4.0f);
-            g.setColour (selected ? Colour (0xffe6e1d5) : Colours::white.withAlpha (over ? 0.5f : 0.15f));
-            if (circle) g.drawEllipse (r.expanded (selected ? 2.0f : 0.0f), selected ? 2.0f : 1.0f);
-            else g.drawRoundedRectangle (r.expanded (selected ? 2.0f : 0.0f), 4.0f, selected ? 2.0f : 1.0f);
-        }
-    };
-    OwnedArray<Swatch> panelSw, ledSw;
-    Slider lkGrad, lkLight, lkContrast; LedKey lk3D { "3D", LedKey::Dark, false }, lk2D { "2D", LedKey::Dark, false }, lkClose { "CLOSE", LedKey::Cream };
-    ComboBox sizeBox; LedKey lkPanelMore { "...", LedKey::Cream }, lkLedMore { "...", LedKey::Cream };
-    std::unique_ptr<ColourSelector> picker;
-
-    struct LookBg : Component
-    {
-        MainPanel& m; explicit LookBg (MainPanel& p) : m (p) { setInterceptsMouseClicks (false, false); }
-        void paint (Graphics& g) override
-        {
-            auto r = getLocalBounds().toFloat();
-            DropShadow (Colours::black.withAlpha (0.7f), 18, { 0, 8 }).drawForRectangle (g, getLocalBounds());
-            g.setColour (Theme::shade (m.look.theme.panel, -0.55f)); g.fillRoundedRectangle (r, 6.0f);
-            g.setColour (Colours::white.withAlpha (0.12f)); g.drawRoundedRectangle (r.reduced (0.5f), 6.0f, 1.0f);
-            g.setColour (Colour (0xffe6e1d5)); g.setFont (uiFont (13.0f, true));
-            g.drawText ("LOOK", 16, 10, 100, 22, Justification::centredLeft);
-            g.setColour (Colour (0xffa29c8e)); g.setFont (uiFont (11.0f, true));
-            g.drawText ("PANEL", 16, 40, 100, 16, Justification::centredLeft);
-            g.drawText ("DISPLAY", 16, 108, 100, 16, Justification::centredLeft);
-            g.drawText ("GRADIENT", 16, 178, 90, 20, Justification::centredLeft);
-            g.drawText ("LIGHTING", 16, 210, 90, 20, Justification::centredLeft);
-            g.drawText ("CONTRAST", 16, 242, 90, 20, Justification::centredLeft);
-            g.drawText ("STYLE", 16, 284, 60, 20, Justification::centredLeft);
-            g.drawText ("SIZE", 16, 326, 60, 20, Justification::centredLeft);
-        }
-    } lookBg { *this };
-
-    void buildLook()
-    {
-        lookPanel.addAndMakeVisible (lookBg);
-        for (auto c : kPanelChoices) { auto* s = panelSw.add (new Swatch (c, false)); s->onClick = [this, c] { look.theme.panel = c; lookChanged(); }; lookPanel.addAndMakeVisible (s); }
-        for (auto c : kLedChoices)   { auto* s = ledSw.add (new Swatch (c, true));    s->onClick = [this, c] { look.theme.led = c; lookChanged(); }; lookPanel.addAndMakeVisible (s); }
-        for (auto* b : { &lkPanelMore, &lkLedMore }) { b->showLed = false; lookPanel.addAndMakeVisible (*b); }
-        lkPanelMore.onClick = [this] { pickColour (true); };
-        lkLedMore.onClick = [this] { pickColour (false); };
-        auto setup = [this] (Slider& s, float v, std::function<void (float)> fn)
-        {
-            s.setSliderStyle (Slider::LinearHorizontal); s.setTextBoxStyle (Slider::NoTextBox, false, 0, 0);
-            s.setRange (0.0, 1.0, 0.01); s.setValue (v, dontSendNotification);
-            s.onValueChange = [this, &s, fn] { fn ((float) s.getValue()); lookChanged(); };
-            lookPanel.addAndMakeVisible (s);
+            auto* r = colourRows.add (new ColourRow());
+            r->name = name; r->col = col; r->grad = grad;
+            for (auto c : sw)
+            {
+                auto* k = r->sw.add (new Key());
+                const Colour cc (c);
+                k->lit = [r, cc] { return r->col() == cc; };
+                k->onClick = [this, r, cc] { r->col() = cc; lookChanged(); };
+                k->getProperties().set ("swatch", (int) c);
+                w.addAndMakeVisible (k); tabComps[3].push_back (k);
+            }
+            r->more.onClick = [this, r] { pickColour (r); };
+            w.addAndMakeVisible (r->more); tabComps[3].push_back (&r->more);
+            if (grad)
+            {
+                r->gradS.setSliderStyle (Slider::LinearHorizontal); r->gradS.setTextBoxStyle (Slider::NoTextBox, false, 0, 0); r->gradS.setRange (0.0, 1.0, 0.01);
+                r->gradS.onValueChange = [this, r] { r->grad() = (float) r->gradS.getValue(); lookChanged(); };
+                w.addAndMakeVisible (r->gradS); tabComps[3].push_back (&r->gradS);
+            }
         };
-        setup (lkGrad, look.theme.grad, [this] (float v) { look.theme.grad = v; });
-        setup (lkLight, look.theme.light, [this] (float v) { look.theme.light = v; });
-        setup (lkContrast, look.theme.contrast, [this] (float v) { look.theme.contrast = v; });
-        lk3D.ledState = [this] { return ! look.theme.flat; }; lk2D.ledState = [this] { return look.theme.flat; };
-        lk3D.onClick = [this] { look.theme.flat = false; lookChanged(); };
-        lk2D.onClick = [this] { look.theme.flat = true; lookChanged(); };
-        lookPanel.addAndMakeVisible (lk3D); lookPanel.addAndMakeVisible (lk2D);
-        lkClose.showLed = false; lkClose.onClick = [this] { lookPanel.setVisible (false); lookBtn.repaint(); };
-        lookPanel.addAndMakeVisible (lkClose);
+        addRow ("INTERFACE", [this]() -> Colour& { return look.t.iface; }, [this]() -> float& { return look.t.ifaceGrad; },
+                { 0xff2b2c2e, 0xff1e1f22, 0xff3d3a35, 0xff1d2733, 0xffd9d1bf, 0xffb8b2a6 });
+        addRow ("SIDE PANEL", [this]() -> Colour& { return look.t.side; }, [this]() -> float& { return look.t.sideGrad; },
+                { 0xff222325, 0xff17181a, 0xff4a2e22, 0xff2a3a2e, 0xffc9bfa9, 0xff5b5f66 });
+        addRow ("LETTERING", [this]() -> Colour& { return look.t.font; }, [this]() -> float& { return look.t.fontGrad; },
+                { 0xffe9e4d8, 0xfff2f2f4, 0xffd8b66a, 0xffc0c4c8, 0xff3a342b, 0xff141414 });
+        addRow ("DISPLAY", [this]() -> Colour& { return look.t.led; }, nullptr,
+                { 0xffff3b1f, 0xffffb43c, 0xff5fe07a, 0xff5ec8ff, 0xfff2f2f4, 0xffff5ea8 });
+        for (auto* s : { &depthS, &contrastS })
+        {
+            s->setSliderStyle (Slider::LinearHorizontal); s->setTextBoxStyle (Slider::NoTextBox, false, 0, 0); s->setRange (0.0, 1.0, 0.01);
+            w.addAndMakeVisible (s); tabComps[3].push_back (s);
+        }
+        depthS.onValueChange = [this] { look.t.depth = (float) depthS.getValue(); lookChanged(); };
+        contrastS.onValueChange = [this] { look.t.contrast = (float) contrastS.getValue(); lookChanged(); };
         sizeBox.addItemList (StringArray { "75 %", "90 %", "100 %", "125 %", "150 %", "175 %", "200 %" }, 1);
         sizeBox.onChange = [this] { static const float sc[] = { 0.75f, 0.9f, 1.0f, 1.25f, 1.5f, 1.75f, 2.0f }; const int i = sizeBox.getSelectedItemIndex(); if (i >= 0 && onScaleChosen) onScaleChosen (sc[i]); };
-        lookPanel.addAndMakeVisible (sizeBox);
-        updateSwatches();
+        w.addAndMakeVisible (sizeBox); tabComps[3].push_back (&sizeBox);
+        syncLookControls();
+        addChildComponent (advWin);
+        updateAdvTabs();
     }
-    void layoutLook()
+    void syncLookControls()
     {
-        lookBg.setBounds (lookPanel.getLocalBounds());
-        lkClose.setBounds (lookPanel.getWidth() - 84, 8, 72, 26);
-        for (int i = 0; i < panelSw.size(); ++i) panelSw[i]->setBounds (14 + i * 42, 58, 38, 38);
-        lkPanelMore.setBounds (14 + panelSw.size() * 42 + 2, 62, 34, 30);
-        for (int i = 0; i < ledSw.size(); ++i) ledSw[i]->setBounds (14 + i * 42, 126, 38, 38);
-        lkLedMore.setBounds (14 + ledSw.size() * 42 + 2, 130, 34, 30);
-        lkGrad.setBounds (110, 178, 200, 20); lkLight.setBounds (110, 210, 200, 20); lkContrast.setBounds (110, 242, 200, 20);
-        lk3D.setBounds (110, 280, 80, 30); lk2D.setBounds (200, 280, 80, 30);
-        sizeBox.setBounds (110, 322, 120, 28);
+        for (auto* r : colourRows) if (r->grad) r->gradS.setValue (r->grad(), dontSendNotification);
+        depthS.setValue (look.t.depth, dontSendNotification); contrastS.setValue (look.t.contrast, dontSendNotification);
     }
-    void updateSwatches()
+    void updateAdvTabs()
     {
-        for (auto* s : panelSw) { s->selected = s->col == look.theme.panel; s->repaint(); }
-        for (auto* s : ledSw) { s->selected = s->col == look.theme.led; s->repaint(); }
+        for (int i = 0; i < 4; ++i) for (auto* c : tabComps[i]) c->setVisible (i == advTabIdx);
+        layoutAdvanced(); advTabs.repaintAll(); advWin.repaint();
     }
-    void pickColour (bool panelColour)
+    void layoutAdvanced()
     {
-        picker = std::make_unique<ColourSelector> (ColourSelector::showColourspace | ColourSelector::showSliders);
-        picker->setCurrentColour (panelColour ? look.theme.panel : look.theme.led, dontSendNotification);
-        picker->setSize (300, 300);
-        struct L : ChangeListener { MainPanel& m; bool p; L (MainPanel& mm, bool pp) : m (mm), p (pp) {} void changeListenerCallback (ChangeBroadcaster* b) override
-            { if (auto* cs = dynamic_cast<ColourSelector*> (b)) { (p ? m.look.theme.panel : m.look.theme.led) = cs->getCurrentColour().withAlpha (1.0f); m.lookChanged(); } } };
-        pickListener = std::make_unique<L> (*this, panelColour);
-        picker->addChangeListener (pickListener.get());
-        CallOutBox::launchAsynchronously (std::move (picker), (panelColour ? lkPanelMore : lkLedMore).getScreenBounds(), nullptr);
+        auto& w = advWin; w.captions.clear(); w.title = {};
+        w.extra = nullptr;
+        advTabs.setBounds (18, 14, advTabs.idealWidth(), kKeyH);
+        const int W0 = w.getWidth();
+        const int y0 = 64;
+        if (advTabIdx == 0)
+        {
+            const int cw = (W0 - 36) / 5;
+            for (int i = 0; i < 10; ++i) { KnobBox* k = i < 9 ? advK[i] : spinK; k->setBounds (18 + (i % 5) * cw, y0 + (i / 5) * 140, cw, 124); }
+            const int y = y0 + 300;
+            w.captions.push_back ({ { 24, y, 240, 16 }, "MATERIAL A" });  matA.setBounds (24, y + 20, 260, kKeyH);
+            w.captions.push_back ({ { 300, y, 240, 16 }, "BLEND A / B" }); matMix.setBounds (300, y + 20, 200, kKeyH);
+            w.captions.push_back ({ { 516, y, 240, 16 }, "MATERIAL B" });  matB.setBounds (516, y + 20, 260, kKeyH);
+            w.captions.push_back ({ { 24, y + 66, 240, 16 }, "CONVERTER" }); conv.setBounds (24, y + 86, 260, kKeyH);
+            w.captions.push_back ({ { 24, w.getHeight() - 34, W0 - 48, 16 }, "Spin applies to the random hall behind the 480L programs. The IR player never passes through any of this." });
+        }
+        else if (advTabIdx == 1)
+        {
+            hwOn->setBounds (24, y0, hwOn->idealWidth(), kKeyH);
+            hwIn->setBounds (24, y0 + 46, hwIn->idealWidth(), kKeyH);
+            hwOut->setBounds (hwIn->getRight() + 24, y0 + 46, hwOut->idealWidth(), kKeyH);
+            hwXfIn->setBounds (24, y0 + 92, hwXfIn->idealWidth(), kKeyH);
+            hwXfOut->setBounds (hwXfIn->getRight() + 8, y0 + 92, hwXfOut->idealWidth(), kKeyH);
+            hwNoise->setBounds (hwXfOut->getRight() + 8, y0 + 92, hwNoise->idealWidth(), kKeyH);
+            w.captions.push_back ({ { 24, y0 + 138, 140, kKeyH }, "OVERSAMPLING" }); osBox.setBounds (140, y0 + 138, 90, kKeyH);
+            w.captions.push_back ({ { 24, y0 + 190, W0 - 48, 16 }, "Input:  XLR > transformer (option) > LM833 receiver > 9-pole 20 kHz filter > 18-bit gain-ranging A/D" });
+            w.captions.push_back ({ { 24, y0 + 210, W0 - 48, 16 }, "Output: 18-bit D/A (PCM53 + 2 LSB) > sample & hold > 9-pole 20 kHz filter > LLA5200 line driver > transformer (option)" });
+            w.captions.push_back ({ { 24, y0 + 230, W0 - 48, 16 }, "Applies to the algorithms only. The dry signal and the IR player never pass through it." });
+            trOn->setBounds (24, y0 + 290, trOn->idealWidth(), kKeyH);
+            trModel.setBounds (trOn->getRight() + 12, y0 + 290, 280, kKeyH);
+            trK[0]->setBounds (trModel.getRight() + 30, y0 + 250, 100, 120); trK[1]->setBounds (trModel.getRight() + 140, y0 + 250, 100, 120);
+            w.captions.push_back ({ { 24, y0 + 324, W0 - 48, 16 }, "Output iron: a transformer on the whole output (dry and wet), off by default." });
+        }
+        else if (advTabIdx == 2)
+        {
+            cfgSeg->setBounds (24, y0, cfgSeg->idealWidth(), kKeyH);
+            w.captions.push_back ({ { 24, y0 + 46, 120, kKeyH }, "MACHINE A" }); machA.setBounds (120, y0 + 46, 170, kKeyH);
+            w.captions.push_back ({ { 310, y0 + 46, 120, kKeyH }, "MACHINE B" }); machB.setBounds (406, y0 + 46, 170, kKeyH);
+            auxMain->setBounds (600, y0 + 46, auxMain->idealWidth(), kKeyH);
+            const char* lines[] = { "Single:  every algorithm that is on, the same on Main and Aux.",
+                                    "Cascade:  A feeds B.  Main = A into B,  Aux = A only.",
+                                    "Stereo Split:  both machines get the stereo input.  Main = A,  Aux = B.",
+                                    "Mono Split:  left input > A,  right input > B.  Main = A,  Aux = B.",
+                                    "Aux is the plugin's second stereo output (3-4). Enable it in Studio One to give Aux its own channel;",
+                                    "without it, Aux into Main mixes machine B into the main output." };
+            for (int i = 0; i < 6; ++i) w.captions.push_back ({ { 24, y0 + 104 + i * 22, W0 - 48, 18 }, lines[i] });
+        }
+        else
+        {
+            styleSeg.setBounds (140, y0, styleSeg.idealWidth(), kKeyH);
+            w.captions.push_back ({ { 24, y0, 110, kKeyH }, "STYLE" });
+            int y = y0 + 50;
+            for (auto* r : colourRows)
+            {
+                w.captions.push_back ({ { 24, y, 110, kKeyH }, r->name });
+                int x = 140;
+                for (auto* k : r->sw) { k->setBounds (x, y, 34, kKeyH); x += 40; }
+                r->more.setBounds (x, y, 34, kKeyH);
+                if (r->grad) { w.captions.push_back ({ { x + 54, y, 80, kKeyH }, "GRADIENT" }); r->gradS.setBounds (x + 134, y, 180, kKeyH); }
+                y += 44;
+            }
+            w.captions.push_back ({ { 24, y, 110, kKeyH }, "3D DEPTH" }); depthS.setBounds (140, y, 220, kKeyH);
+            w.captions.push_back ({ { 400, y, 110, kKeyH }, "CONTRAST" }); contrastS.setBounds (500, y, 220, kKeyH);
+            y += 44;
+            w.captions.push_back ({ { 24, y, 110, kKeyH }, "SIZE" }); sizeBox.setBounds (140, y, 110, kKeyH);
+        }
+    }
+    void pickColour (ColourRow* r)
+    {
+        auto cs = std::make_unique<ColourSelector> (ColourSelector::showColourspace | ColourSelector::showSliders);
+        cs->setCurrentColour (r->col(), dontSendNotification);
+        cs->setSize (300, 300);
+        struct L : ChangeListener { MainPanel& m; ColourRow* row; L (MainPanel& mm, ColourRow* rr) : m (mm), row (rr) {}
+            void changeListenerCallback (ChangeBroadcaster* b) override { if (auto* c = dynamic_cast<ColourSelector*> (b)) { row->col() = c->getCurrentColour().withAlpha (1.0f); m.lookChanged(); } } };
+        pickListener = std::make_unique<L> (*this, r);
+        cs->addChangeListener (pickListener.get());
+        CallOutBox::launchAsynchronously (std::move (cs), r->more.getScreenBounds(), nullptr);
     }
     std::unique_ptr<ChangeListener> pickListener;
 
-    void lookChanged()
+    void lookChanged (bool save = true)
     {
-        look.refresh(); updateSwatches();
-        auto& s = proc.apvts.state;
-        s.setProperty ("lookPanel", look.theme.panel.toString(), nullptr); s.setProperty ("lookLed", look.theme.led.toString(), nullptr);
-        s.setProperty ("lookGrad", look.theme.grad, nullptr); s.setProperty ("lookLight", look.theme.light, nullptr);
-        s.setProperty ("lookContrast", look.theme.contrast, nullptr); s.setProperty ("lookFlat", look.theme.flat, nullptr);
-        // also the default for new instances
-        XmlElement x ("FlexiverbLook");
-        x.setAttribute ("panel", look.theme.panel.toString()); x.setAttribute ("led", look.theme.led.toString());
-        x.setAttribute ("grad", look.theme.grad); x.setAttribute ("light", look.theme.light); x.setAttribute ("contrast", look.theme.contrast); x.setAttribute ("flat", look.theme.flat);
-        lookFile().getParentDirectory().createDirectory(); x.writeTo (lookFile());
+        look.refresh();
+        auto& s = proc.apvts.state; const auto& t = look.t;
+        s.setProperty ("lkStyle", (int) t.style, nullptr);
+        s.setProperty ("lkIface", t.iface.toString(), nullptr); s.setProperty ("lkSide", t.side.toString(), nullptr);
+        s.setProperty ("lkFont", t.font.toString(), nullptr); s.setProperty ("lkLed", t.led.toString(), nullptr);
+        s.setProperty ("lkIfaceGrad", t.ifaceGrad, nullptr); s.setProperty ("lkSideGrad", t.sideGrad, nullptr); s.setProperty ("lkFontGrad", t.fontGrad, nullptr);
+        s.setProperty ("lkDepth", t.depth, nullptr); s.setProperty ("lkContrast", t.contrast, nullptr);
+        if (save)
+        {
+            XmlElement x ("FlexiverbLook2");
+            for (int i = 0; i < s.getNumProperties(); ++i) { const auto n = s.getPropertyName (i).toString(); if (n.startsWith ("lk")) x.setAttribute (n, s.getProperty (n).toString()); }
+            lookFile().getParentDirectory().createDirectory(); x.writeTo (lookFile());
+        }
+        styleSeg.repaintAll();
         repaintAll (*this);
     }
     static void repaintAll (Component& c) { c.repaint(); for (auto* ch : c.getChildren()) repaintAll (*ch); }
-    static File lookFile() { return userPresetFolder().getParentDirectory().getChildFile ("FlexiverbLook.xml"); }
+    static File lookFile() { return userPresetFolder().getParentDirectory().getChildFile ("FlexiverbLook2.xml"); }
     void loadLook()
     {
-        auto& s = proc.apvts.state; auto& t = look.theme;
-        if (s.hasProperty ("lookPanel"))
+        auto& s = proc.apvts.state; auto& t = look.t;
+        auto apply = [&t] (std::function<String (const char*, const String&)> get)
         {
-            t.panel = Colour::fromString (s.getProperty ("lookPanel").toString()); t.led = Colour::fromString (s.getProperty ("lookLed").toString());
-            t.grad = (float) s.getProperty ("lookGrad", 0.6f); t.light = (float) s.getProperty ("lookLight", 0.6f);
-            t.contrast = (float) s.getProperty ("lookContrast", 0.5f); t.flat = (bool) s.getProperty ("lookFlat", false);
-        }
-        else if (auto x = parseXML (lookFile()))
-        {
-            t.panel = Colour::fromString (x->getStringAttribute ("panel", t.panel.toString())); t.led = Colour::fromString (x->getStringAttribute ("led", t.led.toString()));
-            t.grad = (float) x->getDoubleAttribute ("grad", 0.6); t.light = (float) x->getDoubleAttribute ("light", 0.6);
-            t.contrast = (float) x->getDoubleAttribute ("contrast", 0.5); t.flat = x->getBoolAttribute ("flat", false);
-        }
+            t.defaults ((Style) jlimit (0, 2, get ("lkStyle", "0").getIntValue()));
+            t.iface = Colour::fromString (get ("lkIface", t.iface.toString())); t.side = Colour::fromString (get ("lkSide", t.side.toString()));
+            t.font = Colour::fromString (get ("lkFont", t.font.toString())); t.led = Colour::fromString (get ("lkLed", t.led.toString()));
+            t.ifaceGrad = get ("lkIfaceGrad", String (t.ifaceGrad)).getFloatValue(); t.sideGrad = get ("lkSideGrad", String (t.sideGrad)).getFloatValue();
+            t.fontGrad = get ("lkFontGrad", String (t.fontGrad)).getFloatValue(); t.depth = get ("lkDepth", String (t.depth)).getFloatValue();
+            t.contrast = get ("lkContrast", String (t.contrast)).getFloatValue();
+        };
+        if (s.hasProperty ("lkStyle")) apply ([&s] (const char* n, const String& d) { return s.getProperty (n, d).toString(); });
+        else if (auto x = parseXML (lookFile())) { auto* xp = x.get(); apply ([xp] (const char* n, const String& d) { return xp->getStringAttribute (n, d); }); }
         look.refresh();
     }
 
-    // ---------------------------------------------------------------- presets
+    // ---------------------------------------------------------------- live analyser
+    void updateAnalyser()
+    {
+        const int N = 1 << 12;
+        proc.readScope (fftBuf.data(), N);
+        window.multiplyWithWindowingTable (fftBuf.data(), (size_t) N);
+        std::fill (fftBuf.begin() + N, fftBuf.end(), 0.0f);
+        fft.performFrequencyOnlyForwardTransform (fftBuf.data());
+        const double fs = jmax (8000.0, proc.getSampleRateHz());
+        auto bandDb = [&] (double f0, double f1)
+        {
+            const int b0 = jmax (1, (int) (f0 / fs * N)), b1 = jmin (N / 2 - 1, jmax (b0 + 1, (int) (f1 / fs * N)));
+            double e = 0; for (int b = b0; b < b1; ++b) e += (double) fftBuf[(size_t) b] * fftBuf[(size_t) b];
+            return (float) (10.0 * std::log10 (e / (double) (N * N) * 16.0 + 1e-12));
+        };
+        const float lo = bandDb (20, 300), mid = bandDb (300, 4000), hi = bandDb (4000, 20000);
+        const float vals[3] = { lo, mid, hi };
+        for (int b = 0; b < 3; ++b) { auto& sm = histSmooth[b]; sm += (jmax (sm - 6.0f, vals[b]) - sm) * 0.5f; hist[b][(size_t) histPos] = sm; }
+        histPos = (histPos + 1) % (int) histLen;
+        const size_t nb = bars.size();
+        for (size_t i = 0; i < nb; ++i)
+        {
+            const double f0 = 20.0 * std::pow (1000.0, (double) i / nb), f1 = 20.0 * std::pow (1000.0, (double) (i + 1) / nb);
+            const float v = bandDb (f0, f1) + 4.0f;
+            bars[i] = v > bars[i] ? bars[i] + (v - bars[i]) * 0.6f : bars[i] - 1.2f;
+            peaks[i] = v > peaks[i] ? v : peaks[i] - 0.35f;
+        }
+    }
+
+    // ---------------------------------------------------------------- presets (nested menus: "480L/1 Halls")
     Array<File> userFiles;
     void buildPresetMenu()
     {
         auto* root = presetBox.getRootMenu();
         root->clear();
         root->addItem (kDefaultId, "Default");
-        String group; PopupMenu sub;
+        // groups in list order, "A/B" nests B inside A
+        StringArray tops; std::map<String, StringArray> subs; std::map<String, std::vector<int>> items;
         for (int i = 0; i < kNumPresets; ++i)
         {
-            if (group != kPresets[i].group && group.isNotEmpty()) { root->addSubMenu (group, sub); sub = PopupMenu(); }
-            group = kPresets[i].group;
-            sub.addItem (kBuiltinBase + i, kPresets[i].name);
+            const String g (kPresets[i].group);
+            const String top = g.upToFirstOccurrenceOf ("/", false, false), sub = g.fromFirstOccurrenceOf ("/", false, false);
+            if (! tops.contains (top)) tops.add (top);
+            if (sub.isNotEmpty() && ! subs[top].contains (sub)) subs[top].add (sub);
+            items[g].push_back (i);
         }
-        if (group.isNotEmpty()) root->addSubMenu (group, sub);
+        for (auto& top : tops)
+        {
+            PopupMenu tm;
+            for (int i : items[top]) tm.addItem (kBuiltinBase + i, kPresets[i].name);
+            for (auto& sub : subs[top])
+            {
+                PopupMenu sm;
+                for (int i : items[top + "/" + sub]) sm.addItem (kBuiltinBase + i, kPresets[i].name);
+                tm.addSubMenu (sub, sm);
+            }
+            root->addSubMenu (top, tm);
+        }
         userFiles = userPresetFolder().findChildFiles (File::findFiles, false, "*.pvpreset");
         std::sort (userFiles.begin(), userFiles.end(), [] (const File& a, const File& b) { return a.getFileName().compareNatural (b.getFileName()) < 0; });
         PopupMenu u;
@@ -1387,7 +1479,7 @@ private:
             if (fs.size() >= 2)
             {
                 File a = fs[0], b = fs[1];
-                if (irSide (a) == 1 || irSide (b) == 0) std::swap (a, b);     // put the left file first
+                if (irSide (a) == 1 || irSide (b) == 0) std::swap (a, b);
                 proc.requestIrLoad (a, b, true);
             }
             else loadAuto (fs[0]);
@@ -1420,11 +1512,11 @@ private:
     {
         const int req = proc.presetSlotRequest.exchange (-1);
         if (req >= 0 && req < pv::kNumSlots) { bindSlot (req); buildPresetMenu(); }
-        if (++dspTick >= 10)
+        if (++dspTick >= 15)
         {
             dspTick = 0;
             const float d = std::round (proc.dspLoad.load() * 10.0f) / 10.0f;
-            if (d != shownDsp) { shownDsp = d; repaint (dspArea); }
+            if (d != shownDsp) { shownDsp = d; repaint (headArea); }
         }
         auto& params = proc.getParameters();
         bool changed = false;
@@ -1435,48 +1527,53 @@ private:
         }
         syncPresetBox();
         const bool sync = raw ("dlSync") > 0.5f;
-        if (sync != lastSync) { lastSync = sync; updateSide(); }
+        if (sync != lastSync) { lastSync = sync; updateVisibility(); }
         const bool optoOnly = (int) raw (sid (editSlot, "cpType")) == pv::CompOpto;
         for (int i : { 2, 3 }) compK[i]->setEnabled (! optoOnly);
         const int ver = proc.waveVersion.load();
-        if (ver != lastWaveVersion)
+        if (ver != lastWaveVersion) { lastWaveVersion = ver; wave = proc.getWave (editSlot); repaint (dispArea); if (irWin.isVisible()) irWin.repaint(); }
+        if (irWin.isVisible())
         {
-            lastWaveVersion = ver;
-            wave = proc.getWave (editSlot);
-            repaint (dispArea);
+            const String info = proc.irLayout() == pv::IrNone ? String ("no file loaded - press LOAD") : proc.irInfo();
+            if (! irWin.captions.empty() && irWin.captions[0].second != info) { irWin.captions[0].second = info; irWin.repaint(); }
         }
-        if (screenPage == PageIr) { scrIr.captions[0].second = proc.irLayout() == pv::IrNone ? String ("no file loaded") : proc.irInfo(); }
+        if (mode == Live && ! advOpen && editSlot != pv::IR) { updateAnalyser(); repaint (dispArea); }
         if (changed)
         {
-            repaint (dispArea); for (auto* k : knobs) k->repaint();
-            for (auto* k : algoKeys) k->repaint();
-            if (sideOpen && sideTab == 0) eqGraph.repaint();
-            if (screenPage != PageNone) for (auto* v : { &scrAdvanced, &scrIr, &scrHardware, &scrOutputs }) if (v->isVisible()) v->repaint();
+            if (mode != Live) repaint (dispArea);
+            for (auto* k : knobs) k->repaint();
+            for (auto* f : faders) f->repaint();
+            repaintKeys();
         }
         repaint (meterArea[0].getUnion (meterArea[2]).expanded (4));
-        if (sideOpen && sideTab == 1) repaint (inMeter.getUnion (grMeter).expanded (40, 24));
+        if (drawerOpen && drawerTab == 1) repaint (inMeter.getUnion (grMeter).expanded (30, 24));
     }
 
     PlateVerbProcessor& proc;
     FlexLook look;
+    juce::dsp::FFT fft;
+    juce::dsp::WindowingFunction<float> window { (size_t) (1 << 12), juce::dsp::WindowingFunction<float>::hann };
+    std::vector<float> fftBuf = std::vector<float> ((size_t) (1 << 13), 0.0f);
+    static constexpr size_t histLen = 180;
+    std::vector<float> hist[3] = { std::vector<float> (histLen, -90.0f), std::vector<float> (histLen, -90.0f), std::vector<float> (histLen, -90.0f) };
+    float histSmooth[3] = { -90.0f, -90.0f, -90.0f }; int histPos = 0;
+    std::vector<float> bars = std::vector<float> (31, -90.0f), peaks = std::vector<float> (31, -90.0f);
     ComboBox presetBox;
-    LedKey presetPrev, presetNext, presetSave, lookBtn, foldBtn;
-    std::unique_ptr<ToggleKey> analogKey, dlOn, dlSync, dlPing;
-    std::unique_ptr<LedKey> compOn, compDuck;
+    Key presetPrev, presetNext, presetSave, advKey, drawerKey;
+    Key compOn, compDuck;
+    std::unique_ptr<ParamKey> dlOn, dlSync, dlPing;
     ComboBox compType, compTone, dlDivL, dlDivR;
-    OwnedArray<ToggleKey> algoKeys; int algoOrder[pv::kNumSlots] {};
-    OwnedArray<LedKey> softKeys, tabKeys, vTabs;
-    OwnedArray<FaderBox> faders;
+    OwnedArray<Key> algoKeys; int algoSlot[5] {};
+    Segmented modeSeg, pageSeg, drawerSeg;
+    OwnedArray<FaderBox> faders; String abbrev[6];
     OwnedArray<KnobBox> knobs;
     KnobBox* eqF[4] {}; KnobBox* eqG[4] {}; KnobBox* compK[6] {}; KnobBox* dlK[12] {}; KnobBox* outKnob = nullptr;
-    std::unique_ptr<ChoiceKeys> outType;
-    EqGraph eqGraph;
-    VirtualScreen scrAdvanced, scrIr, scrHardware, scrOutputs;
     pv::WaveData wave;
-    Rectangle<int> railArea, surfArea, sideArea, dispArea, bayArea, meterArea[3], inMeter, grMeter, dspArea;
+    Rectangle<int> headArea, surfArea, drawerArea, dispArea, bayArea, meterArea[3], inMeter, grMeter, dspArea;
+    String auxBusNote;
     float shownDsp = 0.0f; int dspTick = 0;
-    Array<float> lastValues; int editSlot = 0, lastWaveVersion = -1, sideTab = 0;
-    bool sideOpen = true, page2 = false, lastSync = false; Page screenPage = PageNone;
+    Array<float> lastValues; int editSlot = 0, lastWaveVersion = -1, drawerTab = 0, mode = 0;
+    bool drawerOpen = true, page2 = false, lastSync = false, advOpen = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainPanel)
 };
@@ -1489,9 +1586,9 @@ public:
     {
         setLookAndFeel (&panel.getLook());
         addAndMakeVisible (panel);
-        scale = (float) (double) p.apvts.state.getProperty ("uiScale3", 0.9);
+        scale = (float) (double) p.apvts.state.getProperty ("uiScale4", 0.85);
         panel.onSizeChanged = [this] { applySize(); };
-        panel.onScaleChosen = [this] (float s) { scale = s; procRef.apvts.state.setProperty ("uiScale3", scale, nullptr); applySize(); };
+        panel.onScaleChosen = [this] (float s) { scale = s; procRef.apvts.state.setProperty ("uiScale4", scale, nullptr); applySize(); };
         setResizable (true, true);
         applySize();
         panel.showScale (scale);
@@ -1501,11 +1598,10 @@ public:
     {
         if (applying) return;
         scale = jlimit (0.5f, 2.0f, (float) getWidth() / (float) panel.designWidth());
-        procRef.apvts.state.setProperty ("uiScale3", scale, nullptr);
+        procRef.apvts.state.setProperty ("uiScale4", scale, nullptr);
         panel.setTransform (AffineTransform::scale (scale));
         panel.setBounds (0, 0, panel.designWidth(), MainPanel::H);
     }
-
    #if FLEX_TEST
     MainPanel& getPanel() { return panel; }
    #endif
@@ -1523,7 +1619,7 @@ private:
     }
     PlateVerbProcessor& procRef;
     MainPanel panel;
-    float scale = 0.9f; bool applying = false;
+    float scale = 0.85f; bool applying = false;
 };
 
 AudioProcessorEditor* PlateVerbProcessor::createEditor() { return new PlateVerbEditor (*this); }

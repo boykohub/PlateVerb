@@ -41,7 +41,7 @@ static String sid (int slot, const String& base) { return "s" + String (slot) + 
 static String nid (const char* prefix, int i) { return String (prefix) + String (i); }
 static String slotTitle (int s) { String n = String (kSlotNames[s]).toLowerCase(); return s == pv::IR ? String ("IR") : n.substring (0, 1).toUpperCase() + n.substring (1); }
 
-static const char* const kSlotFloatIds[] = { "spin", "xover", "matMix", "dirt", "rich", "hiCut", "lv", "decay", "lowMult", "highMult", "size", "predelay", "build", "early", "diff", "damping",
+static const char* const kSlotFloatIds[] = { "trim", "spin", "xover", "matMix", "dirt", "rich", "hiCut", "lv", "decay", "lowMult", "highMult", "size", "predelay", "build", "early", "diff", "damping",
                                              "tone", "mod", "inWidth", "eqF0", "eqF1", "eqF2", "eqF3", "eqG0", "eqG1", "eqG2", "eqG3",
                                              "cpThr", "cpRatio", "cpAtk", "cpRel", "cpMakeup", "cpMix" };
 static const char* const kSlotOtherIds[] = { "on", "cpOn", "cpDuck", "cpType", "cpTone", "matA", "matB", "conv" };
@@ -105,7 +105,7 @@ public:
             q.on = P (sid (s, "on")); q.lv = P (sid (s, "lv")); q.decay = P (sid (s, "decay")); q.low = P (sid (s, "lowMult"));
             q.high = P (sid (s, "highMult")); q.size = P (sid (s, "size")); q.pre = P (sid (s, "predelay")); q.build = P (sid (s, "build"));
             q.early = P (sid (s, "early")); q.diff = P (sid (s, "diff")); q.damp = P (sid (s, "damping")); q.tone = P (sid (s, "tone"));
-            q.mod = P (sid (s, "mod")); q.width = P (sid (s, "inWidth")); q.spin = P (sid (s, "spin")); q.xover = P (sid (s, "xover"));
+            q.mod = P (sid (s, "mod")); q.width = P (sid (s, "inWidth")); q.spin = P (sid (s, "spin")); q.xover = P (sid (s, "xover")); q.trim = P (sid (s, "trim"));
             q.matA = P (sid (s, "matA")); q.matB = P (sid (s, "matB")); q.matMix = P (sid (s, "matMix")); q.dirt = P (sid (s, "dirt")); q.hiCut = P (sid (s, "hiCut")); q.conv = P (sid (s, "conv")); q.rich = P (sid (s, "rich"));
             for (int b = 0; b < 4; ++b) { q.eqF[b] = P (sid (s, nid ("eqF", b))); q.eqG[b] = P (sid (s, nid ("eqG", b))); }
             q.cpOn = P (sid (s, "cpOn")); q.cpDuck = P (sid (s, "cpDuck")); q.cpType = P (sid (s, "cpType")); q.cpTone = P (sid (s, "cpTone"));
@@ -194,6 +194,7 @@ public:
             g->addChild (fp (sid (s, "inWidth"), n + "Input Width", 0.0f, 1.0f, 1.0f));
             g->addChild (fp (sid (s, "spin"), n + "Spin", 0.05f, 4.0f, 0.8f, kLog, "Hz", 2));
             g->addChild (fp (sid (s, "xover"), n + "Bass Crossover", 100.0f, 2000.0f, 300.0f, kLog, "Hz"));
+            g->addChild (fp (sid (s, "trim"), n + "Trim", -48.0f, 48.0f, 0.0f, -1.0f, "dB", 1));
             g->addChild (cp (sid (s, "matA"), n + "Material A", materialNames (s), 0));
             g->addChild (cp (sid (s, "matB"), n + "Material B", materialNames (s), 0));
             g->addChild (fp (sid (s, "matMix"), n + "Material Blend", 0.0f, 1.0f, 0.0f));
@@ -340,6 +341,12 @@ public:
             }
             else engine.process (L + pos, R + pos, m, prm, nullptr, nullptr, auxL ? auxL + pos : nullptr, auxR ? auxR + pos : nullptr);
         }
+        {   // analyser feed for the live display: the main output, mono
+            const float* oL = buffer.getReadPointer (0); const float* oR = buffer.getReadPointer (1);
+            int w = scopeWrite.load (std::memory_order_relaxed);
+            for (int i = 0; i < n; ++i) { scope[(size_t) w] = 0.5f * (oL[i] + oR[i]); w = (w + 1) & (kScopeSize - 1); }
+            scopeWrite.store (w, std::memory_order_release);
+        }
         meterIn.store (jmax (meterIn.load() * 0.85f, engine.meterIn()));
         meterMain.store (jmax (meterMain.load() * 0.85f, engine.meterMain()));
         meterAux.store (jmax (meterAux.load() * 0.85f, engine.meterAux()));
@@ -366,7 +373,7 @@ public:
             auto& q = sp[s]; auto& d = p.slot[s];
             d.on = on (q.on); d.level = f (q.lv); d.decaySec = f (q.decay); d.lowMult = f (q.low); d.highMult = f (q.high);
             d.size = f (q.size); d.predelayMs = f (q.pre); d.buildMs = f (q.build); d.early = f (q.early); d.diffusion = f (q.diff);
-            d.damping = f (q.damp); d.tone = f (q.tone); d.mod = f (q.mod); d.inWidth = f (q.width); d.spinHz = f (q.spin); d.xoverHz = f (q.xover);
+            d.damping = f (q.damp); d.tone = f (q.tone); d.mod = f (q.mod); d.inWidth = f (q.width); d.spinHz = f (q.spin); d.xoverHz = f (q.xover); d.trimDb = f (q.trim);
             for (int b = 0; b < 4; ++b) { d.eqF[b] = f (q.eqF[b]); d.eqG[b] = f (q.eqG[b]); }
             auto& c = d.comp;
             c.on = on (q.cpOn); c.duck = on (q.cpDuck); c.type = jlimit (0, 2, (int) f (q.cpType)); c.vintage = f (q.cpTone) > 0.5f;
@@ -462,7 +469,7 @@ public:
         setParam (sid (s, "tone"), p.tone); setParam (sid (s, "mod"), p.mod); setParam (sid (s, "inWidth"), p.width);
         setParam (sid (s, "hiCut"), p.hiCut);
         setParam (sid (s, "conv"), (float) p.conv);
-        setParam (sid (s, "spin"), p.spin); setParam (sid (s, "xover"), p.xover);
+        setParam (sid (s, "spin"), p.spin); setParam (sid (s, "xover"), p.xover); setParam (sid (s, "trim"), p.trim);
         const float eqF[] = { 250.0f, 400.0f, 2500.0f, 8000.0f };     // presets were fitted with the low shelf at 250 Hz
         for (int b = 0; b < 4; ++b) { setParam (sid (s, nid ("eqF", b)), eqF[b]); setParam (sid (s, nid ("eqG", b)), p.eq[b]); }
         presetSlotRequest.store (s);
@@ -518,6 +525,16 @@ public:
     APVTS apvts;
     int currentPreset = 0;
     std::atomic<float> compGr[pv::kNumSlots] {}, compIn[pv::kNumSlots] {}, dspLoad { 0.0f }, meterIn { 0.0f }, meterMain { 0.0f }, meterAux { 0.0f };
+    // live display: the newest kScopeSize output samples (mono), written by the audio thread
+    static constexpr int kScopeSize = 16384;
+    std::vector<float> scope = std::vector<float> ((size_t) kScopeSize, 0.0f);
+    std::atomic<int> scopeWrite { 0 };
+    void readScope (float* dst, int n) const
+    {
+        const int w = scopeWrite.load (std::memory_order_acquire);
+        for (int i = 0; i < n; ++i) dst[i] = scope[(size_t) ((w - n + i) & (kScopeSize - 1))];
+    }
+    double getSampleRateHz() const { return sampleRateHz; }
 
 private:
     // ------------------------------------------------------------------ background thread: IR loading/rendering, wave display
@@ -706,7 +723,7 @@ private:
 
     struct SlotPtrs {
         std::atomic<float> *on = nullptr, *lv = nullptr, *decay = nullptr, *low = nullptr, *high = nullptr, *size = nullptr, *pre = nullptr,
-            *build = nullptr, *early = nullptr, *diff = nullptr, *damp = nullptr, *tone = nullptr, *mod = nullptr, *width = nullptr, *spin = nullptr, *xover = nullptr,
+            *build = nullptr, *early = nullptr, *diff = nullptr, *damp = nullptr, *tone = nullptr, *mod = nullptr, *width = nullptr, *spin = nullptr, *xover = nullptr, *trim = nullptr,
             *eqF[4] = {}, *eqG[4] = {}, *matA = nullptr, *matB = nullptr, *matMix = nullptr, *dirt = nullptr, *hiCut = nullptr, *conv = nullptr, *rich = nullptr, *cpOn = nullptr, *cpDuck = nullptr, *cpType = nullptr, *cpTone = nullptr, *cpThr = nullptr,
             *cpRatio = nullptr, *cpAtk = nullptr, *cpRel = nullptr, *cpMakeup = nullptr, *cpMix = nullptr;
     } sp[pv::kNumSlots];
