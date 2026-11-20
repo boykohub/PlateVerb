@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(PlateVerb VERSION 1.0.0)
+project(BDPlugins VERSION 1.0.0)
 
 include(FetchContent)
 FetchContent_Declare(JUCE

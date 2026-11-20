@@ -1,4 +1,4 @@
-# Boyko plugins
+# BD Plugins
 
 All plugins live on the `main` branch, one folder each. Each plugin has its own build on GitHub Actions
 and only builds when its own files change (or the shared `Source/` code, which all of them use).
