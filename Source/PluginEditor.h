@@ -7,7 +7,7 @@
 //  Slider display  the 4-character labels of the six sliders on this page
 //  Six sliders     edit the page's parameters; the value shows in the main display while a slider moves
 //
-//  Loading:   BANK, 1-0 selects a bank (press BANK again for banks 11-20, again for 21-26), then 1-0 loads a program.
+//  Loading:   BANK, 1-0 selects a bank (press BANK again for 11-20, 21-30, 31-32), then 1-0 loads a program.
 //             PROG, 1-0 loads a program from the bank shown.
 //  Variation: VAR, 1 = factory values, 2-0 = your stored variations of the loaded program (STO in VAR mode stores one).
 //  Registers: REG, bank 1-0, then number 1-0 recalls a register; STO, bank, number stores one.
@@ -304,6 +304,7 @@ class Flexiverb480Editor : public AudioProcessorEditor, private Timer
 {
 public:
     static constexpr int kW = 452, kH = 640;
+    static constexpr int kBankGroups = (l480::kNumBanks + 9) / 10;
 
     explicit Flexiverb480Editor (Flexiverb480Processor& p) : AudioProcessorEditor (p), proc (p)
     {
@@ -478,7 +479,7 @@ private:
         if (ctrl) { ctrl = false; page = 0; refreshPage (true); }
         if (m == Mode::Bank)
         {
-            if (mode == Mode::Bank) bankGroup = (bankGroup + 1) % 3;                  // 1-10 -> 11-20 -> 21
+            if (mode == Mode::Bank) bankGroup = (bankGroup + 1) % kBankGroups;        // 1-10 -> 11-20 -> 21-30 -> 31-32
             else bankGroup = (proc.prog (machine).bank - 1) / 10;
         }
         if (m == Mode::Prog && mode != Mode::Bank) browseBank = proc.prog (machine).bank;
@@ -508,7 +509,7 @@ private:
             case Mode::Bank:
             {
                 const int b = bankGroup * 10 + n;
-                if (b > l480::kNumBanks) { showMessage ("NO BANK " + String (b), "BANKS 1-26"); return; }
+                if (b > l480::kNumBanks) { showMessage ("NO BANK " + String (b), "BANKS 1-" + String (l480::kNumBanks)); return; }
                 browseBank = b; mode = Mode::Prog; msgUntil = 0;                       // then pick the program
                 break;
             }
@@ -732,7 +733,7 @@ private:
             else if (ctrl)                    l2 = "CTRL " + String (ctrlPage + 1) + " " + kCtrlPageName[ctrlPage];
             else switch (mode)
             {
-                case Mode::Bank: l2 = bankGroup == 0 ? "BANK 1-10" : bankGroup == 1 ? "BANK 11-20" : "BANK 21-26"; break;
+                case Mode::Bank: l2 = "BANK " + String (bankGroup * 10 + 1) + "-" + String (jmin (l480::kNumBanks, bankGroup * 10 + 10)); break;
                 case Mode::Prog:
                     if (browseBank != proc.prog (machine).bank) l2 = String (browseBank) + " " + l480::bankName (browseBank);
                     else

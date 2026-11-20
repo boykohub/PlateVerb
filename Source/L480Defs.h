@@ -318,10 +318,11 @@ inline const char* bankName (int bank) {
     static const char* n[] = { "", "480 Halls", "480 Rooms", "Wild Spaces", "Plates", "Effects", "Twin Delays", "Samplers", "Pitch/Doppler", "Mastering", "Compressor",
                                "Random Hall", "Random Spaces", "Ambience", "Post Ambience", "Prime Time III", "Freq. Stuff", "Test & Reference",
                                "Concert Hall", "Rich Plate", "6-Voice Chorus", "Multiband Delays",
-                               "HD Combo", "Surround", "Classic Surround", "HD Reverb", "HD Classic" };
-    return (bank >= 1 && bank <= 26) ? n[bank] : "";
+                               "HD Combo", "Surround", "Classic Surround", "HD Reverb", "HD Classic",
+                               "Matched Halls", "Matched Rooms", "Matched Spaces", "Matched Plates", "Matched Plates 2", "Matched Effects" };
+    return (bank >= 1 && bank <= 32) ? n[bank] : "";
 }
-constexpr int kNumBanks = 26;
+constexpr int kNumBanks = 32;
 
 constexpr float OFF = -1.0e9f, FULL = 1.0e9f;   // bottom / top of a parameter's range
 constexpr float RV = 0, EF = 1;                 // Random Hall MOD
