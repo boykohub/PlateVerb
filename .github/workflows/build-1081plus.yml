@@ -1,0 +1,21 @@
+name: Build 1081plus
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'N1081/**'
+      - 'Source/**'
+      - 'CMakeLists.txt'
+      - '.github/workflows/build-1081plus.yml'
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -B build -A x64
+      - run: cmake --build build --config Release --target N1081_VST3
+      - uses: actions/upload-artifact@v4
+        with:
+          name: 1081plus-VST3
+          path: build/N1081_artefacts/Release/VST3

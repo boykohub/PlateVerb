@@ -1,0 +1,20 @@
+name: Build PlateVerb
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'Source/**'
+      - 'CMakeLists.txt'
+      - '.github/workflows/build-PlateVerb.yml'
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -B build -A x64
+      - run: cmake --build build --config Release --target PlateVerb_VST3
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PlateVerb-VST3
+          path: build/PlateVerb_artefacts/Release/VST3
