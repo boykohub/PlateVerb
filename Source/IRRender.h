@@ -142,7 +142,9 @@ inline TrueStereoIR renderIR (const TrueStereoIR& src, const IRAnalysis& base, c
     // normalise on the shaped-in-time but not yet re-enveloped IR, so the loudness follows the envelope controls naturally
     double eL = 0, eR = 0;
     for (int i = 0; i < n; ++i) { const double l = ir.aL[(size_t) i] + ir.bL[(size_t) i], r = ir.aR[(size_t) i] + ir.bR[(size_t) i]; eL += l * l; eR += r * r; }
-    const float norm = (float) std::sqrt (0.63 / std::max (1e-12, 0.5 * (eL + eR)));
+    // +12 dB over the original 0.63 energy target: at the old level an IR needed the output turned up ~12 dB
+    // to sound as loud as the same IR in Studio One's Open AIR
+    const float norm = (float) std::sqrt (0.63 * 15.85 / std::max (1e-12, 0.5 * (eL + eR)));
     const float stretch = s.stretchPitch ? std::max (0.25f, s.size) : 1.0f;
     // decay per band: exponential re-envelope that turns the recorded RT into the requested one
     const float rt0[3] = { base.rtLow * stretch, base.rtMid * stretch, base.rtHigh * stretch };

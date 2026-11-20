@@ -1,5 +1,6 @@
-// PlateVerb - five reverb slots (Plate, Room, Chamber, Hall, IR), each with its own reverb, EQ and
-// tail compressor, plus stereo delay and output transformer.
+// Flexiverb (formerly PlateVerb) - six reverb slots (Plate, Room, Chamber, Hall, IR, 480), each with its own
+// reverb, EQ and tail compressor, plus stereo delay, output transformer, a 480L hardware model (analog/digital
+// in and out), the 480L's machine configurations and an optional Aux output bus.
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_audio_formats/juce_audio_formats.h>
 #include "Engine.h"
@@ -10,7 +11,7 @@
 using namespace juce;
 using APVTS = AudioProcessorValueTreeState;
 
-static const char* const kSlotNames[] = { "PLATE", "ROOM", "CHAMBER", "HALL", "IR" };
+static const char* const kSlotNames[] = { "PLATE", "ROOM", "CHAMBER", "HALL", "IR", "480" };
 static const int kOsValues[] = { 1, 2, 3, 4 };
 static const float kDivBeats[] = { 0.0625f, 1.0f / 12.0f, 0.125f, 1.0f / 6.0f, 0.25f, 0.375f, 1.0f / 3.0f, 0.5f,
                                    0.75f, 2.0f / 3.0f, 1.0f, 1.5f, 4.0f / 3.0f, 2.0f, 3.0f, 4.0f };
@@ -19,7 +20,10 @@ static StringArray osNames()  { return { "1x", "2x", "3x", "4x" }; }
 static StringArray divNames() { return { "1/64", "1/32T", "1/32", "1/16T", "1/16", "1/16D", "1/8T", "1/8",
                                          "1/8D", "1/4T", "1/4", "1/4D", "1/2T", "1/2", "1/2D", "1/1" }; }
 static StringArray trNames()  { StringArray s; for (int i = 0; i < pv::kNumTransformers; ++i) s.add (pv::transformerModel (i).name); return s; }
-static StringArray compTypeNames() { return { "Clean VCA", "1176-style FET", "LA-2A-style Opto", "1176 + LA-2A" }; }
+// the combined 1176 + LA-2A mode is removed; sessions that used it fall back to LA-2A
+static StringArray compTypeNames() { return { "Clean VCA", "1176-style FET", "LA-2A-style Opto" }; }
+static StringArray configNames()   { return { "Single", "Cascade", "Stereo Split", "Mono Split" }; }
+static StringArray slotChoiceNames() { return { "Plate", "Room", "Chamber", "Hall", "IR", "480" }; }
 static StringArray materialNames (int slot)
 {
     StringArray s;
@@ -37,7 +41,7 @@ static String sid (int slot, const String& base) { return "s" + String (slot) + 
 static String nid (const char* prefix, int i) { return String (prefix) + String (i); }
 static String slotTitle (int s) { String n = String (kSlotNames[s]).toLowerCase(); return s == pv::IR ? String ("IR") : n.substring (0, 1).toUpperCase() + n.substring (1); }
 
-static const char* const kSlotFloatIds[] = { "matMix", "dirt", "rich", "hiCut", "lv", "decay", "lowMult", "highMult", "size", "predelay", "build", "early", "diff", "damping",
+static const char* const kSlotFloatIds[] = { "spin", "xover", "matMix", "dirt", "rich", "hiCut", "lv", "decay", "lowMult", "highMult", "size", "predelay", "build", "early", "diff", "damping",
                                              "tone", "mod", "inWidth", "eqF0", "eqF1", "eqF2", "eqF3", "eqG0", "eqG1", "eqG2", "eqG3",
                                              "cpThr", "cpRatio", "cpAtk", "cpRel", "cpMakeup", "cpMix" };
 static const char* const kSlotOtherIds[] = { "on", "cpOn", "cpDuck", "cpType", "cpTone", "matA", "matB", "conv" };
@@ -45,6 +49,7 @@ static const StringArray kConverterNames { "24-bit (modern)", "12-bit", "15-bit 
 
 static File userPresetFolder()
 {
+    // kept in the old PlateVerb folder so presets saved before the rename still show up
     return File::getSpecialLocation (File::userDocumentsDirectory).getChildFile ("PlateVerb").getChildFile ("Presets");
 }
 
@@ -87,8 +92,9 @@ public:
     PlateVerbProcessor()
         : AudioProcessor (BusesProperties()
               .withInput ("In", AudioChannelSet::stereo(), true)
-              .withOutput ("Out", AudioChannelSet::stereo(), true)),
-          Thread ("PlateVerb IR"),
+              .withOutput ("Out", AudioChannelSet::stereo(), true)
+              .withOutput ("Aux", AudioChannelSet::stereo(), false)),     // the 480L's Aux outputs (Machine B, or A in Cascade)
+          Thread ("Flexiverb IR"),
           apvts (*this, nullptr, "PARAMS", createLayout())
     {
         formats.registerBasicFormats();
@@ -99,7 +105,7 @@ public:
             q.on = P (sid (s, "on")); q.lv = P (sid (s, "lv")); q.decay = P (sid (s, "decay")); q.low = P (sid (s, "lowMult"));
             q.high = P (sid (s, "highMult")); q.size = P (sid (s, "size")); q.pre = P (sid (s, "predelay")); q.build = P (sid (s, "build"));
             q.early = P (sid (s, "early")); q.diff = P (sid (s, "diff")); q.damp = P (sid (s, "damping")); q.tone = P (sid (s, "tone"));
-            q.mod = P (sid (s, "mod")); q.width = P (sid (s, "inWidth"));
+            q.mod = P (sid (s, "mod")); q.width = P (sid (s, "inWidth")); q.spin = P (sid (s, "spin")); q.xover = P (sid (s, "xover"));
             q.matA = P (sid (s, "matA")); q.matB = P (sid (s, "matB")); q.matMix = P (sid (s, "matMix")); q.dirt = P (sid (s, "dirt")); q.hiCut = P (sid (s, "hiCut")); q.conv = P (sid (s, "conv")); q.rich = P (sid (s, "rich"));
             for (int b = 0; b < 4; ++b) { q.eqF[b] = P (sid (s, nid ("eqF", b))); q.eqG[b] = P (sid (s, nid ("eqG", b))); }
             q.cpOn = P (sid (s, "cpOn")); q.cpDuck = P (sid (s, "cpDuck")); q.cpType = P (sid (s, "cpType")); q.cpTone = P (sid (s, "cpTone"));
@@ -114,6 +120,8 @@ public:
         pTrOn = P ("trOn"); pTrModel = P ("trModel"); pTrFreq = P ("trFreq"); pTrAmt = P ("trAmt"); pOut = P ("out");
         pIrStart = P ("irStart"); pIrXover = P ("irXover"); pIrFade = P ("irFadeOut"); pIrXfeed = P ("irXfeed");
         pIrXdelay = P ("irXdelay"); pIrAsym = P ("irAsym"); pIrReverse = P ("irReverse"); pIrPitch = P ("irPitch");
+        pHwOn = P ("hwOn"); pHwIn = P ("hwIn"); pHwOut = P ("hwOut"); pHwXfIn = P ("hwXfIn"); pHwXfOut = P ("hwXfOut"); pHwNoise = P ("hwNoise");
+        pCfg = P ("config"); pMachA = P ("machA"); pMachB = P ("machB"); pAuxMain = P ("auxToMain");
         startThread (Thread::Priority::low);
     }
     ~PlateVerbProcessor() override { alive.reset(); stopThread (4000); }
@@ -184,6 +192,8 @@ public:
             g->addChild (fp (sid (s, "tone"), n + "Input Tone", 0.0f, 1.0f, ir ? 1.0f : 0.75f));
             g->addChild (fp (sid (s, "mod"), n + "Modulation", 0.0f, 1.0f, ir ? 0.0f : 0.5f));
             g->addChild (fp (sid (s, "inWidth"), n + "Input Width", 0.0f, 1.0f, 1.0f));
+            g->addChild (fp (sid (s, "spin"), n + "Spin", 0.05f, 4.0f, 0.8f, kLog, "Hz", 2));
+            g->addChild (fp (sid (s, "xover"), n + "Bass Crossover", 100.0f, 2000.0f, 300.0f, kLog, "Hz"));
             g->addChild (cp (sid (s, "matA"), n + "Material A", materialNames (s), 0));
             g->addChild (cp (sid (s, "matB"), n + "Material B", materialNames (s), 0));
             g->addChild (fp (sid (s, "matMix"), n + "Material Blend", 0.0f, 1.0f, 0.0f));
@@ -238,6 +248,17 @@ public:
         l.add (fp ("trFreq", "Transformer Freq", 20.0f, 400.0f, 80.0f, kLog, "Hz"));
         l.add (fp ("trAmt", "Transformer Amount", 0.0f, 1.0f, 0.3f));
         l.add (fp ("out", "Output", -24.0f, 12.0f, 0.0f, -1.0f, "dB", 1));
+        // 480L hardware model and configurations
+        l.add (bp ("hwOn", "Analog Hardware", true));
+        l.add (cp ("hwIn", "Input", StringArray { "Analog", "Digital" }, 0));
+        l.add (cp ("hwOut", "Output Type", StringArray { "Analog", "Digital" }, 0));
+        l.add (bp ("hwXfIn", "Input Transformers", false));
+        l.add (bp ("hwXfOut", "Output Transformers", false));
+        l.add (bp ("hwNoise", "Converter Noise", false));
+        l.add (cp ("config", "Configuration", configNames(), 0));
+        l.add (cp ("machA", "Machine A", slotChoiceNames(), pv::Lex480));
+        l.add (cp ("machB", "Machine B", slotChoiceNames(), pv::Hall));
+        l.add (bp ("auxToMain", "Aux To Main", true));
         return l;
     }
 
@@ -260,6 +281,7 @@ public:
     bool isBusesLayoutSupported (const BusesLayout& b) const override
     {
         const auto in = b.getMainInputChannelSet(), out = b.getMainOutputChannelSet();
+        if (b.outputBuses.size() > 1 && ! b.outputBuses[1].isDisabled() && b.outputBuses[1] != AudioChannelSet::stereo()) return false;
         return out == AudioChannelSet::stereo() && (in == AudioChannelSet::stereo() || in == AudioChannelSet::mono());
     }
 
@@ -269,6 +291,13 @@ public:
         const int n = buffer.getNumSamples();
         if (buffer.getNumChannels() < 2 || n == 0) return;
         if (getTotalNumInputChannels() == 1) buffer.copyFrom (1, 0, buffer, 0, 0, n);
+        float* auxL = nullptr; float* auxR = nullptr;
+        if (getBusCount (false) > 1)
+            if (auto* ab = getBus (false, 1); ab != nullptr && ab->isEnabled())
+            {
+                auto aux = getBusBuffer (buffer, false, 1);
+                if (aux.getNumChannels() >= 2) { auxL = aux.getWritePointer (0); auxR = aux.getWritePointer (1); }
+            }
         fillParams (prm, true);
         const auto t0 = Time::getHighResolutionTicks();
         {
@@ -307,10 +336,13 @@ public:
                         if (tl.isLocked()) { trash.push_back (std::move (cur)); cur = std::move (next); }   // freed by the background thread
                     }
                 }
-                engine.process (L + pos, R + pos, m, prm, irL.data(), irR.data());
+                engine.process (L + pos, R + pos, m, prm, irL.data(), irR.data(), auxL ? auxL + pos : nullptr, auxR ? auxR + pos : nullptr);
             }
-            else engine.process (L + pos, R + pos, m, prm);
+            else engine.process (L + pos, R + pos, m, prm, nullptr, nullptr, auxL ? auxL + pos : nullptr, auxR ? auxR + pos : nullptr);
         }
+        meterIn.store (jmax (meterIn.load() * 0.85f, engine.meterIn()));
+        meterMain.store (jmax (meterMain.load() * 0.85f, engine.meterMain()));
+        meterAux.store (jmax (meterAux.load() * 0.85f, engine.meterAux()));
         const double used = Time::highResolutionTicksToSeconds (Time::getHighResolutionTicks() - t0);
         const float load = (float) (100.0 * used / (n / sampleRateHz));
         dspLoad.store (dspLoad.load() * 0.9f + load * 0.1f);
@@ -334,10 +366,10 @@ public:
             auto& q = sp[s]; auto& d = p.slot[s];
             d.on = on (q.on); d.level = f (q.lv); d.decaySec = f (q.decay); d.lowMult = f (q.low); d.highMult = f (q.high);
             d.size = f (q.size); d.predelayMs = f (q.pre); d.buildMs = f (q.build); d.early = f (q.early); d.diffusion = f (q.diff);
-            d.damping = f (q.damp); d.tone = f (q.tone); d.mod = f (q.mod); d.inWidth = f (q.width);
+            d.damping = f (q.damp); d.tone = f (q.tone); d.mod = f (q.mod); d.inWidth = f (q.width); d.spinHz = f (q.spin); d.xoverHz = f (q.xover);
             for (int b = 0; b < 4; ++b) { d.eqF[b] = f (q.eqF[b]); d.eqG[b] = f (q.eqG[b]); }
             auto& c = d.comp;
-            c.on = on (q.cpOn); c.duck = on (q.cpDuck); c.type = jlimit (0, 3, (int) f (q.cpType)); c.vintage = f (q.cpTone) > 0.5f;
+            c.on = on (q.cpOn); c.duck = on (q.cpDuck); c.type = jlimit (0, 2, (int) f (q.cpType)); c.vintage = f (q.cpTone) > 0.5f;
             c.thr = f (q.cpThr); c.ratio = f (q.cpRatio); c.atkMs = f (q.cpAtk) * 1000.0f; c.relMs = f (q.cpRel) * 1000.0f;
             c.makeup = f (q.cpMakeup); c.mix = f (q.cpMix);
             d.matA = (int) f (q.matA); d.matB = (int) f (q.matB); d.matBlend = f (q.matMix); d.dirt = f (q.dirt); d.hiCutHz = f (q.hiCut); d.converter = jlimit (0, 3, (int) f (q.conv)); d.richness = f (q.rich);
@@ -361,6 +393,10 @@ public:
         else { p.delayMsL = f (pDlTimeL); p.delayMsR = f (pDlTimeR); }
         p.trOn = on (pTrOn); p.trModel = jlimit (0, pv::kNumTransformers - 1, (int) f (pTrModel));
         p.trFreq = f (pTrFreq); p.trAmount = f (pTrAmt); p.outGainDb = f (pOut);
+        p.hw.on = on (pHwOn); p.hw.inAnalog = f (pHwIn) < 0.5f; p.hw.outAnalog = f (pHwOut) < 0.5f;
+        p.hw.xfIn = on (pHwXfIn); p.hw.xfOut = on (pHwXfOut); p.hw.noise = on (pHwNoise);
+        p.config = jlimit (0, 3, (int) f (pCfg)); p.machA = jlimit (0, pv::kNumSlots - 1, (int) f (pMachA)); p.machB = jlimit (0, pv::kNumSlots - 1, (int) f (pMachB));
+        p.auxToMain = on (pAuxMain);
     }
 
     // ------------------------------------------------------------------ IR files
@@ -395,7 +431,7 @@ public:
     // ------------------------------------------------------------------ programs / presets
     AudioProcessorEditor* createEditor() override;
     bool hasEditor() const override { return true; }
-    const String getName() const override { return "PlateVerb"; }
+    const String getName() const override { return "Flexiverb"; }
     bool acceptsMidi() const override { return false; }
     bool producesMidi() const override { return false; }
     double getTailLengthSeconds() const override { return 20.0; }
@@ -426,6 +462,7 @@ public:
         setParam (sid (s, "tone"), p.tone); setParam (sid (s, "mod"), p.mod); setParam (sid (s, "inWidth"), p.width);
         setParam (sid (s, "hiCut"), p.hiCut);
         setParam (sid (s, "conv"), (float) p.conv);
+        setParam (sid (s, "spin"), p.spin); setParam (sid (s, "xover"), p.xover);
         const float eqF[] = { 250.0f, 400.0f, 2500.0f, 8000.0f };     // presets were fitted with the low shelf at 250 Hz
         for (int b = 0; b < 4; ++b) { setParam (sid (s, nid ("eqF", b)), eqF[b]); setParam (sid (s, nid ("eqG", b)), p.eq[b]); }
         presetSlotRequest.store (s);
@@ -480,7 +517,7 @@ public:
 
     APVTS apvts;
     int currentPreset = 0;
-    std::atomic<float> compGr[pv::kNumSlots] {}, compIn[pv::kNumSlots] {}, dspLoad { 0.0f };
+    std::atomic<float> compGr[pv::kNumSlots] {}, compIn[pv::kNumSlots] {}, dspLoad { 0.0f }, meterIn { 0.0f }, meterMain { 0.0f }, meterAux { 0.0f };
 
 private:
     // ------------------------------------------------------------------ background thread: IR loading/rendering, wave display
@@ -525,7 +562,7 @@ private:
     }
     static std::vector<float> viewKey (const pv::SlotParams& s)
     {
-        std::vector<float> k { s.decaySec, s.lowMult, s.highMult, s.size, s.predelayMs, s.buildMs, s.early, s.damping, s.tone, s.mod, s.inWidth, s.diffusion,
+        std::vector<float> k { s.decaySec, s.lowMult, s.highMult, s.size, s.predelayMs, s.buildMs, s.early, s.damping, s.tone, s.mod, s.inWidth, s.diffusion, s.spinHz, s.xoverHz,
                                (float) s.matA, (float) s.matB, s.matBlend, s.dirt, s.hiCutHz, (float) s.converter, s.richness };
         for (int b = 0; b < 4; ++b) { k.push_back (s.eqF[b]); k.push_back (s.eqG[b]); }
         return k;
@@ -669,7 +706,7 @@ private:
 
     struct SlotPtrs {
         std::atomic<float> *on = nullptr, *lv = nullptr, *decay = nullptr, *low = nullptr, *high = nullptr, *size = nullptr, *pre = nullptr,
-            *build = nullptr, *early = nullptr, *diff = nullptr, *damp = nullptr, *tone = nullptr, *mod = nullptr, *width = nullptr,
+            *build = nullptr, *early = nullptr, *diff = nullptr, *damp = nullptr, *tone = nullptr, *mod = nullptr, *width = nullptr, *spin = nullptr, *xover = nullptr,
             *eqF[4] = {}, *eqG[4] = {}, *matA = nullptr, *matB = nullptr, *matMix = nullptr, *dirt = nullptr, *hiCut = nullptr, *conv = nullptr, *rich = nullptr, *cpOn = nullptr, *cpDuck = nullptr, *cpType = nullptr, *cpTone = nullptr, *cpThr = nullptr,
             *cpRatio = nullptr, *cpAtk = nullptr, *cpRel = nullptr, *cpMakeup = nullptr, *cpMix = nullptr;
     } sp[pv::kNumSlots];
@@ -699,7 +736,8 @@ private:
         *pDlLow = nullptr, *pDlMid = nullptr, *pDlMidF = nullptr, *pDlHigh = nullptr, *pTrOn = nullptr, *pTrModel = nullptr,
         *pTrFreq = nullptr, *pTrAmt = nullptr, *pOut = nullptr, *pDlPanL = nullptr, *pDlPanR = nullptr, *pDlWidth = nullptr, *pDlAtk = nullptr,
         *pIrStart = nullptr, *pIrXover = nullptr, *pIrFade = nullptr, *pIrXfeed = nullptr, *pIrXdelay = nullptr, *pIrAsym = nullptr,
-        *pIrReverse = nullptr, *pIrPitch = nullptr;
+        *pIrReverse = nullptr, *pIrPitch = nullptr, *pHwOn = nullptr, *pHwIn = nullptr, *pHwOut = nullptr, *pHwXfIn = nullptr,
+        *pHwXfOut = nullptr, *pHwNoise = nullptr, *pCfg = nullptr, *pMachA = nullptr, *pMachB = nullptr, *pAuxMain = nullptr;
     double sampleRateHz = 48000.0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PlateVerbProcessor)

@@ -1,5 +1,5 @@
-// PlateVerb DSP engine - no JUCE dependency.
-// Five reverb slots (Plate, Room, Chamber, Hall, IR), each with its own reverb settings, 4-band EQ
+// Flexiverb (formerly PlateVerb) DSP engine - no JUCE dependency.
+// Six reverb slots (Plate, Room, Chamber, Hall, IR, 480 random hall), each with its own reverb settings, 4-band EQ
 // and tail compressor, tempo-syncable stereo delay with a gentle 3-band EQ,
 // output transformer models and integer oversampling (1x, 2x, 3x, 4x).
 #pragma once
@@ -16,9 +16,9 @@ constexpr float kPi = 3.14159265358979f;
 constexpr int kMaxOS = 4;
 constexpr float kMaxSize = 1.5f;
 constexpr float kMaxDelaySec = 3.0f;
-constexpr int kNumSlots = 5;
+constexpr int kNumSlots = 6;
 constexpr float kDirtDefault = 30.0f;
-enum Slot { Plate = 0, Room, Chamber, Hall, IR };
+enum Slot { Plate = 0, Room, Chamber, Hall, IR, Lex480 };   // new slots go at the end: parameter IDs follow the index
 
 inline float dbToGain (float db) { return std::pow (10.0f, db * 0.05f); }
 inline float clampf (float x, float a, float b) { return std::min (b, std::max (a, x)); }
@@ -186,7 +186,7 @@ struct Resampler {
 // lows can ring longer (Low Decay) and the highs die faster (High Decay) than the mids.
 struct BandDecay {
     OnePole lo, hi; float gL = 1, gM = 1, gH = 1;
-    void setX (float fs) { lo.setCut (fs, 300.0f); hi.setCut (fs, 4000.0f); }
+    void setX (float fs, float loHz = 300.0f) { lo.setCut (fs, loHz); hi.setCut (fs, 4000.0f); }
     void setGains (float loopSec, float rtMid, float lowMul, float highMul) {
         auto g = [loopSec] (float rt) { return std::min (0.9995f, std::pow (10.0f, -3.0f * loopSec / std::max (0.05f, rt))); };
         gM = g (rtMid); gL = g (rtMid * lowMul); gH = g (rtMid * highMul);
@@ -308,13 +308,15 @@ struct TankConfig {
 };
 
 inline const TankConfig& tankConfig (int algo) {
-    static const TankConfig c[4] = {
+    static const TankConfig c[5] = {
         { 1.00f, 1.0f, 0.55f, 0.80f, 0.40f, 0.70f, 0.0f, 1.0f,  0, 0, 0, false, 0.20f, 0.9f, 0.0f },   // (plate, unused)
         { 0.85f, 1.0f, 0.00f, 0.78f, 0.20f, 0.65f, 1.06f, 1.06f, 18, 2.5f, 38.0f, false, 0.25f, 1.1f, 4.0f },  // room
         { 0.92f, 1.0f, 0.00f, 0.80f, 0.20f, 0.68f, 0.63f, 0.70f,  0, 1.0f, 60.0f, true,  0.30f, 0.9f, 2.0f },   // chamber
-        { 1.10f, 1.0f, 0.00f, 0.72f, 0.15f, 0.62f, 0.6f, 1.19f, 14, 9.0f, 95.0f, false, 0.45f, 0.7f, 12.0f }   // hall
+        { 1.10f, 1.0f, 0.00f, 0.72f, 0.15f, 0.62f, 0.6f, 1.19f, 14, 9.0f, 95.0f, false, 0.45f, 0.7f, 12.0f },  // hall
+        // 480 random hall (Griesinger style): larger randomly moving delays (wander) at a settable rate (spin)
+        { 1.05f, 1.0f, 0.00f, 0.75f, 0.15f, 0.64f, 0.7f, 1.15f, 16, 4.0f, 80.0f, false, 1.10f, 0.8f, 8.0f }
     };
-    return c[std::min (std::max (algo, 0), 3)];
+    return c[std::min (std::max (algo, 0), 4)];
 }
 
 struct TankAlgo {
@@ -377,8 +379,11 @@ struct TankAlgo {
     }
     float len1[S] = {}, len2[S] = {}, lenA1[S] = {}, lenA2[S] = {}, lenA3[S] = {}, lateS = 1;
     float cubicW = 0; bool erEq = false; Biquad erLo[2], erHi[2];
-    void update (float rt, float dampHz, float size, float lowMul, float highMul, float buildMs, float diffusion, const MaterialEffect& me, float cubic) {
+    float spinHz = -1.0f;      // >0: modulation rate override (480 'spin'); otherwise the config's rate
+    void update (float rt, float dampHz, float size, float lowMul, float highMul, float buildMs, float diffusion, const MaterialEffect& me, float cubic,
+                 float spin = -1.0f, float xoverHz = 300.0f) {
         const TankConfig& c = tankConfig (algo);
+        spinHz = spin;
         cubicW = cubic;
         lowMul *= me.lowMul; highMul *= me.highMul; diffusion += me.diffOffset;
         erEq = std::abs (me.erLowDb) > 0.05f || std::abs (me.erHighDb) > 0.05f;
@@ -394,9 +399,9 @@ struct TankAlgo {
             const float secLen = (lenA1[i] + len1[i] + lenA2[i] + lenA3[i] + len2[i]) / fs;
             damp[i].setCut (fs, dampHz);
             dampOn = dampHz < 17500.0f;
-            band[i].setX (fs);
+            band[i].setX (fs, xoverHz);
             band[i].setGains (secLen, rtA, lowMul, highMul);
-            lfo[i].setRate (fs, c.modHz * (0.8f + 0.13f * (float) i));
+            lfo[i].setRate (fs, (spinHz > 0.0f ? spinHz : c.modHz) * (0.8f + 0.13f * (float) i));
         }
         lateS = std::max (1.0f, c.lateOnsetMs * size * fs * 0.001f);
         if (c.denseER) {           // reflections every ~1.8 ms for 'build' ms: quick rise, gentle sag, short fade
@@ -717,6 +722,94 @@ struct Transformer {
     }
 };
 
+// ---------------------------------------------------------------- 480L hardware model (from the M480L motherboard schematics)
+// Analog in:  XLR -> optional input transformer -> LM833 balanced receiver (10k / 100 pF) -> input level ->
+//             9-pole 20 kHz low-pass module (LPF6) -> A/D.
+// A/D:        successive approximation around a PCM53 16-bit DAC with LM311 comparators and a gain-ranging
+//             window: 16 bits plus two 6 dB ranges = "18 bit equivalent".
+// D/A:        PCM53 (16 bit) plus two extra LSBs through a resistor ladder (12.1k / 24k) = 18 bit, NE5534 I/V,
+//             SD5000 sample-and-hold deglitcher (zero-order hold: the sin(x)/x droop towards Nyquist),
+//             9-pole 20 kHz low-pass module (LPF2), LM833, output level, LLA5200 balanced line driver,
+//             optional output transformer. Main and Aux outputs are built the same way.
+// Digital I/O (AES) skips the analog stages and the converters.
+
+// 9th-order Chebyshev low-pass (0.1 dB ripple, edge 'f'), unity DC gain: one real pole + four pole pairs
+struct LowPass9 {
+    Biquad s[2][4]; float b0 = 1, b1 = 0, a1 = 0, z[2] = {}; float hz = -1, rate = -1;
+    void reset() { for (auto& c : s) for (auto& b : c) b.reset(); z[0] = z[1] = 0; }
+    void set (float fs, float f) {
+        f = std::min (f, 0.45f * fs);
+        if (f == hz && fs == rate) return;
+        hz = f; rate = fs;
+        const int N = 9; const float rip = 0.1f;
+        const float eps = std::sqrt (std::pow (10.0f, 0.1f * rip) - 1.0f), v = std::asinh (1.0f / eps) / (float) N;
+        const float W = std::tan (kPi * f / fs);
+        for (int k = 0; k < 4; ++k) {
+            const float th = kPi * (float) (2 * k + 1) / (float) (2 * N);
+            const float sg = -std::sinh (v) * std::sin (th) * W, om = std::cosh (v) * std::cos (th) * W;
+            for (int c = 0; c < 2; ++c) s[c][k].fromPoles (sg, om);
+        }
+        const float a = std::sinh (v) * W;           // the real pole, through the bilinear transform
+        b0 = a / (1.0f + a); b1 = b0; a1 = (a - 1.0f) / (1.0f + a);
+    }
+    inline float process (int c, float x) {
+        const float y = b0 * x + z[c]; z[c] = b1 * x - a1 * y;
+        float o = y; for (auto& b : s[c]) o = b.process (o);
+        return o;
+    }
+};
+
+// op-amp / line-driver headroom: clean up to about +6 dBFS, then a hard-ish knee (rails)
+inline float railClip (float x) { const float r = x * 0.5f, r2 = r * r, r4 = r2 * r2; return x / std::sqrt (std::sqrt (std::sqrt (1.0f + r4 * r4))); }
+
+// 16-bit converter with gain ranging: below half scale the signal is switched up 6 dB (twice at most)
+inline float adc18 (float x) {
+    float step = 1.0f / 32768.0f; const float a = std::fabs (x);
+    if (a < 0.5f) { step *= 0.5f; if (a < 0.25f) step *= 0.5f; }
+    return std::round (x / step) * step;                      // no dither: silence stays silent
+}
+inline float dac18 (float x) { const float step = 1.0f / 131072.0f; return std::round (x / step) * step; }
+
+struct HwParams {
+    bool on = true;                 // ANALOG master: off = no hardware model at all
+    bool inAnalog = true, outAnalog = true, xfIn = false, xfOut = false, noise = false;
+};
+
+// one stereo analog input (with its A/D), or one stereo analog output (D/A onwards)
+struct HwPath {
+    float fs = 48000, baseFs = 48000; LowPass9 lpf; Biquad zoh[2]; Transformer xf; uint32_t seed = 777u;
+    bool xfReady = false;
+    void prepare (float internalFs, float hostFs) {
+        fs = internalFs; baseFs = hostFs;
+        while (baseFs > 50000.0f) baseFs *= 0.5f;                // the 480L itself runs at 44.1 or 48 kHz
+        lpf.set (fs, 20000.0f);
+        // zero-order hold droop of the deglitcher at the hardware rate (sin x / x): about -3.9 dB at Nyquist,
+        // -1.6 dB at 15 kHz (44.1 kHz); a high shelf follows that curve closely up to 20 kHz
+        for (int c = 0; c < 2; ++c) zoh[c].highShelf (fs, 0.36f * baseFs, -3.9f, 0.55f);
+        xf.fs = fs; xf.set (2, 60.0f, 0.15f); xf.clear(); xfReady = true;     // Jensen-style, nearly clean
+        reset();
+    }
+    void reset() { lpf.reset(); for (auto& b : zoh) b.reset(); xf.clear(); }
+    inline float rnd() { seed = seed * 1664525u + 1013904223u; return (float) (seed >> 8) / 8388608.0f - 1.0f; }
+    // analog in -> A/D
+    inline void input (float& L, float& R, const HwParams& h) {
+        if (h.xfIn) { L = xf.process (0, L); R = xf.process (1, R); }
+        L = lpf.process (0, railClip (L)); R = lpf.process (1, railClip (R));
+        L = adc18 (L); R = adc18 (R);
+    }
+    // D/A -> analog out
+    inline void output (float& L, float& R, const HwParams& h) {
+        if (h.noise) { const float n = 1.3e-5f; L += n * (rnd() + rnd()); R += n * (rnd() + rnd()); }   // about -98 dBFS
+        L = dac18 (L); R = dac18 (R);
+        L = zoh[0].process (L); R = zoh[1].process (R);
+        L = railClip (lpf.process (0, L)); R = railClip (lpf.process (1, R));
+        if (h.xfOut) { L = xf.process (0, L); R = xf.process (1, R); }
+    }
+};
+
+// 480L configurations: two machines (A, B) and two stereo outputs (Main, Aux)
+enum Config { CfgSingle = 0, CfgCascade, CfgStereoSplit, CfgMonoSplit };
+
 // ---------------------------------------------------------------- parameters
 // Every slot (Plate, Room, Chamber, Hall, IR) has its own reverb, EQ and compressor settings.
 struct SlotParams {
@@ -730,6 +823,7 @@ struct SlotParams {
     float hiCutHz = 20000.0f;                           // steep high cut like early digital reverbs' bandwidth; >= 19.5 kHz = off
     int converter = 0;                                  // ConverterMode: A/D + D/A resolution around the reverb
     float richness = 0.0f;                              // 0..1 analog harmonic colour on this slot's reverb only; 0 = clean
+    float spinHz = 0.8f, xoverHz = 300.0f;              // 480: rate of the random delay movement; bass-multiply crossover
 };
 
 // Converters of early digital reverbs. 0 = modern 24-bit (no effect). 1 = plain 12-bit.
@@ -809,6 +903,8 @@ struct Params {
     bool pingPong = false; float dlPanL = -1, dlPanR = 1, dlWidth = 1; float dlLowDb = 0, dlMidDb = 0, dlMidHz = 1000, dlHighDb = 0;
     bool trOn = false; int trModel = 0; float trFreq = 80, trAmount = 0.3f;
     float outGainDb = 0;
+    HwParams hw;
+    int config = CfgSingle, machA = Lex480, machB = Hall; bool auxToMain = true;
     Params() { slot[Plate].on = true; }
 };
 
@@ -869,26 +965,32 @@ public:
         const float maxFs = baseFs * kMaxOS;
         plate.init (maxFs);
         for (int a = Room; a <= Hall; ++a) tank[a].init (a, maxFs);
+        tank480.init (4, maxFs);
         for (auto& s : chain) s.init (maxFs);
         irIn.init (baseFs);
         delay.init (maxFs);
-        for (int c = 0; c < 2; ++c) { up[c].reserve (kMaxOS); dn[c].reserve (kMaxOS); irUp[c].reserve (kMaxOS); }
+        for (int c = 0; c < 2; ++c) { up[c].reserve (kMaxOS); dn[c].reserve (kMaxOS); dnAux[c].reserve (kMaxOS); irUp[c].reserve (kMaxOS); }
         setOversampling (1, true);
     }
     void setOversampling (int n, bool force = false) {
         if (n < 1 || n > kMaxOS) n = 1;
         if (n == os && ! force) return;
         os = n; fs = baseFs * (float) os;
-        for (int c = 0; c < 2; ++c) { up[c].design (os); dn[c].design (os); irUp[c].design (os); }
+        for (int c = 0; c < 2; ++c) { up[c].design (os); dn[c].design (os); dnAux[c].design (os); irUp[c].design (os); }
         plate.fs = fs;
         for (int a = Room; a <= Hall; ++a) tank[a].fs = fs;
+        tank480.fs = fs;
         for (auto& s : chain) { s.dirty = true; s.comp.fs = fs; s.comp.lastFs = -1; }
         delay.fs = fs; delayDirty = true; delay.curL = delay.curR = 0; firstBlock = true;
         tr.fs = fs; tr.clear();
+        hwIn.prepare (fs, baseFs); hwMain.prepare (fs, baseFs); hwAux.prepare (fs, baseFs);
     }
     int latency() const { return up[0].latencyBase(); }
     float compReductionDb (int s) const { return chain[s].comp.reductionDb(); }
     float compInputDb (int s) const { return chain[s].comp.inputDb(); }
+    float meterIn() const { return mIn; }
+    float meterMain() const { return mMain; }
+    float meterAux() const { return mAux; }
 
     // IR slot input at the base rate: predelay, tone and input width, ready for the convolution
     void irInput (const float* L, const float* R, float* oL, float* oR, int n, const Params& p) {
@@ -898,14 +1000,15 @@ public:
         for (int i = 0; i < n; ++i) irIn.input (L[i], R[i], preS, inW, s.tone < 0.999f, oL[i], oR[i]);
     }
 
-    // irL/irR: the IR slot's convolution output for this block (base rate), or null
-    void process (float* L, float* R, int n, const Params& p, const float* irL = nullptr, const float* irR = nullptr) {
+    // irL/irR: the IR slot's convolution output for this block (base rate), or null.
+    // auxL/auxR: the Aux output (machine B, or A in Cascade), or null when the host has no Aux bus.
+    void process (float* L, float* R, int n, const Params& p, const float* irL = nullptr, const float* irR = nullptr,
+                  float* auxL = nullptr, float* auxR = nullptr) {
         setOversampling (p.oversampling);
         for (int s = 0; s < kNumSlots; ++s) chain[s].update (fs, p.slot[s]);
         delay.setEq (p.dlLowDb, p.dlMidDb, p.dlMidHz, p.dlHighDb);
         delay.setAttack (p.delayAttackMs);
         tr.set (p.trModel, p.trFreq, p.trAmount);
-        float plateDampA = 1, preS[kNumSlots], inW[kNumSlots];
         for (int s = 0; s < kNumSlots; ++s) {
             const SlotParams& sp = p.slot[s];
             preS[s] = std::max (1.0f, sp.predelayMs * 0.001f * fs); inW[s] = clampf (sp.inWidth, 0.0f, 1.0f);
@@ -914,7 +1017,7 @@ public:
             // more diffusion (cleaner, smoother); higher = less diffusion, modulation jitter and converter grit.
             const float dirt = clampf (sp.dirt, 1.0f, 100.0f);
             const float clean = dirt < kDirtDefault ? (kDirtDefault - dirt) / (kDirtDefault - 1.0f) : 0.0f;
-            grit[s] = dirt > kDirtDefault ? (dirt - kDirtDefault) / (100.0f - kDirtDefault) : 0.0f;
+            grit[s] = s == IR ? 0.0f : (dirt > kDirtDefault ? (dirt - kDirtDefault) / (100.0f - kDirtDefault) : 0.0f);
             const float diffD = sp.diffusion + 0.15f * clean - 0.2f * grit[s];
             gritQ[s] = grit[s] > 0.0f ? std::pow (2.0f, -(23.0f - 11.0f * grit[s])) : 0.0f;    // 24-bit -> 12-bit
             cubicW[s] = clean;
@@ -922,12 +1025,17 @@ public:
                 plateDampA = 1.0f - std::exp (-2.0f * kPi * std::min (dampHz, 0.45f * fs) / fs);
                 plate.update (sp.decaySec, sp.size, sp.lowMult, sp.highMult, sp.buildMs, diffD, plateEffect (sp.matA, sp.matB, sp.matBlend), clean);
             }
+            else if (s == Lex480) {
+                tank480.update (sp.decaySec, dampHz, sp.size, sp.lowMult, sp.highMult, sp.buildMs, diffD,
+                                surfaceEffect (sp.matA, sp.matB, sp.matBlend, 3.0f * sp.size), clean, std::max (0.05f, sp.spinHz), sp.xoverHz);
+            }
             else if (s != IR) {
                 const float vOverS = (s == Room ? 0.8f : s == Chamber ? 1.0f : 3.0f) * sp.size;
-                tank[s].update (sp.decaySec, dampHz, sp.size, sp.lowMult, sp.highMult, sp.buildMs, diffD, surfaceEffect (sp.matA, sp.matB, sp.matBlend, vOverS), clean);
+                tank[s].update (sp.decaySec, dampHz, sp.size, sp.lowMult, sp.highMult, sp.buildMs, diffD, surfaceEffect (sp.matA, sp.matB, sp.matBlend, vOverS), clean,
+                                -1.0f, sp.xoverHz);
             }
         }
-        const float irDiff = 0.6f * clampf (p.slot[IR].diffusion, 0.0f, 1.0f), irMod = clampf (p.slot[IR].mod, 0.0f, 1.0f) * 0.0004f * fs;
+        irDiff = 0.6f * clampf (p.slot[IR].diffusion, 0.0f, 1.0f); irMod = clampf (p.slot[IR].mod, 0.0f, 1.0f) * 0.0004f * fs;
         const bool haveIr = irL != nullptr && irR != nullptr;
         const float tL = clampf (p.delayMsL * 0.001f * fs, 1.0f, kMaxDelaySec * fs - 4);
         const float tR = clampf (p.delayMsR * 0.001f * fs, 1.0f, kMaxDelaySec * fs - 4);
@@ -940,89 +1048,162 @@ public:
         const float width = clampf (p.dlWidth, 0.0f, 2.0f);
         const float tgtRv = p.rvMix, tgtDl = p.delayOn ? p.delayMix : 0.0f, tgtOut = dbToGain (p.outGainDb);
 
-        int nOn = 0; for (int s = 0; s < kNumSlots; ++s) nOn += p.slot[s].on ? 1 : 0;
-        const float norm = nOn > 0 ? 1.0f / std::sqrt ((float) nOn) : 0.0f;
+        const int cfg = std::min (std::max (p.config, 0), 3);
+        const int mA = std::min (std::max (p.machA, 0), kNumSlots - 1), mB = std::min (std::max (p.machB, 0), kNumSlots - 1);
+        if (cfg != lastCfg) { lastCfg = cfg; for (auto& c : chain) c.dirty = true; }
         float tgtLvl[kNumSlots];
-        for (int s = 0; s < kNumSlots; ++s) tgtLvl[s] = p.slot[s].on ? p.slot[s].level * norm : 0.0f;
+        if (cfg == CfgSingle) {
+            int nOn = 0; for (int s = 0; s < kNumSlots; ++s) nOn += p.slot[s].on ? 1 : 0;
+            const float norm = nOn > 0 ? 1.0f / std::sqrt ((float) nOn) : 0.0f;
+            for (int s = 0; s < kNumSlots; ++s) tgtLvl[s] = p.slot[s].on ? p.slot[s].level * norm : 0.0f;
+        } else
+            for (int s = 0; s < kNumSlots; ++s) tgtLvl[s] = (s == mA || s == mB) ? p.slot[s].level : 0.0f;
+        const HwParams& hw = p.hw;
+        const bool hwInOn = hw.on && hw.inAnalog, hwOutOn = hw.on && hw.outAnalog;
+        const bool wantAux = auxL != nullptr && auxR != nullptr;
+        float pkIn = 0, pkMain = 0, pkAux = 0;
 
-        float bufL[kMaxOS], bufR[kMaxOS], irBL[kMaxOS], irBR[kMaxOS];
+        float bufL[kMaxOS], bufR[kMaxOS], irBL[kMaxOS], irBR[kMaxOS], axL[kMaxOS], axR[kMaxOS];
         for (int i = 0; i < n; ++i) {
             up[0].up (L[i], bufL); up[1].up (R[i], bufR);
             if (haveIr) { irUp[0].up (irL[i], irBL); irUp[1].up (irR[i], irBR); }
             for (int k = 0; k < os; ++k) {
                 const float xL = bufL[k], xR = bufR[k];
-                sRv += smA * (tgtRv - sRv); sDl += smA * (tgtDl - sDl); sOut += smA * (tgtOut - sOut);
-                float wL = 0, wR = 0;
-                for (int s = 0; s < kNumSlots; ++s) {
-                    SlotChain& c = chain[s];
-                    const SlotParams& sp = p.slot[s];
-                    c.sLvl += smA * (tgtLvl[s] - c.sLvl);
-                    if (! sp.on && c.sLvl < 1e-4f) {
-                        if (c.running) { c.running = false; c.dirty = true; }     // cleared when switched back on
-                        continue;
+                pkIn = std::max (pkIn, std::max (std::fabs (xL), std::fabs (xR)));
+                // parameter smoothing that lands exactly on its target: a plain one-pole stalls ~4e-5 short of it
+                // in float, which left the dry signal leaking about -88 dB into a 100 % wet reverb
+                smooth (sRv, tgtRv, smA); smooth (sDl, tgtDl, smA); smooth (sOut, tgtOut, smA);
+                for (int s = 0; s < kNumSlots; ++s) smooth (chain[s].sLvl, tgtLvl[s], smA);
+                // the algorithms hear the input through the 480L's analog input and A/D (the dry signal does not)
+                float hL = xL, hR = xR;
+                if (hwInOn) hwIn.input (hL, hR, hw);
+                const float m = sRv, dry = 1.0f - sRv;
+                float yL, yR, aL = 0, aR = 0;
+                if (cfg == CfgSingle) {
+                    float gL = 0, gR = 0, iL = 0, iR = 0;           // algorithms (through the hardware) and IR (clean)
+                    for (int s = 0; s < kNumSlots; ++s) {
+                        float oL, oR;
+                        if (! runSlot (s, p.slot[s], s == IR ? 0.0f : hL, s == IR ? 0.0f : hR, xL, xR, haveIr, irBL[k], irBR[k], oL, oR)) continue;
+                        if (s == IR) { iL += oL; iR += oR; } else { gL += oL; gR += oR; }
                     }
-                    if (c.dirty) { c.clear (fs); if (s == Plate) plate.clear(); else if (s != IR) tank[s].clear(); c.dirty = false; }
-                    c.running = true;
-                    float oL = 0, oR = 0;
-                    if (s == IR) {
-                        if (haveIr) {
-                            oL = irBL[k]; oR = irBR[k];
-                            if (irMod > 0.0f) {
-                                c.mdL.push (oL); c.mdR.push (oR);
-                                const float dl = 2.0f + irMod * (1.0f + c.mlfo[0].next()), dr = 2.0f + irMod * (1.0f + c.mlfo[1].next());
-                                oL = c.mdL.read (dl); oR = c.mdR.read (dr);
-                                if (cubicW[s] > 0.0f) { oL += (c.mdL.readC (dl) - oL) * cubicW[s]; oR += (c.mdR.readC (dr) - oR) * cubicW[s]; }
-                            }
-                            if (irDiff > 0.0f)
-                                for (int j = 0; j < 2; ++j) {
-                                    oL = allpass (c.dfL[j], std::round (SlotChain::kDfMs[j] * 0.001f * fs), irDiff, oL);
-                                    oR = allpass (c.dfR[j], std::round (SlotChain::kDfMs[j + 2] * 0.001f * fs), irDiff, oR);
-                                }
-                        }
+                    if (hwOutOn) hwMain.output (gL, gR, hw);
+                    yL = xL * dry + (gL + iL) * m; yR = xR * dry + (gR + iR) * m;
+                    aL = yL; aR = yR;
+                } else {
+                    float waL = 0, waR = 0, wbL = 0, wbR = 0;
+                    const bool same = mA == mB;
+                    // machine A
+                    float inAL = hL, inAR = hR;
+                    if (cfg == CfgMonoSplit) inAR = hL;
+                    runMachine (mA, p, inAL, inAR, xL, xR, haveIr, irBL[k], irBR[k], waL, waR);
+                    // machine B
+                    float inBL = hL, inBR = hR;
+                    if (cfg == CfgMonoSplit) inBL = hR;
+                    if (cfg == CfgCascade) { inBL = hL * dry + waL * m; inBR = hR * dry + waR * m; }    // A's output feeds B
+                    if (same) { wbL = waL; wbR = waR; }
+                    else runMachine (mB, p, inBL, inBR, xL, xR, haveIr, irBL[k], irBR[k], wbL, wbR);
+                    float dAL = waL, dAR = waR, dBL = wbL, dBR = wbR;
+                    if (hwOutOn) { hwMain.output (cfg == CfgCascade ? dBL : dAL, cfg == CfgCascade ? dBR : dAR, hw);
+                                   hwAux.output (cfg == CfgCascade ? dAL : dBL, cfg == CfgCascade ? dAR : dBR, hw); }
+                    if (cfg == CfgCascade) {
+                        // Main = B (fed by A), Aux = A only
+                        const float aoL = xL * dry + dAL * m, aoR = xR * dry + dAR * m;
+                        yL = aoL * dry + dBL * m; yR = aoR * dry + dBR * m;
+                        aL = aoL; aR = aoR;
                     } else {
-                        float pl, pr; c.input (xL, xR, preS[s], inW[s], true, pl, pr);
-                        if (sp.converter != Conv24) { pl = convert (pl, sp.converter); pr = convert (pr, sp.converter); }   // A/D
-                        if (s == Plate) plate.process (pl, pr, plateDampA, sp.mod, sp.early, oL, oR);
-                        else tank[s].process (pl, pr, sp.mod, sp.early, oL, oR);
+                        // Main = A, Aux = B
+                        yL = xL * dry + dAL * m; yR = xR * dry + dAR * m;
+                        aL = xL * dry + dBL * m; aR = xR * dry + dBR * m;
+                        if (! wantAux && p.auxToMain) { yL += dBL * m; yR += dBR * m; }   // no Aux bus: hear B in Main
                     }
-                    if (sp.converter != Conv24) { oL = convert (oL, sp.converter); oR = convert (oR, sp.converter); }       // D/A
-                    if (grit[s] > 0.0f) {                     // converter grit: requantised (like early digital reverbs)
-                        const float q = gritQ[s];
-                        oL = std::round (oL / q) * q; oR = std::round (oR / q) * q;   // no dither: silence stays silent
-                    }
-                    oL = c.rich.process (0, oL); oR = c.rich.process (1, oR);
-                    c.post (oL, oR, xL, xR, sp.comp);
-                    wL += oL * c.sLvl; wR += oR * c.sLvl;
                 }
-                // ---- delay
-                float dL = 0, dR = 0;
+                // ---- delay (Main only)
                 if (p.delayOn || sDl > 1e-4f) {
                     float rL, rR;
                     delay.process (xL, xR, tL, tR, p.delayFb, p.pingPong, smA * 0.2f, rL, rR);
                     float oL = rL * pLl + rR * pRl, oR = rL * pLr + rR * pRr;
                     float mid = 0.5f * (oL + oR), side = 0.5f * (oL - oR) * width;
-                    dL = mid + side; dR = mid - side;
+                    yL += (mid + side) * sDl; yR += (mid - side) * sDl;
                 }
-                // ---- mix
-                float yL = xL * (1 - sRv) + wL * sRv + dL * sDl;
-                float yR = xR * (1 - sRv) + wR * sRv + dR * sDl;
                 if (p.trOn) { yL = tr.process (0, yL); yR = tr.process (1, yR); }
                 bufL[k] = yL * sOut; bufR[k] = yR * sOut;
+                axL[k] = aL * sOut; axR[k] = aR * sOut;
             }
             L[i] = dn[0].down (bufL); R[i] = dn[1].down (bufR);
+            pkMain = std::max (pkMain, std::max (std::fabs (L[i]), std::fabs (R[i])));
+            if (wantAux) {
+                auxL[i] = dnAux[0].down (axL); auxR[i] = dnAux[1].down (axR);
+                pkAux = std::max (pkAux, std::max (std::fabs (auxL[i]), std::fabs (auxR[i])));
+            }
         }
+        mIn = pkIn; mMain = pkMain; mAux = wantAux ? pkAux : (cfg == CfgSingle ? pkMain : 0.0f);
     }
 
 private:
-    float baseFs = 48000, fs = 48000; int os = 0; bool firstBlock = true;
-    Resampler up[2], dn[2], irUp[2];
-    PlateAlgo plate; TankAlgo tank[4];
+    static inline void smooth (float& v, float tgt, float a) { const float d = tgt - v; v = std::fabs (d) < 2.0e-4f ? tgt : v + a * d; }
+    // one machine of the split/cascade configurations: its slot's output (wet only)
+    inline void runMachine (int s, const Params& p, float inL, float inR, float keyL, float keyR, bool haveIr, float irS_L, float irS_R, float& oL, float& oR) {
+        oL = oR = 0.0f;
+        runSlot (s, p.slot[s], s == IR ? 0.0f : inL, s == IR ? 0.0f : inR, keyL, keyR, haveIr, irS_L, irS_R, oL, oR, true);
+    }
+    // one slot for one sample: returns false when the slot is silent and skipped
+    inline bool runSlot (int s, const SlotParams& sp, float inL, float inR, float keyL, float keyR, bool haveIr, float irS_L, float irS_R,
+                         float& oL, float& oR, bool forceOn = false) {
+        SlotChain& c = chain[s];
+        oL = oR = 0.0f;
+        if (! forceOn && ! sp.on && c.sLvl < 1e-4f) {
+            if (c.running) { c.running = false; c.dirty = true; }     // cleared when switched back on
+            return false;
+        }
+        if (c.dirty) { c.clear (fs); if (s == Plate) plate.clear(); else if (s == Lex480) tank480.clear(); else if (s != IR) tank[s].clear(); c.dirty = false; }
+        c.running = true;
+        if (s == IR) {
+            // the IR path stays clean: no converter, grit, richness or high cut - only the IR and the user's EQ/comp
+            if (! haveIr) return true;                             // no IR loaded: true silence
+            oL = irS_L; oR = irS_R;
+            if (irMod > 0.0f) {
+                c.mdL.push (oL); c.mdR.push (oR);
+                const float dl = 2.0f + irMod * (1.0f + c.mlfo[0].next()), dr = 2.0f + irMod * (1.0f + c.mlfo[1].next());
+                oL = c.mdL.read (dl); oR = c.mdR.read (dr);
+                if (cubicW[s] > 0.0f) { oL += (c.mdL.readC (dl) - oL) * cubicW[s]; oR += (c.mdR.readC (dr) - oR) * cubicW[s]; }
+            }
+            if (irDiff > 0.0f)
+                for (int j = 0; j < 2; ++j) {
+                    oL = allpass (c.dfL[j], std::round (SlotChain::kDfMs[j] * 0.001f * fs), irDiff, oL);
+                    oR = allpass (c.dfR[j], std::round (SlotChain::kDfMs[j + 2] * 0.001f * fs), irDiff, oR);
+                }
+            for (int b = 0; b < 4; ++b) { oL = c.eq[0][b].process (oL); oR = c.eq[1][b].process (oR); }
+            if (sp.comp.on) c.comp.process (oL, oR, sp.comp.duck ? keyL : oL, sp.comp.duck ? keyR : oR, sp.comp);
+            else c.comp.meter (sp.comp.duck ? keyL : oL, sp.comp.duck ? keyR : oR);
+            oL *= c.sLvl; oR *= c.sLvl;
+            return true;
+        }
+        float pl, pr; c.input (inL, inR, preS[s], inW[s], true, pl, pr);
+        if (sp.converter != Conv24) { pl = convert (pl, sp.converter); pr = convert (pr, sp.converter); }   // A/D
+        if (s == Plate) plate.process (pl, pr, plateDampA, sp.mod, sp.early, oL, oR);
+        else if (s == Lex480) tank480.process (pl, pr, sp.mod, sp.early, oL, oR);
+        else tank[s].process (pl, pr, sp.mod, sp.early, oL, oR);
+        if (sp.converter != Conv24) { oL = convert (oL, sp.converter); oR = convert (oR, sp.converter); }       // D/A
+        if (grit[s] > 0.0f) {                     // converter grit: requantised (like early digital reverbs)
+            const float q = gritQ[s];
+            oL = std::round (oL / q) * q; oR = std::round (oR / q) * q;   // no dither: silence stays silent
+        }
+        oL = c.rich.process (0, oL); oR = c.rich.process (1, oR);
+        c.post (oL, oR, keyL, keyR, sp.comp);
+        oL *= c.sLvl; oR *= c.sLvl;
+        return true;
+    }
+
+    float baseFs = 48000, fs = 48000; int os = 0; bool firstBlock = true; int lastCfg = -1;
+    Resampler up[2], dn[2], dnAux[2], irUp[2];
+    PlateAlgo plate; TankAlgo tank[4], tank480;
     SlotChain chain[kNumSlots], irIn;
     StereoDelay delay; Transformer tr;
+    HwPath hwIn, hwMain, hwAux;
     float sRv = 0.3f, sDl = 0, sOut = 1;
-    float grit[kNumSlots] = {}, gritQ[kNumSlots] = {}, cubicW[kNumSlots] = {};
-    uint32_t seed = 22222u;
-    inline float rnd() { seed = seed * 1664525u + 1013904223u; return (float) (seed >> 8) / 16777216.0f; }
+    float grit[kNumSlots] = {}, gritQ[kNumSlots] = {}, cubicW[kNumSlots] = {}, preS[kNumSlots] = {}, inW[kNumSlots] = {};
+    float plateDampA = 1, irDiff = 0, irMod = 0;
+    float mIn = 0, mMain = 0, mAux = 0;
     bool delayDirty = true;
 };
 

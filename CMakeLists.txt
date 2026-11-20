@@ -7,12 +7,13 @@ FetchContent_Declare(JUCE
   GIT_TAG 8.0.4)
 FetchContent_MakeAvailable(JUCE)
 
+# Flexiverb (formerly PlateVerb). The plugin code stays Plt1 so sessions saved with PlateVerb open in Flexiverb.
 juce_add_plugin(PlateVerb
   COMPANY_NAME "Boyko"
   PLUGIN_MANUFACTURER_CODE Boyk
   PLUGIN_CODE Plt1
   FORMATS VST3
-  PRODUCT_NAME "PlateVerb")
+  PRODUCT_NAME "Flexiverb")
 
 target_sources(PlateVerb PRIVATE Source/PluginProcessor.cpp)
 target_compile_features(PlateVerb PRIVATE cxx_std_17)

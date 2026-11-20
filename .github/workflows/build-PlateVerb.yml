@@ -1,4 +1,4 @@
-name: Build PlateVerb
+name: Build Flexiverb
 on:
   workflow_dispatch:
   push:
@@ -16,5 +16,5 @@ jobs:
       - run: cmake --build build --config Release --target PlateVerb_VST3
       - uses: actions/upload-artifact@v4
         with:
-          name: PlateVerb-VST3
+          name: Flexiverb-VST3
           path: build/PlateVerb_artefacts/Release/VST3
