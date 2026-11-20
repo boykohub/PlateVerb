@@ -75,7 +75,7 @@ static AudioProcessorValueTreeState::ParameterLayout makeLayout()
     l.add (std::make_unique<AudioParameterFloat> (ParameterID { ids::analog, 1 }, "1081 Analog", NormalisableRange<float> (-50.f, 50.f, 0.f), 0.f,
                AudioParameterFloatAttributes().withStringFromValueFunction ([] (float v, int) { return signedDb (v, 0); })));
     choice (ids::order, "Module Order", { "EQ > Comp > Gate", "EQ > Gate > Comp", "Comp > EQ > Gate",
-                                          "Comp > Gate > EQ", "Gate > EQ > Comp", "Gate > Comp > EQ" }, 4);
+                                          "Comp > Gate > EQ", "Gate > EQ > Comp", "Gate > Comp > EQ" }, 1);
 
     // compressor
     choice (ids::cModel, "Comp Type", { "2254", "Velvet VCA", "Velvet FET", "Velvet Opto" }, 0);
@@ -234,6 +234,7 @@ public:
                 uiScale = (float) (double) st.getProperty ("uiScale", 1.0);
                 compOpen = (bool) st.getProperty ("compOpen", false);
                 gateOpen = (bool) st.getProperty ("gateOpen", false);
+                compOpen = compOpen || gateOpen;           // one dynamics panel now
                 vuMode = (int) st.getProperty ("vuMode", 2);
                 compactEq = (bool) st.getProperty ("compactEq", false);
                 for (int b = 0; b < 4; ++b) {
@@ -252,7 +253,7 @@ public:
     std::atomic<float> meter { 0 }, vuIn { 0 }, vuOut { 0 }, vuGr { 0 }, gateAtten { 0 };
     std::atomic<int> activeFactor { 1 };
     std::atomic<double> sampleRateUi { 48000 };
-    float uiScale = 1.0f; bool compOpen = false, gateOpen = false; int vuMode = 2;   // VU: 0 in, 1 out, 2 GR
+    float uiScale = 1.0f; bool compOpen = false /* dynamics panel shown */, gateOpen = false; int vuMode = 2;   // VU: 0 in, 1 out, 2 GR
     bool compactEq = false;                              // settings: concentric EQ / filter knobs (smaller plugin)
     bool qOpen[4] { false, false, false, false };        // Q button turned into a Q knob (right-click / Ctrl+click)
     float qLast[4] { 1, 1, 1, 1 };                       // last user Q of a knob that was closed, brought back on reopen
@@ -604,6 +605,12 @@ public:
         p.startNewSubPath (ax - 3.5f, ay - 2); p.lineTo (ax, ay + 2); p.lineTo (ax + 3.5f, ay - 2);
         g.setColour (asButton ? col::ink : col::legend); g.strokePath (p, PathStrokeType (1.6f));
     }
+    Label* createSliderTextBox (Slider& s) override
+    {
+        auto* l = LookAndFeel_V4::createSliderTextBox (s);
+        if ((bool) s.getProperties()["ring"] || (bool) s.getProperties()["small"]) l->setFont (FontOptions (11.5f, Font::bold));
+        return l;
+    }
     Font getComboBoxFont (ComboBox&) override { return FontOptions (11.5f, Font::bold); }
     void positionComboBoxText (ComboBox& b, Label& l) override { l.setBounds (4, 0, b.getWidth() - 18, b.getHeight()); l.setFont (getComboBoxFont (b)); l.setJustificationType (Justification::centred); }
 };
@@ -731,6 +738,29 @@ protected:
         const int d = (int) std::round (size * 0.58f);
         inner.setBounds (cx - d / 2, y + size / 2 - d / 2, d, d);
         if (cap.isNotEmpty()) captions.push_back ({ cap, { cx - colW / 2, y + size + 18, colW, 12 } });
+    }
+    // concentric pair on two parameters; the outer slider's read-only box reads "outer / inner"
+    void concentric (FineKnob& outer, CentreKnob& inner, const char* idO, const char* idI, Colour capO, Colour capI,
+                     bool stepO, bool stepI, std::function<String (double)> tO = {}, std::function<String (double)> tI = {})
+    {
+        knob (outer, idO, capO, stepO);
+        knob (inner, idI, capI, stepI);
+        outer.getProperties().set ("ring", true);
+        inner.setTextBoxStyle (Slider::NoTextBox, false, 0, 0);
+        auto* po = proc.apvts.getParameter (idO); auto* pi = proc.apvts.getParameter (idI);
+        auto fmt = [] (RangedAudioParameter* prm, const std::function<String (double)>& f, double v) {
+            return f ? f (v) : prm->getText (prm->convertTo0to1 ((float) v), 0); };
+        outer.textFromValueFunction = [po, pi, tO, tI, fmt] (double v) { return fmt (po, tO, v) + " / " + fmt (pi, tI, pi->convertFrom0to1 (pi->getValue())); };
+        inner.onValueChange = [&outer] { outer.updateText(); };
+        outer.updateText();
+    }
+    // concentric pair with its readout to the right (one short row)
+    void putConcentricRight (Slider& outer, Slider& inner, int x, int y, int size, int textW)
+    {
+        outer.setTextBoxStyle (Slider::TextBoxRight, true, textW, 16);
+        outer.setBounds (x, y, size + textW, size);
+        const int d = (int) std::round (size * 0.58f);
+        inner.setBounds (x + size / 2 - d / 2, y + size / 2 - d / 2, d, d);
     }
     void paintPanel (Graphics& g, Colour top, Colour bottom, const String& title, bool centredTitles = false)
     {
@@ -914,55 +944,42 @@ private:
     int hover = -1, drag = -1;
 };
 
-// small analog VU: IN / OUT read 0 VU = +4 dBu; GR reads gain reduction down from the 0 mark
-class VuMeter : public Component
+// slim LED-style meter: IN / OUT in VU (0 VU = +4 dBu), GR in dB of gain reduction
+class LedMeter : public Component
 {
 public:
-    explicit VuMeter (N1081Processor& p) : proc (p) {}
+    explicit LedMeter (N1081Processor& p) : proc (p) {}
+    void reset() { level = proc.vuMode == 2 ? 0.0 : -30.0; repaint(); }
     void tick()
     {
         double target;
-        if (proc.vuMode == 2) target = -proc.vuGr.load();
-        else {
-            const double rms = proc.vuMode == 0 ? proc.vuIn.load() : proc.vuOut.load();
-            target = 20.0 * std::log10 (rms + 1e-9) + n1081::kDbuOffset - 4.0;
-        }
-        target = jlimit (-22.0, 4.0, target);
-        needle += (target - needle) * 0.16;
+        if (proc.vuMode == 2) target = proc.vuGr.load();
+        else target = jlimit (-30.0, 6.0, 20.0 * std::log10 ((proc.vuMode == 0 ? proc.vuIn.load() : proc.vuOut.load()) + 1e-9) + n1081::kDbuOffset - 4.0);
+        level += (target - level) * 0.2;
         repaint();
     }
     void paint (Graphics& g) override
     {
         auto r = getLocalBounds().toFloat();
-        g.setColour (col::well); g.fillRoundedRectangle (r, 5);
-        auto face = r.reduced (4);
-        g.setColour (col::vuFace); g.fillRoundedRectangle (face, 3);
-        const Point<float> pivot (face.getCentreX(), face.getBottom() + face.getHeight() * 0.55f);
-        const float rad = face.getHeight() * 1.18f;
-        auto angOf = [] (double vu) { const double t = (vu + 20.0) / 23.0; return (float) (-0.78 + 1.56 * jlimit (0.0, 1.0, t)); };
-        Path arc; arc.addCentredArc (pivot.x, pivot.y, rad, rad, 0, angOf (-20), angOf (0), true);
-        g.setColour (Colour (0xff2a2a2a)); g.strokePath (arc, PathStrokeType (1.2f));
-        Path red; red.addCentredArc (pivot.x, pivot.y, rad, rad, 0, angOf (0), angOf (3), true);
-        g.setColour (Colour (0xffc0392b)); g.strokePath (red, PathStrokeType (2.5f));
-        g.setFont (FontOptions (9.5f, Font::bold));
-        for (double v : { -20.0, -10.0, -7.0, -5.0, -3.0, -1.0, 0.0, 1.0, 2.0, 3.0 }) {
-            const float a = angOf (v);
-            g.setColour (v > 0 ? Colour (0xffc0392b) : Colour (0xff2a2a2a));
-            g.drawLine ({ pivot.getPointOnCircumference (rad, a), pivot.getPointOnCircumference (rad + 5, a) }, 1.1f);
-            if (v == -20 || v == -10 || v == -5 || v == -3 || v == 0 || v == 3) {
-                const String txt = proc.vuMode == 2 ? (v > 0 ? String() : String ((int) v)) : String ((int) std::abs (v));
-                g.drawText (txt, Rectangle<float> (24, 11).withCentre (pivot.getPointOnCircumference (rad + 12, a)), Justification::centred);
-            }
+        g.setColour (col::well); g.fillRoundedRectangle (r, 3);
+        auto in = r.reduced (2.0f);
+        const bool gr = proc.vuMode == 2;
+        const float frac = gr ? jlimit (0.f, 1.f, (float) level / 20.f) : jlimit (0.f, 1.f, (float) (level + 30.0) / 36.f);
+        const float zero = in.getX() + in.getWidth() * (30.f / 36.f);
+        auto fill = in.withWidth (in.getWidth() * frac);
+        if (gr) { g.setColour (col::lampOn); g.fillRect (fill); }
+        else {
+            g.setColour (Colour (0xff7fc97f)); g.fillRect (fill.withRight (jmin (fill.getRight(), zero)));
+            if (fill.getRight() > zero) { g.setColour (Colour (0xffc0392b)); g.fillRect (fill.withLeft (zero)); }
         }
-        g.setColour (Colour (0xff555555)); g.setFont (FontOptions (9.5f));
-        g.drawText (proc.vuMode == 2 ? "GR dB" : "VU", face.withTrimmedBottom (3), Justification::centredBottom);
-        g.saveState(); g.reduceClipRegion (face.toNearestInt());
-        g.setColour (Colour (0xff1a1a1a));
-        g.drawLine ({ pivot, pivot.getPointOnCircumference (rad + 6, angOf (needle)) }, 1.4f);
-        g.restoreState();
+        g.setColour (col::well);
+        for (float x = in.getX() + 5; x < in.getRight(); x += 5) g.drawVerticalLine ((int) x, in.getY(), in.getBottom());
+        g.setColour (col::legend); g.setFont (FontOptions (10.5f, Font::bold));
+        const String t = gr ? "GR " + String (-level, 1) : (level <= -29.9 ? String ("-30 VU") : signedDb (level, 1) + " VU");
+        g.drawText (t, getLocalBounds().reduced (5, 0), Justification::centredRight);
     }
 private:
-    N1081Processor& proc; double needle = -22;
+    N1081Processor& proc; double level = 0;
 };
 
 //==============================================================================
@@ -1004,8 +1021,8 @@ public:
         phase.setTooltip ("Phase (polarity) invert");
 
         // concentric pairs for the compact layout: frequency = outer ring, gain = centre cap; HPF ring + LPF cap
-        concentric (cHpf, cLpf, ids::hpf, ids::lpf, col::capGrey, true, {});
-        for (int b = 0; b < 4; ++b) concentric (cFreq[b], cGain[b], ids::freq[b], ids::gain[b], caps[b], false, db);
+        concentric (cHpf, cLpf, ids::hpf, ids::lpf, col::capGrey, col::capGrey.darker (0.25f), true, true);
+        for (int b = 0; b < 4; ++b) concentric (cFreq[b], cGain[b], ids::freq[b], ids::gain[b], caps[b], col::capBlack.brighter (0.25f), true, false, {}, db);
 
         knob (analog, ids::analog, col::capGrey, false, [] (double v) { return "ANALOG " + signedDb (v, 0); });
         analog.setTextBoxStyle (Slider::NoTextBox, false, 0, 0);
@@ -1074,21 +1091,6 @@ public:
     }
 
 private:
-    void concentric (FineKnob& outer, CentreKnob& inner, const char* idO, const char* idI, Colour cap, bool innerStepped,
-                     std::function<String (double)> innerText)
-    {
-        knob (outer, idO, cap, true);
-        knob (inner, idI, innerStepped ? col::capGrey.darker (0.25f) : col::capBlack.brighter (0.25f), innerStepped, innerText);
-        outer.getProperties().set ("ring", true);
-        inner.setTextBoxStyle (Slider::NoTextBox, false, 0, 0);
-        auto* po = proc.apvts.getParameter (idO); auto* pi = proc.apvts.getParameter (idI);
-        outer.textFromValueFunction = [po, pi, innerText] (double v) {
-            const double iv = pi->convertFrom0to1 (pi->getValue());
-            return po->getText (po->convertTo0to1 ((float) v), 0) + " / " + (innerText ? innerText (iv) : pi->getText (pi->getValue(), 0)); };
-        inner.onValueChange = [&outer] { outer.updateText(); };
-        outer.updateText();
-        inner.toFront (false);
-    }
     RangedAudioParameter* qParam (int b) const { return proc.apvts.getParameter (ids::q[b]); }
     float qNow (int b) const { auto* q = qParam (b); return q->convertFrom0to1 (q->getValue()); }
     void setQ (int b, float v) { auto* q = qParam (b); q->beginChangeGesture(); q->setValueNotifyingHost (q->convertTo0to1 (v)); q->endChangeGesture(); }
@@ -1116,12 +1118,16 @@ private:
 };
 
 //==============================================================================
-// Compressor: 2254 diode bridge, or Velvet (PlateVerb's VCA / FET / Opto)
-class CompPanel : public ModulePanel
+// Dynamics: compressor (2254 diode bridge, or Velvet = PlateVerb's VCA / FET / Opto) and gate in one panel
+static String msShort (double v) { return v < 1 ? String (v, 2) : v < 1000 ? String (v, v < 10 ? 1 : 0) : String (v / 1000.0, 1) + "s"; }
+
+class DynPanel : public ModulePanel, private Timer
 {
 public:
-    static constexpr int kW = 340;
-    CompPanel (N1081Processor& p, KnobLnF& l) : ModulePanel (p, l), vu (p)
+    static constexpr int kW = 256;
+    std::function<void()> onGateOrder;                   // flip gate before / after the compressor
+    std::function<bool()> gateFirst;
+    DynPanel (N1081Processor& p, KnobLnF& l) : ModulePanel (p, l), meter (p)
     {
         presets.setTextWhenNothingSelected ("PRESETS");
         const auto& list = presetList();
@@ -1137,87 +1143,134 @@ public:
         typeAtt = std::make_unique<AudioProcessorValueTreeState::ComboBoxAttachment> (proc.apvts, ids::cModel, type);
         type.onChange = [this] { layoutModel(); };
 
+        StringArray scNames { "SC HPF off" }; for (int i = 1; i < 6; ++i) scNames.add ("SC " + String ((int) n1081::kScHpf[i]) + " Hz");
+        sc.addItemList (scNames, 1);
+        sc.setTooltip ("Sidechain high-pass: keeps the low end from pumping the compressor");
+        addAndMakeVisible (sc);
+        scAtt = std::make_unique<AudioProcessorValueTreeState::ComboBoxAttachment> (proc.apvts, ids::cSc, sc);
+
         onOff (compIn, ids::cIn);
         titleX = 14 + kSmallW + 8;
-        addAndMakeVisible (vu);
-        const char* vuNames[3] = { "IN", "OUT", "GR" };
-        for (int i = 0; i < 3; ++i) {
-            vuBtn[i].setButtonText (vuNames[i]); vuBtn[i].setRadioGroupId (77); vuBtn[i].setClickingTogglesState (true);
-            vuBtn[i].setToggleState (proc.vuMode == i, dontSendNotification);
-            vuBtn[i].onClick = [this, i] { if (vuBtn[i].getToggleState()) proc.vuMode = i; };
-            addAndMakeVisible (vuBtn[i]);
-        }
-        auto db = [] (double v) { return signedDb (v, 1) + " dB"; };
-        knob (kLimLvl, ids::kLimLvl, col::capGrey, true);
-        knob (kLimRec, ids::kLimRec, col::capGrey, true);
-        button (kLim, ids::kLim, "LIMIT");
-        button (kFast, ids::kFast, "FAST");
-        knob (kThr, ids::kThr, col::capBlue, true);
-        knob (kRatio, ids::kRatio, col::capGrey, true);
-        knob (kRec, ids::kRec, col::capGrey, true);
-        knob (kGain, ids::kGain, col::capRed, true);
-        button (kComp, ids::kComp, "COMP");
-        knob (pThr, ids::pThr, col::capBlue, false, [] (double v) { return String (v, 1) + " dB"; });
-        knob (pRatio, ids::pRatio, col::capGrey, false, [] (double v) { return String (v, 1) + ":1"; });
-        knob (pAtk, ids::pAtk, col::capGrey, false, msText);
-        knob (pRel, ids::pRel, col::capGrey, false, msText);
-        knob (pMk, ids::pMk, col::capRed, false, db);
-        button (tone, ids::pTone, "VINTAGE");
-        knob (drive, ids::cDrive, col::capRed, false, db);
-        knob (sc, ids::cSc, col::capGrey, true);
-        knob (mix, ids::cMix, col::capGrey, false, [] (double v) { return String ((int) std::round (v)) + " %"; });
-        arrows (kW - 14 - 108 - 54, 16);
-        setSize (kW, EqPanel::kH);
-        layoutModel();
-    }
-    void tick() { vu.tick(); }
-    void syncVu() { for (int i = 0; i < 3; ++i) vuBtn[i].setToggleState (proc.vuMode == i, dontSendNotification); }
+        addAndMakeVisible (meter);
+        meterMode.onClick = [this] { proc.vuMode = (proc.vuMode + 1) % 3; syncVu(); meter.reset(); };
+        meterMode.setTooltip ("Meter: IN / OUT level of the compressor, or GR (gain reduction)");
+        addAndMakeVisible (meterMode);
 
-    void paint (Graphics& g) override { paintPanel (g, col::comp.brighter (0.05f), col::compDark, is2254() ? "2254" : "VELVET"); }
+        const Colour dark = col::capGrey.darker (0.35f), red = col::capRed, blue = col::capBlue, grey = col::capGrey;
+        auto num = [] (double v) { return signedDb (v, 1); };
+        // 2254
+        concentric (kThr, kRatio, ids::kThr, ids::kRatio, blue, dark, true, true, [] (double v) { return signedDb (n1081::compThrDbu ((int) std::round (v))); });
+        concentric (kRec, kGain, ids::kRec, ids::kGain, grey, red, true, true, {}, [] (double v) { return signedDb (n1081::compGainDb ((int) std::round (v))); });
+        concentric (kDrive, kMix, ids::cDrive, ids::cMix, red, dark, false, false, num, [] (double v) { return String ((int) std::round (v)) + "%"; });
+        concentric (kLim, kLimRec, ids::kLimLvl, ids::kLimRec, grey, dark, true, true, [] (double v) { return signedDb (n1081::limThrDbu ((int) std::round (v))); });
+        kLim.setTooltip ("Limiter level in dBu (ring) / limiter recovery (cap)");
+        button (kComp, ids::kComp, "COMP");
+        button (kFast, ids::kFast, "FAST");
+        button (kLimit, ids::kLim, "LIMIT");
+        // Velvet
+        concentric (vThr, vRatio, ids::pThr, ids::pRatio, blue, dark, false, false, num, [] (double v) { return String (v, 1) + ":1"; });
+        concentric (vAtk, vRel, ids::pAtk, ids::pRel, grey, dark, false, false, msShort, msShort);
+        concentric (vDrive, vMk, ids::cDrive, ids::pMk, red, red.darker (0.3f), false, false, num, num);
+        knob (vMix, ids::cMix, grey, false, [] (double v) { return "MIX " + String ((int) std::round (v)) + "%"; });
+        vMix.getProperties().set ("small", true);
+        button (vTone, ids::pTone, "VINTAGE");
+        // gate
+        onOff (gIn, ids::gIn);
+        concentric (gThr, gRange, ids::gThr, ids::gRange, blue, dark, false, false, num, num);
+        concentric (gAtk, gRel, ids::gAtk, ids::gRel, grey, dark, false, false, msShort, msShort);
+        concentric (gHold, gKey, ids::gHold, ids::gKey, grey, dark, false, true, msShort);
+        gOrder.setTooltip ("Gate before (PRE) or after (POST) the compressor");
+        gOrder.onClick = [this] { if (onGateOrder) onGateOrder(); };
+        addAndMakeVisible (gOrder);
+
+        arrows (14, 44);
+        setSize (kW, EqPanel::kHc);
+        syncVu();
+        layoutModel();
+        startTimerHz (30);
+    }
+    void syncVu() { const char* n[3] = { "IN", "OUT", "GR" }; meterMode.setButtonText (n[jlimit (0, 2, proc.vuMode)]); }
+
+    void paint (Graphics& g) override
+    {
+        paintPanel (g, col::comp.brighter (0.05f), col::compDark, is2254() ? "2254" : "VELVET");
+        g.setColour (col::legend); g.setFont (FontOptions (14.f, Font::bold));
+        g.drawText ("GATE", gateTitle, Justification::left);
+        const float a = proc.gateAtten.load();
+        const auto bar = gateBar.toFloat();
+        g.setColour (col::well); g.fillRoundedRectangle (bar, 3);
+        const float frac = jlimit (0.f, 1.f, a / jmax (1.f, proc.apvts.getRawParameterValue (ids::gRange)->load()));
+        g.setColour (col::lampOn.withAlpha (0.85f)); g.fillRoundedRectangle (bar.withWidth (bar.getWidth() * frac).reduced (2), 2);
+        const bool open = proc.apvts.getRawParameterValue (ids::gIn)->load() > 0.5f && a < 1.0f;
+        g.setColour (open ? Colour (0xff7fc97f) : col::well.brighter (0.2f));
+        g.fillEllipse (Rectangle<float> (9, 9).withCentre ({ bar.getRight() - 9, bar.getCentreY() }));
+    }
 
     void layoutModel()
     {
         const bool k = is2254();
-        for (auto* c : std::initializer_list<Component*> { &kLimLvl, &kLimRec, &kLim, &kFast, &kThr, &kRatio, &kRec, &kGain, &kComp }) c->setVisible (k);
-        for (auto* c : std::initializer_list<Component*> { &pThr, &pRatio, &pAtk, &pRel, &pMk, &tone }) c->setVisible (! k);
+        for (auto* c : std::initializer_list<Component*> { &kThr, &kRatio, &kRec, &kGain, &kDrive, &kMix, &kLim, &kLimRec, &kComp, &kFast, &kLimit }) c->setVisible (k);
+        for (auto* c : std::initializer_list<Component*> { &vThr, &vRatio, &vAtk, &vRel, &vDrive, &vMk, &vMix, &vTone }) c->setVisible (! k);
         resized(); repaint();
     }
 
     void resized() override
     {
         rows.clear(); captions.clear();
-        presets.setBounds (kW - 14 - 108, 13, 108, kBtnH);
-        compIn.setBounds (14, 13, kSmallW, kBtnH);                // where the title started; the title moved right
-        vu.setBounds (14, 46, kW - 28 - kSmallW - 8, 90);         // the short VU buttons give the meter more width
-        for (int i = 0; i < 3; ++i) vuBtn[i].setBounds (kW - 14 - kSmallW, 46 + i * 32, kSmallW, kBtnH);
-        constexpr int K = 52;                                   // one knob size for the whole module
-        const int c[4] = { 50, 126, 202, 278 };
-        if (is2254()) {
-            Rectangle<int> lim (10, 144, kW - 20, 96); rows.push_back ({ "LIMITER", lim });
-            put (kLimLvl, "LEVEL", c[0], lim.getY() + 14, K);
-            put (kLimRec, "RECOVERY", c[1], lim.getY() + 14, K);
-            kLim.setBounds (c[2] - kBtnW / 2, lim.getY() + 34, kBtnW, kBtnH);
-            kFast.setBounds (c[3] - kBtnW / 2, lim.getY() + 34, kBtnW, kBtnH);
-            Rectangle<int> cmp (10, 246, kW - 20, 190); rows.push_back ({ "COMPRESSOR", cmp });
-            const int y1 = cmp.getY() + 14, y2 = cmp.getY() + 104;
-            put (kThr, "THRESHOLD", c[0], y1, K); put (kRatio, "RATIO", c[1], y1, K);
-            put (kRec, "RECOVERY", c[2], y1, K); put (kGain, "GAIN", c[3], y1, K);
-            put (drive, "DRIVE", c[0], y2, K); put (sc, "SC HPF", c[1], y2, K); put (mix, "MIX", c[2], y2, K);
-            type.setBounds (c[3] - kBtnW / 2, y2 + 8, kBtnW, kBtnH);
-            kComp.setBounds (c[3] - kBtnW / 2, y2 + 46, kBtnW, kBtnH);
+        const bool k = is2254();
+        const int extra = jmax (0, getHeight() - EqPanel::kHc);              // taller next to the classic EQ: bigger knobs, more air
+        const int ks = 50 + jmin (16, extra), gap = (extra - (ks - 50)) / 3;
+        compIn.setBounds (14, 13, kSmallW, kBtnH);
+        presets.setBounds (kW - 14 - 84, 13, 84, kBtnH);
+        meter.setBounds (66, 44, kW - 14 - kSmallW - 6 - 66, 20);
+        meterMode.setBounds (kW - 14 - kSmallW, 43, kSmallW, 22);
+
+        const int y0 = 68 + gap, top = y0 + 4;
+        const int cx[3] = { 49, 128, 207 }, colW = 76;
+        if (k) {
+            putConcentric (kThr, kRatio, "THR / RATIO", cx[0], top, ks, colW);
+            putConcentric (kRec, kGain, "REC / GAIN", cx[1], top, ks, colW);
+            putConcentric (kDrive, kMix, "DRIVE / MIX", cx[2], top, ks, colW);
         } else {
-            Rectangle<int> a (10, 144, kW - 20, 292); rows.push_back ({ "COMPRESSOR", a });
-            const int y1 = a.getY() + 16, y2 = a.getY() + 108, y3 = a.getY() + 200;
-            put (pThr, "THRESHOLD", c[0], y1, K); put (pRatio, "RATIO", c[1], y1, K);
-            put (pAtk, "ATTACK", c[2], y1, K); put (pRel, "RELEASE", c[3], y1, K);
-            put (drive, "DRIVE", c[0], y2, K); put (pMk, "MAKEUP", c[1], y2, K);
-            put (sc, "SC HPF", c[2], y2, K); put (mix, "MIX", c[3], y2, K);
-            type.setBounds (c[3] - kBtnW / 2, y3 + 8, kBtnW, kBtnH);
-            tone.setBounds (c[3] - kBtnW / 2, y3 + 46, kBtnW, kBtnH);
+            putConcentric (vThr, vRatio, "THR / RATIO", cx[0], top, ks, colW);
+            putConcentric (vAtk, vRel, "ATK / REL ms", cx[1], top, ks, colW);
+            putConcentric (vDrive, vMk, "DRIVE / MAKEUP", cx[2], top, ks, colW);
         }
+        const int by = top + ks + 16 + 11 + 4;
+        type.setBounds (16, by, 58, 24);
+        if (k) { kComp.setBounds (80, by, 50, 24); sc.setBounds (136, by, kW - 16 - 136, 24); }
+        else   { vTone.setBounds (80, by, 62, 24); sc.setBounds (148, by, kW - 16 - 148, 24); }
+        const int ly = by + 24 + 6;
+        if (k) {
+            kLimit.setBounds (16, ly + 5, 50, 24);
+            kFast.setBounds (72, ly + 5, 46, 24);
+            putConcentricRight (kLim, kLimRec, 126, ly, 34, kW - 16 - 126 - 34);
+        } else {
+            vMix.setTextBoxStyle (Slider::TextBoxRight, false, 80, 16);
+            vMix.setBounds (126, ly, 34 + 80, 34);
+        }
+        rows.push_back ({ {}, { 10, y0, kW - 20, ly + 34 + 4 - y0 } });
+
+        const int gy = ly + 34 + 8 + gap;
+        Rectangle<int> gbox (10, gy, kW - 20, getHeight() - 10 - gy); rows.push_back ({ {}, gbox });
+        gIn.setBounds (16, gy + 4, kSmallW, 22);
+        gateTitle = { 16 + kSmallW + 6, gy + 4, 44, 22 };
+        gOrder.setBounds (kW - 16 - 44, gy + 4, 44, 22);
+        gateBar = { gateTitle.getRight() + 2, gy + 8, gOrder.getX() - 6 - gateTitle.getRight() - 2, 14 };
+        const int gt = gy + 30 + jmax (0, (gbox.getBottom() - gy - 30 - (40 + 16 + 11 + 4)) / 2);
+        putConcentric (gThr, gRange, "THR / RANGE", cx[0], gt, 40, colW);
+        putConcentric (gAtk, gRel, "ATK / REL ms", cx[1], gt, 40, colW);
+        putConcentric (gHold, gKey, "HOLD / KEY", cx[2], gt, 40, colW);
     }
 
 private:
+    void timerCallback() override
+    {
+        meter.tick();
+        const String t = gateFirst && gateFirst() ? "PRE" : "POST";
+        if (gOrder.getButtonText() != t) gOrder.setButtonText (t);
+        repaint (gateBar.expanded (4));
+    }
     struct Preset { String name; std::vector<std::pair<const char*, float>> values; };
     static const std::vector<Preset>& presetList()
     {
@@ -1245,72 +1298,27 @@ private:
     }
     bool is2254() const { return type.getSelectedItemIndex() <= 0; }
 
-    VuMeter vu;
-    ComboBox presets, type; std::unique_ptr<AudioProcessorValueTreeState::ComboBoxAttachment> typeAtt;
-    TextButton compIn, vuBtn[3], kLim, kComp, kFast, tone;
-    FineKnob kLimLvl, kLimRec, kThr, kRatio, kRec, kGain, pThr, pRatio, pAtk, pRel, pMk, drive, sc, mix;
-};
-
-//==============================================================================
-class GatePanel : public ModulePanel, private Timer
-{
-public:
-    static constexpr int kW = 196;
-    GatePanel (N1081Processor& p, KnobLnF& l) : ModulePanel (p, l)
-    {
-        onOff (gateIn, ids::gIn);
-        titleX = 14 + kSmallW + 8;
-        knob (thr, ids::gThr, col::capBlue, false, [] (double v) { return String (v, 1) + " dB"; });
-        knob (range, ids::gRange, col::capGrey, false, [] (double v) { return String (v, 1) + " dB"; });
-        knob (atk, ids::gAtk, col::capGrey, false, msText);
-        knob (hold, ids::gHold, col::capGrey, false, msText);
-        knob (rel, ids::gRel, col::capGrey, false, msText);
-        knob (key, ids::gKey, col::capGrey, true);
-        arrows (14, 46);
-        setSize (kW, EqPanel::kH);
-        startTimerHz (30);
-    }
-    void paint (Graphics& g) override
-    {
-        paintPanel (g, col::comp.brighter (0.02f), col::compDark.darker (0.05f), "GATE");
-        const float a = proc.gateAtten.load();
-        auto bar = Rectangle<float> (70.f, 46.f, kW - 84.f, 18.f);
-        g.setColour (col::well); g.fillRoundedRectangle (bar, 3);
-        const float frac = jlimit (0.f, 1.f, a / jmax (1.f, proc.apvts.getRawParameterValue (ids::gRange)->load()));
-        g.setColour (col::lampOn.withAlpha (0.85f)); g.fillRoundedRectangle (bar.withWidth (bar.getWidth() * frac).reduced (2), 2);
-        const bool open = proc.apvts.getRawParameterValue (ids::gIn)->load() > 0.5f && a < 1.0f;
-        g.setColour (open ? Colour (0xff7fc97f) : col::well.brighter (0.2f)); g.fillEllipse (kW - 26.f, 72.f, 10.f, 10.f);
-        g.setColour (col::dim); g.setFont (FontOptions (10.f, Font::bold));
-        g.drawText ("OPEN", kW - 72, 70, 42, 14, Justification::right);
-    }
-    void resized() override
-    {
-        rows.clear(); captions.clear();
-        gateIn.setBounds (14, 13, kSmallW, kBtnH);
-        Rectangle<int> a (10, 94, kW - 20, 342); rows.push_back ({ "GATE / EXPANDER", a });
-        constexpr int K = 52;
-        const int c1 = 58, c2 = 138;
-        put (thr, "THRESHOLD", c1, a.getY() + 18, K); put (range, "RANGE", c2, a.getY() + 18, K);
-        put (atk, "ATTACK", c1, a.getY() + 126, K);   put (hold, "HOLD", c2, a.getY() + 126, K);
-        put (rel, "RELEASE", c1, a.getY() + 234, K);  put (key, "KEY HPF", c2, a.getY() + 234, K);
-    }
-private:
-    void timerCallback() override { repaint (60, 40, kW - 60, 50); }
-    TextButton gateIn;
-    FineKnob thr, range, atk, hold, rel, key;
+    LedMeter meter;
+    ComboBox presets, type, sc;
+    std::unique_ptr<AudioProcessorValueTreeState::ComboBoxAttachment> typeAtt, scAtt;
+    TextButton compIn, meterMode, kComp, kFast, kLimit, vTone, gIn, gOrder;
+    FineKnob kThr, kRec, kDrive, kLim, vThr, vAtk, vDrive, vMix, gThr, gAtk, gHold;
+    CentreKnob kRatio, kGain, kMix, kLimRec, vRatio, vRel, vMk, gRange, gRel, gKey;
+    Rectangle<int> gateTitle, gateBar;
 };
 
 //==============================================================================
 class N1081Editor : public AudioProcessorEditor, private Timer
 {
 public:
-    explicit N1081Editor (N1081Processor& p) : AudioProcessorEditor (p), proc (p), eq (p, lnf), comp (p, lnf), gate (p, lnf)
+    explicit N1081Editor (N1081Processor& p) : AudioProcessorEditor (p), proc (p), eq (p, lnf), dyn (p, lnf)
     {
-        addAndMakeVisible (eq); addChildComponent (comp); addChildComponent (gate);
-        eq.onMove = [this] (int d) { move (ModEq, d); };
-        comp.onMove = [this] (int d) { move (ModComp, d); };
-        gate.onMove = [this] (int d) { move (ModGate, d); };
-        for (auto* b : { &zoomOut, &zoomIn, &zoomPct, &settings, &compBtn, &gateBtn }) {
+        addAndMakeVisible (eq); addChildComponent (dyn);
+        eq.onMove  = [this] (int d) { if (proc.compOpen) placeDyn (d > 0); };     // EQ right -> dynamics left
+        dyn.onMove = [this] (int d) { placeDyn (d < 0); };
+        dyn.gateFirst = [this] { int o[3]; proc.currentOrder (o); return pos (o, ModGate) < pos (o, ModComp); };
+        dyn.onGateOrder = [this] { int o[3]; proc.currentOrder (o); setOrder (pos (o, ModComp) < pos (o, ModEq), ! dyn.gateFirst()); };
+        for (auto* b : { &zoomOut, &zoomIn, &zoomPct, &settings, &dynBtn }) {
             b->getProperties().set ("flat", true); b->setLookAndFeel (&lnf); addAndMakeVisible (*b);
         }
         zoomOut.setButtonText ("-"); zoomIn.setButtonText ("+"); settings.setButtonText ("SETTINGS");
@@ -1318,8 +1326,8 @@ public:
         zoomIn.onClick  = [this] { setScale (scale + 0.1f); };
         zoomPct.onClick = [this] { zoomMenu(); };
         settings.onClick = [this] { settingsMenu(); };
-        compBtn.onClick = [this] { proc.compOpen = ! proc.compOpen; applySize(); };
-        gateBtn.onClick = [this] { proc.gateOpen = ! proc.gateOpen; applySize(); };
+        dynBtn.setTooltip ("Show / hide the compressor and gate (lit when either is on)");
+        dynBtn.onClick = [this] { proc.compOpen = ! proc.compOpen; applySize(); };
         scale = jlimit (0.6f, 2.0f, proc.uiScale);
         lastState = proc.uiStateVersion.load();
         setResizable (true, true);
@@ -1328,25 +1336,19 @@ public:
         timerCallback();
         startTimerHz (30);
     }
-    ~N1081Editor() override { for (auto* b : { &zoomOut, &zoomIn, &zoomPct, &settings, &compBtn, &gateBtn }) b->setLookAndFeel (nullptr); }
+    ~N1081Editor() override { for (auto* b : { &zoomOut, &zoomIn, &zoomPct, &settings, &dynBtn }) b->setLookAndFeel (nullptr); }
 
     void resized() override
     {
         const float s = (float) getWidth() / (float) baseWidth();
         if (ready && std::abs (s - scale) > 0.004f) { scale = jlimit (0.6f, 2.0f, s); proc.uiScale = scale; }
         const auto t = AffineTransform::scale (scale);
-        int order[3]; proc.currentOrder (order);
-        int x = 0, eqX = 0;
-        for (int i = 0; i < 3; ++i) {
-            Component* c = order[i] == ModEq ? (Component*) &eq : order[i] == ModComp ? (Component*) &comp : (Component*) &gate;
-            const bool vis = order[i] == ModEq || (order[i] == ModComp ? proc.compOpen : proc.gateOpen);
-            c->setVisible (vis);
-            if (! vis) continue;
-            if (order[i] == ModEq) eqX = x;
-            c->setBounds (x, 0, c->getWidth(), baseHeight());
-            c->setTransform (t);
-            x += c->getWidth();
-        }
+        int o[3]; proc.currentOrder (o);
+        const bool dynLeft = proc.compOpen && pos (o, ModComp) < pos (o, ModEq);
+        dyn.setVisible (proc.compOpen);
+        const int eqX = dynLeft ? DynPanel::kW : 0;
+        eq.setBounds (eqX, 0, EqPanel::kW, baseHeight()); eq.setTransform (t);
+        if (proc.compOpen) { dyn.setBounds (dynLeft ? 0 : EqPanel::kW, 0, DynPanel::kW, baseHeight()); dyn.setTransform (t); }
         // header tools: exactly the OUTPUT column's x and width
         const auto a = eq.toolArea().translated (eqX, 0);
         const int h = 22, gap = 6;
@@ -1355,27 +1357,23 @@ public:
         place (zoomPct, { a.getX() + 27, a.getY(), a.getWidth() - 54, h });
         place (zoomIn,  { a.getRight() - 24, a.getY(), 24, h });
         place (settings, { a.getX(), a.getY() + (h + gap), a.getWidth(), h });
-        place (compBtn,  { a.getX(), a.getY() + 2 * (h + gap), a.getWidth(), h });
-        place (gateBtn,  { a.getX(), a.getY() + 3 * (h + gap), a.getWidth(), h });
+        place (dynBtn,   { a.getX(), a.getY() + 2 * (h + gap), a.getWidth(), h });
         zoomPct.setButtonText (String ((int) std::round (scale * 100.0f)) + "%");
     }
 
 private:
-    int baseWidth() const { return EqPanel::kW + (proc.compOpen ? CompPanel::kW : 0) + (proc.gateOpen ? GatePanel::kW : 0); }
-    // concentric layout makes the plugin shorter while only the EQ is shown (comp / gate still need the full height)
-    int baseHeight() const { return proc.compactEq && ! proc.compOpen && ! proc.gateOpen ? EqPanel::kHc : EqPanel::kH; }
-    void move (int module, int dir)
+    static int pos (const int o[3], int m) { for (int i = 0; i < 3; ++i) if (o[i] == m) return i; return 0; }
+    int baseWidth() const { return EqPanel::kW + (proc.compOpen ? DynPanel::kW : 0); }
+    int baseHeight() const { return proc.compactEq ? EqPanel::kHc : EqPanel::kH; }
+    // signal order follows the screen: dynamics left or right of the EQ; inside it the gate PRE or POST the compressor
+    void setOrder (bool dynLeft, bool gateFirst)
     {
-        int o[3]; proc.currentOrder (o);
-        auto visible = [this] (int m) { return m == ModEq || (m == ModComp ? proc.compOpen : proc.gateOpen); };
-        int i = 0; while (o[i] != module) ++i;
-        int j = i + dir;
-        while (j >= 0 && j < 3 && ! visible (o[j])) j += dir;          // hop over hidden modules
-        if (j < 0 || j > 2) return;
-        std::swap (o[i], o[j]);
+        const int a = gateFirst ? ModGate : ModComp, b = gateFirst ? ModComp : ModGate;
+        const int o[3] = { dynLeft ? a : ModEq, dynLeft ? b : a, dynLeft ? ModEq : b };
         if (auto* prm = proc.apvts.getParameter (ids::order)) prm->setValueNotifyingHost (prm->convertTo0to1 ((float) permIndex (o)));
         resized();
     }
+    void placeDyn (bool left) { setOrder (left, dyn.gateFirst()); }
     void applySize()
     {
         const int bw = baseWidth(), bh = baseHeight();
@@ -1422,26 +1420,21 @@ private:
     }
     void timerCallback() override
     {
-        if (proc.compOpen) comp.tick();
-        auto label = [] (TextButton& b, const String& name, bool on, bool open) {
-            const String t = name + (on ? " ON" : " OFF") + (open ? "  <" : "  >");
-            if (b.getButtonText() != t) b.setButtonText (t);
-            b.setToggleState (on, dontSendNotification);
-        };
-        label (compBtn, "COMP", proc.apvts.getRawParameterValue (ids::cIn)->load() > 0.5f, proc.compOpen);
-        label (gateBtn, "GATE", proc.apvts.getRawParameterValue (ids::gIn)->load() > 0.5f, proc.gateOpen);
+        const bool on = proc.apvts.getRawParameterValue (ids::cIn)->load() > 0.5f || proc.apvts.getRawParameterValue (ids::gIn)->load() > 0.5f;
+        const String t = String ("DYNAMICS") + (proc.compOpen ? "  <" : "  >");
+        if (dynBtn.getButtonText() != t) dynBtn.setButtonText (t);
+        dynBtn.setToggleState (on, dontSendNotification);
         const int ord = (int) proc.apvts.getRawParameterValue (ids::order)->load();
         if (ord != lastOrder) { lastOrder = ord; resized(); }
         const int st = proc.uiStateVersion.load();
-        if (st != lastState && ready) { lastState = st; scale = jlimit (0.6f, 2.0f, proc.uiScale); comp.syncVu(); eq.refresh(); applySize(); }
+        if (st != lastState && ready) { lastState = st; scale = jlimit (0.6f, 2.0f, proc.uiScale); dyn.syncVu(); eq.refresh(); applySize(); }
     }
 
     N1081Processor& proc;
     KnobLnF lnf;
     EqPanel eq;
-    CompPanel comp;
-    GatePanel gate;
-    TextButton zoomOut, zoomIn, zoomPct, settings, compBtn, gateBtn;
+    DynPanel dyn;
+    TextButton zoomOut, zoomIn, zoomPct, settings, dynBtn;
     TooltipWindow tips { this, 700 };
     float scale = 1.0f; bool ready = false; int lastOrder = -1, lastState = 0;
 };
