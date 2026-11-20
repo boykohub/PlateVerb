@@ -159,6 +159,7 @@ inline double responseDb (const Params& p, double f)
 // Core flux follows the integral of the voltage, so saturation grows at low frequencies and high level.
 struct Transformer {
     double fs = 96000, lpA = 0, flux = 0, amount = 0.0, hpA = 0, hpZ = 0, hpX = 0;
+    double colour = 1.0;                                     // ANALOG control: scales the core's non-linearity (1 = as modelled)
     Biquad hf;
     void prepare (double rate, double fluxCornerHz, double hfCornerHz, double lfCornerHz, double amt)
     {
@@ -179,7 +180,7 @@ struct Transformer {
         flux = (1 - lpA) * h + lpA * flux;
         const double f = flux;
         const double sat = std::tanh (f) - f;                // odd-order, grows with flux
-        const double y = h + amount * (0.30 * sat + 0.002 * f * std::fabs (f)); // small hysteresis-like even term
+        const double y = h + amount * colour * (0.30 * sat + 0.002 * f * std::fabs (f)); // small hysteresis-like even term
         return hf.process (y);
     }
 };
@@ -197,8 +198,19 @@ inline double softClip (double v)
     return v < 0 ? -r : r;
 }
 
+// ANALOG control, -50 ... +50. 0 = the circuit exactly as modelled.
+// Below 0 the non-linear parts fade out (-50 = clean, only the linear frequency response is left);
+// above 0 they grow up to 4x and the stages are driven up to +3 dB harder, with the level compensated after.
+inline double analogColour (double a) { const double t = std::clamp (a / 50.0, -1.0, 1.0); return t <= 0 ? 1.0 + t : std::pow (4.0, t); }
+inline double analogDrive  (double a) { const double t = std::clamp (a / 50.0, 0.0, 1.0);  return std::pow (10.0, 3.0 * t / 20.0); }
+
+// softClip with its bending faded in by k (k >= 1: full clip, unchanged)
+inline double softClipK (double v, double k) { const double c = softClip (v); return k >= 1.0 ? c : v + (c - v) * k; }
+
 struct Channel {
     double fs = 96000;
+    double colour = 1.0;                                     // see analogColour()
+    void setColour (double k) { colour = k; inXf.colour = k; outXf.colour = k; }
     Transformer inXf, outXf;
     Biquad hpA, lpA; double hp1z = 0, hp1x = 0, lp1z = 0;
     Coefs hp1, lp1;
@@ -253,7 +265,7 @@ struct Channel {
         y *= lineGain;
         {
             const double v = y * kVolt;                      // v = 1 at clipping (~ +26 dBu)
-            y = softClip (v + 0.004 * v * v) / kVolt;        // ~0.05 % 2nd harmonic at +20 dBu, rises when driven
+            y = softClipK (v + 0.004 * colour * v * v, colour) / kVolt;   // ~0.05 % 2nd harmonic at +20 dBu, rises when driven
         }
 
         if (hpf > 0) {
@@ -274,8 +286,8 @@ struct Channel {
         // symmetric (odd-order) clipping at the top
         {
             const double x0 = 0.0015;
-            y -= 0.004 * y * std::exp (-(y * y) / (x0 * x0));
-            y = softClip (y * kVolt) / kVolt;
+            y -= 0.004 * colour * y * std::exp (-(y * y) / (x0 * x0));
+            y = softClipK (y * kVolt, colour) / kVolt;
         }
 
         y = outXf.process (y);

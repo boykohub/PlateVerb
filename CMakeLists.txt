@@ -45,7 +45,7 @@ juce_add_plugin(N1081
   PLUGIN_MANUFACTURER_CODE Boyk
   PLUGIN_CODE N181
   FORMATS VST3
-  PRODUCT_NAME "N1081")
+  PRODUCT_NAME "1081+")
 
 target_sources(N1081 PRIVATE N1081/Source/N1081Plugin.cpp)
 target_include_directories(N1081 PRIVATE Source N1081/Source)

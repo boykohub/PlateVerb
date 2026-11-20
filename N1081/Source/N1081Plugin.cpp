@@ -1,4 +1,4 @@
-// N1081 — 1081 channel amplifier, 2254 / Velvet compressor and gate, arrangeable left to right.
+// 1081+ — 1081 channel amplifier, 2254 / Velvet compressor and gate, arrangeable left to right.
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_dsp/juce_dsp.h>
 #include "N1081Engine.h"
@@ -26,6 +26,7 @@ namespace ids {
     static const char* gIn = "g_in"; static const char* gThr = "g_thr"; static const char* gRange = "g_range";
     static const char* gAtk = "g_atk"; static const char* gHold = "g_hold"; static const char* gRel = "g_rel"; static const char* gKey = "g_key";
     static const char* os = "os"; static const char* osFilt = "osfilt";
+    static const char* analog = "analog";
 }
 
 // module order: left to right on screen = signal order
@@ -71,6 +72,8 @@ static AudioProcessorValueTreeState::ParameterLayout makeLayout()
     bln (ids::eqIn, "EQ In", true);
     bln (ids::phase, "Phase", false);
     flt (ids::out, "1081 Output", NormalisableRange<float> (-24.f, 12.f, 0.f), 0.f, "dB", 1);
+    l.add (std::make_unique<AudioParameterFloat> (ParameterID { ids::analog, 1 }, "1081 Analog", NormalisableRange<float> (-50.f, 50.f, 0.f), 0.f,
+               AudioParameterFloatAttributes().withStringFromValueFunction ([] (float v, int) { return signedDb (v, 0); })));
     choice (ids::order, "Module Order", { "EQ > Comp > Gate", "EQ > Gate > Comp", "Comp > EQ > Gate",
                                           "Comp > Gate > EQ", "Gate > EQ > Comp", "Gate > Comp > EQ" }, 4);
 
@@ -134,10 +137,10 @@ public:
         kComp = p (ids::kComp); kLim = p (ids::kLim); kLimLvl = p (ids::kLimLvl); kLimRec = p (ids::kLimRec);
         qThr = p (ids::pThr); qRatio = p (ids::pRatio); qAtk = p (ids::pAtk); qRel = p (ids::pRel); qMk = p (ids::pMk); qTone = p (ids::pTone);
         gIn = p (ids::gIn); gThr = p (ids::gThr); gRange = p (ids::gRange); gAtk = p (ids::gAtk); gHold = p (ids::gHold); gRel = p (ids::gRel); gKey = p (ids::gKey);
-        pOs = p (ids::os); pOsFilt = p (ids::osFilt);
+        pOs = p (ids::os); pOsFilt = p (ids::osFilt); pAnalog = p (ids::analog);
     }
 
-    const String getName() const override { return "N1081"; }
+    const String getName() const override { return "1081+"; }
     bool acceptsMidi() const override { return false; }
     bool producesMidi() const override { return false; }
     double getTailLengthSeconds() const override { return 0.0; }
@@ -186,6 +189,7 @@ public:
         outSm.reset (sr, 0.03);  outSm.setCurrentAndTargetValue ((float) Decibels::decibelsToGain (pOut->load()));
         inSm.reset (sr, 0.03);   inSm.setCurrentAndTargetValue ((float) Decibels::decibelsToGain (pIn->load()));
         drvSm.reset (sr, 0.03);  drvSm.setCurrentAndTargetValue ((float) Decibels::decibelsToGain (cDrive->load()));
+        anSm.reset (sr, 0.05);   anSm.setCurrentAndTargetValue (pAnalog->load());
     }
     void releaseResources() override {}
 
@@ -215,6 +219,11 @@ public:
         st.setProperty ("compOpen", compOpen, nullptr);
         st.setProperty ("gateOpen", gateOpen, nullptr);
         st.setProperty ("vuMode", vuMode, nullptr);
+        st.setProperty ("compactEq", compactEq, nullptr);
+        for (int b = 0; b < 4; ++b) {
+            st.setProperty ("qOpen" + String (b), qOpen[b], nullptr);
+            st.setProperty ("qLast" + String (b), qLast[b], nullptr);
+        }
         if (auto x = st.createXml()) copyXmlToBinary (*x, d);
     }
     void setStateInformation (const void* d, int size) override
@@ -226,7 +235,15 @@ public:
                 compOpen = (bool) st.getProperty ("compOpen", false);
                 gateOpen = (bool) st.getProperty ("gateOpen", false);
                 vuMode = (int) st.getProperty ("vuMode", 2);
+                compactEq = (bool) st.getProperty ("compactEq", false);
+                for (int b = 0; b < 4; ++b) {
+                    qOpen[b] = (bool) st.getProperty ("qOpen" + String (b), false);
+                    qLast[b] = (float) (double) st.getProperty ("qLast" + String (b), 1.0);
+                }
+                for (auto* k : { "uiScale", "compOpen", "gateOpen", "vuMode", "compactEq" }) st.removeProperty (k, nullptr);
+                for (int b = 0; b < 4; ++b) { st.removeProperty ("qOpen" + String (b), nullptr); st.removeProperty ("qLast" + String (b), nullptr); }
                 apvts.replaceState (st);
+                uiStateVersion++;
             }
         }
     }
@@ -236,6 +253,10 @@ public:
     std::atomic<int> activeFactor { 1 };
     std::atomic<double> sampleRateUi { 48000 };
     float uiScale = 1.0f; bool compOpen = false, gateOpen = false; int vuMode = 2;   // VU: 0 in, 1 out, 2 GR
+    bool compactEq = false;                              // settings: concentric EQ / filter knobs (smaller plugin)
+    bool qOpen[4] { false, false, false, false };        // Q button turned into a Q knob (right-click / Ctrl+click)
+    float qLast[4] { 1, 1, 1, 1 };                       // last user Q of a knob that was closed, brought back on reopen
+    std::atomic<int> uiStateVersion { 0 };               // bumped when a song is loaded, so an open editor re-reads the above
     static constexpr int kSpecSize = 8192;                  // output for the live spectrum (mono, base rate)
     float spec[kSpecSize] {}; std::atomic<int> specPos { 0 };
 
@@ -293,6 +314,9 @@ private:
         const auto line = ramp (lineSm, (float) Decibels::decibelsToGain (n1081::lineGainDb ((int) pLine->load())));
         const auto outG = ramp (outSm, (float) Decibels::decibelsToGain (pOut->load()));
         const auto drv  = ramp (drvSm, (float) Decibels::decibelsToGain (cDrive->load()));
+        const auto an   = ramp (anSm, pAnalog->load());
+        const bool anOn = std::abs (an.first) > 1e-4f || std::abs (an.second) > 1e-4f;   // dead centre: untouched
+        const auto anD  = std::make_pair ((float) n1081::analogDrive (an.first), (float) n1081::analogDrive (an.second));
         for (int b = 0; b < 4; ++b) gainSm[b].setTargetValue (pEq->load() > 0.5f ? pGain[b]->load() : 0.f);
         const int hpf = (int) pHpf->load(), lpf = (int) pLpf->load();
         if (hpf != lastHpf || lpf != lastLpf) { for (auto& c : ch) c.setFilters (hpf, lpf); lastHpf = hpf; lastLpf = lpf; }
@@ -327,6 +351,11 @@ private:
         for (int s0 = 0; s0 < m; s0 += sub) {
             const int len = jmin (sub, m - s0);
             updateCoefs (false, len);
+            if (anOn || ch[0].colour != 1.0) {
+                const double t = (s0 + 0.5 * len) / (double) m;
+                const double k = anOn ? n1081::analogColour (an.first + (an.second - an.first) * t) : 1.0;
+                for (auto& c : ch) c.setColour (k);
+            }
             for (int i = 0; i < len; ++i) {
                 const int k = s0 + i;
                 const double t = (double) k / (double) m;
@@ -336,8 +365,14 @@ private:
                     switch (order[stage]) {
                         case ModEq: {                        // 1081: clean trim -> circuit -> output trim, which feeds the next module
                             const double gi = lerp (inG), lg = lerp (line), go = lerp (outG);
-                            L = ch[0].process (L * gi, lg, hpf, lpf) * go;
-                            R = ch[1].process (R * gi, lg, hpf, lpf) * go;
+                            if (anOn) {                      // ANALOG: drive the stages, then take the same gain back off
+                                const double d = lerp (anD);
+                                L = ch[0].process (L * gi * d, lg, hpf, lpf) * go / d;
+                                R = ch[1].process (R * gi * d, lg, hpf, lpf) * go / d;
+                            } else {
+                                L = ch[0].process (L * gi, lg, hpf, lpf) * go;
+                                R = ch[1].process (R * gi, lg, hpf, lpf) * go;
+                            }
                         } break;
                         case ModComp: if (compOn) {          // clean drive into the compressor
                             const double d = lerp (drv); L *= d; R *= d;
@@ -434,7 +469,7 @@ private:
     std::atomic<float>* kThr {}, * kRatio {}, * kRec {}, * kGain {}, * kFast {}, * kComp {}, * kLim {}, * kLimLvl {}, * kLimRec {};
     std::atomic<float>* qThr {}, * qRatio {}, * qAtk {}, * qRel {}, * qMk {}, * qTone {};
     std::atomic<float>* gIn {}, * gThr {}, * gRange {}, * gAtk {}, * gHold {}, * gRel {}, * gKey {};
-    std::atomic<float>* pOs {}, * pOsFilt {};
+    std::atomic<float>* pOs {}, * pOsFilt {}, * pAnalog {};
 
     std::unique_ptr<dsp::Oversampling<double>> iir[3];
     n1081::FirOversampler fir[4];
@@ -445,7 +480,7 @@ private:
     n1081::Comp2254 comp;
     n1081::Gate gate;
     PvUnit pv;
-    SmoothedValue<float> gainSm[4], lineSm, outSm, inSm, drvSm;
+    SmoothedValue<float> gainSm[4], lineSm, outSm, inSm, drvSm, anSm;
     int lastHpf = -1, lastLpf = -1;
     double lastKey[4] { -1, -1, -1, -1 };
     float lastGain[4] { 99, 99, 99, 99 };
@@ -460,6 +495,29 @@ namespace col {
     static const Colour lampOn (0xffffb43c), curve (0xffffc864), vuFace (0xfff1e6c8), cream (0xffd9d4c6), ink (0xff23272b);
 }
 constexpr int kBtnW = 60, kBtnH = 26;     // one size for every push button (same as the EQ's PEAK / HI-Q)
+constexpr int kSmallW = 34;               // ON/OFF and the VU IN / OUT / GR buttons: just as wide as their text
+
+// curve symbols on the EQ shape buttons (as on a console's switch legends)
+static Path shapeIcon (int icon, bool alt, Rectangle<float> r)
+{
+    Path p;
+    const float x0 = r.getX(), x1 = r.getRight(), top = r.getY(), base = r.getBottom(), cx = r.getCentreX(), w = r.getWidth();
+    auto bell = [&] (float half) {                     // half = half-width of the bell
+        p.startNewSubPath (x0, base); p.lineTo (cx - half, base);
+        p.cubicTo (cx - half * 0.45f, base, cx - half * 0.35f, top, cx, top);
+        p.cubicTo (cx + half * 0.35f, top, cx + half * 0.45f, base, cx + half, base); p.lineTo (x1, base);
+    };
+    if (icon == 3) bell (alt ? w * 0.18f : w * 0.48f);                  // mids: wide / sharp
+    else if (alt) bell (w * 0.36f);                                       // LF / HF peak
+    else if (icon == 1) {                                                 // LF shelf
+        p.startNewSubPath (x0, top); p.lineTo (x0 + w * 0.25f, top);
+        p.cubicTo (x0 + w * 0.5f, top, x0 + w * 0.5f, base, x0 + w * 0.75f, base); p.lineTo (x1, base);
+    } else {                                                              // HF shelf
+        p.startNewSubPath (x0, base); p.lineTo (x0 + w * 0.25f, base);
+        p.cubicTo (x0 + w * 0.5f, base, x0 + w * 0.5f, top, x0 + w * 0.75f, top); p.lineTo (x1, top);
+    }
+    return p;
+}
 
 class KnobLnF : public LookAndFeel_V4
 {
@@ -479,12 +537,13 @@ public:
     {
         const auto cap = s.findColour (Slider::rotarySliderFillColourId);
         const bool stepped = s.getProperties()["stepped"];
+        const bool ring = s.getProperties()["ring"], centre = s.getProperties()["centre"];
         auto r = Rectangle<float> ((float) x, (float) y, (float) w, (float) h).reduced (3);
         const float d = jmin (r.getWidth(), r.getHeight());
         r = r.withSizeKeepingCentre (d, d);
         const auto c = r.getCentre();
         const float ang = a0 + pos * (a1 - a0);
-        const int ticks = stepped ? jmin (17, (int) std::round (s.getMaximum() - s.getMinimum()) + 1) : 11;
+        const int ticks = centre ? 0 : stepped ? jmin (17, (int) std::round (s.getMaximum() - s.getMinimum()) + 1) : 11;
         g.setColour (col::dim);
         for (int i = 0; i < ticks; ++i) {
             const float t = a0 + (a1 - a0) * (float) i / (float) jmax (1, ticks - 1);
@@ -498,7 +557,9 @@ public:
         g.setGradientFill (ColourGradient (cap.brighter (0.35f), top.getTopLeft(), cap.darker (0.3f), top.getBottomRight(), false));
         g.fillEllipse (top);
         g.setColour (col::legend);
-        g.drawLine ({ c.getPointOnCircumference (d * 0.08f, ang), c.getPointOnCircumference (body.getWidth() * 0.5f - 1, ang) }, 2.4f);
+        const float rOut = body.getWidth() * 0.5f - 1;
+        if (ring) g.drawLine ({ c.getPointOnCircumference (rOut * 0.74f, ang), c.getPointOnCircumference (rOut, ang) }, 3.0f);   // pointer on the skirt
+        else g.drawLine ({ c.getPointOnCircumference (d * 0.08f, ang), c.getPointOnCircumference (rOut, ang) }, 2.4f);
     }
     void drawButtonBackground (Graphics& g, Button& b, const Colour&, bool over, bool down) override
     {
@@ -520,8 +581,14 @@ public:
     {
         const bool flat = b.getProperties()["flat"];
         g.setColour (flat ? col::legend : col::ink);
-        g.setFont (FontOptions (11.0f, Font::bold));
-        g.drawFittedText (b.getButtonText(), b.getLocalBounds(), Justification::centred, 1);
+        if (const int icon = b.getProperties()["icon"]) {
+            const auto r = b.getLocalBounds().toFloat().reduced (b.getWidth() * 0.24f, b.getHeight() * 0.3f);
+            g.strokePath (shapeIcon (icon, b.getToggleState(), r), PathStrokeType (1.8f, PathStrokeType::curved, PathStrokeType::rounded));
+            return;
+        }
+        const auto text = b.getButtonText();
+        g.setFont (FontOptions (text.length() == 1 ? 15.0f : 11.0f, Font::bold));
+        g.drawFittedText (text, b.getLocalBounds(), Justification::centred, 1);
     }
     void drawComboBox (Graphics& g, int w, int h, bool, int, int, int, int, ComboBox& box) override
     {
@@ -570,6 +637,39 @@ private:
     Point<float> last; double prop = 0.0;
 };
 
+// centre knob of a concentric pair: only the round cap takes the mouse, the ring around it belongs to the outer knob
+class CentreKnob : public FineKnob
+{
+public:
+    CentreKnob() { getProperties().set ("centre", true); setTextBoxStyle (Slider::NoTextBox, false, 0, 0); }
+    bool hitTest (int x, int y) override { const auto c = getLocalBounds().getCentre(); return c.getDistanceFrom ({ x, y }) <= getWidth() / 2 - 3; }
+};
+
+// Q knob that replaces a shape button; double-click closes it again
+class QKnob : public FineKnob
+{
+public:
+    std::function<void()> onClose;
+    void mouseDoubleClick (const MouseEvent&) override { if (onClose) onClose(); }
+};
+
+// shape button: right-click or Ctrl+click asks for the Q knob instead of switching
+class CurveButton : public TextButton
+{
+public:
+    std::function<void()> onSecondary;
+    void mouseDown (const MouseEvent& e) override
+    {
+        secondary = e.mods.isPopupMenu() || e.mods.isCtrlDown();
+        if (secondary) { if (onSecondary) onSecondary(); return; }
+        TextButton::mouseDown (e);
+    }
+    void mouseUp (const MouseEvent& e) override { if (secondary) { secondary = false; return; } TextButton::mouseUp (e); }
+    void mouseDrag (const MouseEvent& e) override { if (! secondary) TextButton::mouseDrag (e); }
+private:
+    bool secondary = false;
+};
+
 struct Caption { String text; Rectangle<int> r; };
 
 // shared base for the three module panels
@@ -599,6 +699,13 @@ protected:
         addAndMakeVisible (b);
         buttonAtt.push_back (std::make_unique<AudioProcessorValueTreeState::ButtonAttachment> (proc.apvts, id, b));
     }
+    // IN switch shown as ON / OFF, only as wide as its text
+    void onOff (TextButton& b, const char* id)
+    {
+        button (b, id, "OFF");
+        b.onStateChange = [&b] { const String t = b.getToggleState() ? "ON" : "OFF"; if (b.getButtonText() != t) b.setButtonText (t); };
+        b.onStateChange();
+    }
     void arrows (int x, int y)
     {
         for (int i = 0; i < 2; ++i) {
@@ -616,6 +723,15 @@ protected:
         s.setBounds (cx - colW / 2, y, colW, size + 18);
         if (cap.isNotEmpty()) captions.push_back ({ cap, { cx - colW / 2, y + size + 18, colW, 12 } });
     }
+    // concentric pair: outer ring + centre cap on one spot; one read-only readout "outer / inner" below
+    void putConcentric (Slider& outer, Slider& inner, const String& cap, int cx, int y, int size, int colW)
+    {
+        outer.setTextBoxStyle (Slider::TextBoxBelow, true, colW, 16);
+        outer.setBounds (cx - colW / 2, y, colW, size + 18);
+        const int d = (int) std::round (size * 0.58f);
+        inner.setBounds (cx - d / 2, y + size / 2 - d / 2, d, d);
+        if (cap.isNotEmpty()) captions.push_back ({ cap, { cx - colW / 2, y + size + 18, colW, 12 } });
+    }
     void paintPanel (Graphics& g, Colour top, Colour bottom, const String& title, bool centredTitles = false)
     {
         g.setGradientFill (ColourGradient (top, 0, 0, bottom, 0, (float) getHeight(), false));
@@ -625,7 +741,7 @@ protected:
             g.setColour (Colour (0xff9aa1a6)); g.fillEllipse (Rectangle<float> (9, 9).withCentre (pt));
             g.setColour (Colour (0xff4a4f53)); g.drawLine (pt.x - 3, pt.y, pt.x + 3, pt.y, 1.3f);
         }
-        if (title.isNotEmpty()) { g.setColour (col::legend); g.setFont (FontOptions (20.f, Font::bold)); g.drawText (title, 14, 10, 90, 26, Justification::left); }
+        if (title.isNotEmpty()) { g.setColour (col::legend); g.setFont (FontOptions (20.f, Font::bold)); g.drawText (title, titleX, 10, 110, 26, Justification::left); }
         for (auto& s : rows) {
             g.setColour (Colours::black.withAlpha (0.17f)); g.fillRoundedRectangle (s.r.toFloat(), 6);
             g.setColour (col::legend); g.setFont (FontOptions (centredTitles ? 12.f : 11.f, Font::bold));
@@ -637,6 +753,7 @@ protected:
     }
 
     N1081Processor& proc;
+    int titleX = 14;
     TextButton mv[2];
     std::vector<std::unique_ptr<AudioProcessorValueTreeState::SliderAttachment>> attachments;
     std::vector<std::unique_ptr<AudioProcessorValueTreeState::ButtonAttachment>> buttonAtt;
@@ -854,6 +971,7 @@ class EqPanel : public ModulePanel
 public:
     static constexpr int kOutX = 704, kOutW = 102;           // OUTPUT column: the header tools use the same x and width
     static constexpr int kW = kOutX + kOutW + 14, kH = 446;
+    static constexpr int kHc = 340;                          // height with concentric knobs (Settings > Layout)
     EqPanel (N1081Processor& p, KnobLnF& l) : ModulePanel (p, l), graph (p)
     {
         addAndMakeVisible (graph);
@@ -866,61 +984,135 @@ public:
         for (int b = 0; b < 4; ++b) {
             knob (freq[b], ids::freq[b], caps[b], true);
             knob (gain[b], ids::gain[b], col::capBlack.brighter (0.25f), false, db);
-            button (alt[b], ids::alt[b], b == 0 || b == 3 ? "PEAK" : "HI-Q");
+            button (alt[b], ids::alt[b], {});
+            alt[b].getProperties().set ("icon", b == 0 ? 1 : b == 3 ? 2 : 3);
+            alt[b].setTooltip (String (b == 0 || b == 3 ? "Shelf / peak" : "Wide / sharp (Hi-Q)") + ".  Right-click or Ctrl+click: Q knob");
             // pressing the button always lands on the hardware curve for that setting
-            alt[b].onClick = [this, b] { if (auto* q = proc.apvts.getParameter (ids::q[b])) { q->beginChangeGesture(); q->setValueNotifyingHost (q->convertTo0to1 (1.0f)); q->endChangeGesture(); } };
+            alt[b].onClick = [this, b] { setQ (b, 1.0f); };
+            alt[b].onSecondary = [this, b] { openQ (b); };
+            knob (qk[b], ids::q[b], col::capGrey, false, [this, b] (double v) {
+                auto prm = proc.currentParams(); prm.qMul[b] = v;
+                const auto sp = n1081::bandSpec (prm, b);
+                return sp.kind == n1081::Kind::Peak ? "Q " + String (sp.Q, 2) : String (v, 2) + "x"; });
+            qk[b].setDoubleClickReturnValue (false, 1.0);
+            qk[b].setTooltip ("Q range.  Double-click: back to the 1081 curve (right-click the button again to get this setting back)");
+            qk[b].onClose = [this, b] { closeQ (b); };
         }
         knob (out, ids::out, col::capGrey, false, db);
         button (eqIn, ids::eqIn, "EQ");
-        button (phase, ids::phase, "PH");
+        button (phase, ids::phase, String (CharPointer_UTF8 ("\xc3\x98")));
+        phase.setTooltip ("Phase (polarity) invert");
+
+        // concentric pairs for the compact layout: frequency = outer ring, gain = centre cap; HPF ring + LPF cap
+        concentric (cHpf, cLpf, ids::hpf, ids::lpf, col::capGrey, true, {});
+        for (int b = 0; b < 4; ++b) concentric (cFreq[b], cGain[b], ids::freq[b], ids::gain[b], caps[b], false, db);
+
+        knob (analog, ids::analog, col::capGrey, false, [] (double v) { return "ANALOG " + signedDb (v, 0); });
+        analog.setTextBoxStyle (Slider::NoTextBox, false, 0, 0);
+        analog.setPopupDisplayEnabled (true, true, nullptr, 1200);
+        analog.setTooltip ("ANALOG: 0 = the circuit as modelled.  Down to -50 cleaner (no harmonics), up to +50 more colour.  "
+                           "Level compensated.  Double-click: 0");
         arrows (26, 104);
         setSize (kW, kH);
     }
     Rectangle<int> toolArea() const { return { kOutX, 14, kOutW, 112 }; }
+    void refresh() { for (int b = 0; b < 4; ++b) qk[b].updateText(); resized(); repaint(); }
 
     void paint (Graphics& g) override
     {
         paintPanel (g, col::panel.brighter (0.06f), col::panelDark, {}, true);
-        g.setColour (col::legend); g.setFont (FontOptions (30.f, Font::bold)); g.drawText ("1081", 26, 22, 120, 34, Justification::left);
+        g.setColour (col::legend); g.setFont (FontOptions (30.f, Font::bold)); g.drawText ("1081+", 26, 22, 120, 34, Justification::left);
         g.setFont (FontOptions (11.f)); g.setColour (col::dim);
         g.drawText ("CHANNEL AMPLIFIER", 26, 60, 130, 14, Justification::left);
         g.drawText ("CIRCUIT MODEL", 26, 76, 130, 14, Justification::left);
+        g.setFont (FontOptions (9.5f, Font::bold));
+        g.drawText ("ANALOG", 74, 102, 38, 12, Justification::right);
     }
 
     void resized() override
     {
         rows.clear(); captions.clear();
+        const bool cmp = proc.compactEq;
+        for (auto* c : std::initializer_list<Component*> { &hpf, &lpf, &freq[0], &freq[1], &freq[2], &freq[3], &gain[0], &gain[1], &gain[2], &gain[3] }) c->setVisible (! cmp);
+        for (auto* c : std::initializer_list<Component*> { &cHpf, &cLpf, &cFreq[0], &cFreq[1], &cFreq[2], &cFreq[3], &cGain[0], &cGain[1], &cGain[2], &cGain[3] }) c->setVisible (cmp);
         graph.setBounds (156, 14, kOutX - 156 - 8, 112);
-        const int top = 138, h = kH - top - 12;
+        analog.setBounds (114, 90, 36, 36);
+        const int top = 138, h = getHeight() - top - 12;
+        const int off = cmp ? jmax (0, (h - (kHc - top - 12)) / 2) : 0;     // compact knobs centred if the strip is taller
+        const int btnY = cmp ? h - 32 : 228;                                  // all shape / phase / EQ buttons on one line
         int x = 14;
         auto section = [&] (const String& t, int w) { Rectangle<int> r (x, top, w, h); rows.push_back ({ t, r }); x += w + 6; return r; };
-        auto btn = [&] (Button& b, const Rectangle<int>& r, const String& cap) {
-            b.setBounds (r.getCentreX() - kBtnW / 2, r.getY() + 228, kBtnW, kBtnH);
-            captions.push_back ({ cap, { r.getX(), r.getY() + 256, r.getWidth(), 12 } });
-        };
+        auto btn = [&] (Button& b, const Rectangle<int>& r) { b.setBounds (r.getCentreX() - kBtnW / 2, r.getY() + btnY, kBtnW, kBtnH); };
         auto r = section ("INPUT", 102);
-        put (inGain, "TRIM (CLEAN)", r.getCentreX(), r.getY() + 22, 54, r.getWidth() - 8);
-        put (line, "LINE GAIN", r.getCentreX(), r.getY() + 112, 70, r.getWidth() - 8);
-        btn (phase, r, "PHASE");
+        if (cmp) { put (inGain, {}, r.getCentreX(), r.getY() + 18 + off, 40, r.getWidth() - 8); put (line, "GAIN", r.getCentreX(), r.getY() + 78 + off, 50, r.getWidth() - 8); }
+        else     { put (inGain, {}, r.getCentreX(), r.getY() + 22, 54, r.getWidth() - 8);       put (line, "GAIN", r.getCentreX(), r.getY() + 112, 70, r.getWidth() - 8); }
+        btn (phase, r);
         r = section ("FILTERS", 96);
-        put (hpf, "HIGH PASS", r.getCentreX(), r.getY() + 26, 60, r.getWidth() - 8);
-        put (lpf, "LOW PASS", r.getCentreX(), r.getY() + 136, 60, r.getWidth() - 8);
+        if (cmp) putConcentric (cHpf, cLpf, "HP / LP", r.getCentreX(), r.getY() + 24 + off, 80, r.getWidth() - 4);
+        else {
+            put (hpf, "HIGH PASS", r.getCentreX(), r.getY() + 26, 60, r.getWidth() - 8);
+            put (lpf, "LOW PASS", r.getCentreX(), r.getY() + 136, 60, r.getWidth() - 8);
+        }
         const char* titles[4] = { "LF", "LOW MID", "HIGH MID", "HF" };
         for (int b = 0; b < 4; ++b) {
             r = section (titles[b], 114);
-            put (freq[b], {}, r.getCentreX(), r.getY() + 20, 80, r.getWidth() - 8);
-            put (gain[b], {}, r.getCentreX(), r.getY() + 122, 80, r.getWidth() - 8);
-            btn (alt[b], r, b == 0 || b == 3 ? "SHELF / PEAK" : "WIDE / HI-Q");
+            if (cmp) putConcentric (cFreq[b], cGain[b], {}, r.getCentreX(), r.getY() + 20 + off, 96, r.getWidth() - 4);
+            else {
+                put (freq[b], {}, r.getCentreX(), r.getY() + 20, 80, r.getWidth() - 8);
+                put (gain[b], {}, r.getCentreX(), r.getY() + 122, 80, r.getWidth() - 8);
+            }
+            btn (alt[b], r);
+            qk[b].setTextBoxStyle (Slider::TextBoxRight, true, 52, 18);
+            qk[b].setBounds (r.getCentreX() - 42, r.getY() + btnY - 1, 84, 28);
+            alt[b].setVisible (! proc.qOpen[b]); qk[b].setVisible (proc.qOpen[b]);
         }
         r = Rectangle<int> (kOutX, top, kOutW, h); rows.push_back ({ "OUTPUT", r });
-        put (out, "TRIM", r.getCentreX(), r.getY() + 26, 64, r.getWidth() - 8);
-        btn (eqIn, r, "EQ IN");
+        put (out, "TRIM", r.getCentreX(), r.getY() + (cmp ? 22 + off : 26), 64, r.getWidth() - 8);
+        btn (eqIn, r);
+        eqIn.setButtonText (cmp ? "EQ IN" : "EQ");
+        if (! cmp) captions.push_back ({ "EQ IN", { r.getX(), r.getY() + 256, r.getWidth(), 12 } });
     }
 
 private:
+    void concentric (FineKnob& outer, CentreKnob& inner, const char* idO, const char* idI, Colour cap, bool innerStepped,
+                     std::function<String (double)> innerText)
+    {
+        knob (outer, idO, cap, true);
+        knob (inner, idI, innerStepped ? col::capGrey.darker (0.25f) : col::capBlack.brighter (0.25f), innerStepped, innerText);
+        outer.getProperties().set ("ring", true);
+        inner.setTextBoxStyle (Slider::NoTextBox, false, 0, 0);
+        auto* po = proc.apvts.getParameter (idO); auto* pi = proc.apvts.getParameter (idI);
+        outer.textFromValueFunction = [po, pi, innerText] (double v) {
+            const double iv = pi->convertFrom0to1 (pi->getValue());
+            return po->getText (po->convertTo0to1 ((float) v), 0) + " / " + (innerText ? innerText (iv) : pi->getText (pi->getValue(), 0)); };
+        inner.onValueChange = [&outer] { outer.updateText(); };
+        outer.updateText();
+        inner.toFront (false);
+    }
+    RangedAudioParameter* qParam (int b) const { return proc.apvts.getParameter (ids::q[b]); }
+    float qNow (int b) const { auto* q = qParam (b); return q->convertFrom0to1 (q->getValue()); }
+    void setQ (int b, float v) { auto* q = qParam (b); q->beginChangeGesture(); q->setValueNotifyingHost (q->convertTo0to1 (v)); q->endChangeGesture(); }
+    void openQ (int b)
+    {
+        if (proc.qOpen[b]) return;
+        proc.qOpen[b] = true;
+        if (std::abs (qNow (b) - 1.0f) < 0.005f && std::abs (proc.qLast[b] - 1.0f) > 0.005f) setQ (b, proc.qLast[b]);   // the user's last range
+        qk[b].updateText(); resized(); repaint();
+    }
+    void closeQ (int b)
+    {
+        if (std::abs (qNow (b) - 1.0f) > 0.005f) proc.qLast[b] = qNow (b);       // remembered for the next right-click
+        setQ (b, 1.0f);
+        proc.qOpen[b] = false;
+        resized(); repaint();
+    }
+
     Graph graph;
-    FineKnob inGain, line, hpf, lpf, out, freq[4], gain[4];
-    TextButton alt[4], eqIn, phase;
+    FineKnob inGain, line, hpf, lpf, out, freq[4], gain[4], analog, cHpf, cFreq[4];
+    CentreKnob cLpf, cGain[4];
+    QKnob qk[4];
+    CurveButton alt[4];
+    TextButton eqIn, phase;
 };
 
 //==============================================================================
@@ -945,9 +1137,10 @@ public:
         typeAtt = std::make_unique<AudioProcessorValueTreeState::ComboBoxAttachment> (proc.apvts, ids::cModel, type);
         type.onChange = [this] { layoutModel(); };
 
-        button (compIn, ids::cIn, "IN");
+        onOff (compIn, ids::cIn);
+        titleX = 14 + kSmallW + 8;
         addAndMakeVisible (vu);
-        const char* vuNames[3] = { "INPUT", "OUTPUT", "GR" };
+        const char* vuNames[3] = { "IN", "OUT", "GR" };
         for (int i = 0; i < 3; ++i) {
             vuBtn[i].setButtonText (vuNames[i]); vuBtn[i].setRadioGroupId (77); vuBtn[i].setClickingTogglesState (true);
             vuBtn[i].setToggleState (proc.vuMode == i, dontSendNotification);
@@ -973,11 +1166,12 @@ public:
         knob (drive, ids::cDrive, col::capRed, false, db);
         knob (sc, ids::cSc, col::capGrey, true);
         knob (mix, ids::cMix, col::capGrey, false, [] (double v) { return String ((int) std::round (v)) + " %"; });
-        arrows (100, 16);
+        arrows (kW - 14 - 108 - 54, 16);
         setSize (kW, EqPanel::kH);
         layoutModel();
     }
     void tick() { vu.tick(); }
+    void syncVu() { for (int i = 0; i < 3; ++i) vuBtn[i].setToggleState (proc.vuMode == i, dontSendNotification); }
 
     void paint (Graphics& g) override { paintPanel (g, col::comp.brighter (0.05f), col::compDark, is2254() ? "2254" : "VELVET"); }
 
@@ -992,10 +1186,10 @@ public:
     void resized() override
     {
         rows.clear(); captions.clear();
-        presets.setBounds (152, 13, 108, kBtnH);
-        compIn.setBounds (kW - 14 - kBtnW, 13, kBtnW, kBtnH);
-        vu.setBounds (14, 46, 228, 90);
-        for (int i = 0; i < 3; ++i) vuBtn[i].setBounds (kW - 14 - kBtnW, 46 + i * 32, kBtnW, kBtnH);
+        presets.setBounds (kW - 14 - 108, 13, 108, kBtnH);
+        compIn.setBounds (14, 13, kSmallW, kBtnH);                // where the title started; the title moved right
+        vu.setBounds (14, 46, kW - 28 - kSmallW - 8, 90);         // the short VU buttons give the meter more width
+        for (int i = 0; i < 3; ++i) vuBtn[i].setBounds (kW - 14 - kSmallW, 46 + i * 32, kSmallW, kBtnH);
         constexpr int K = 52;                                   // one knob size for the whole module
         const int c[4] = { 50, 126, 202, 278 };
         if (is2254()) {
@@ -1064,7 +1258,8 @@ public:
     static constexpr int kW = 196;
     GatePanel (N1081Processor& p, KnobLnF& l) : ModulePanel (p, l)
     {
-        button (gateIn, ids::gIn, "IN");
+        onOff (gateIn, ids::gIn);
+        titleX = 14 + kSmallW + 8;
         knob (thr, ids::gThr, col::capBlue, false, [] (double v) { return String (v, 1) + " dB"; });
         knob (range, ids::gRange, col::capGrey, false, [] (double v) { return String (v, 1) + " dB"; });
         knob (atk, ids::gAtk, col::capGrey, false, msText);
@@ -1091,7 +1286,7 @@ public:
     void resized() override
     {
         rows.clear(); captions.clear();
-        gateIn.setBounds (kW - 14 - kBtnW, 13, kBtnW, kBtnH);
+        gateIn.setBounds (14, 13, kSmallW, kBtnH);
         Rectangle<int> a (10, 94, kW - 20, 342); rows.push_back ({ "GATE / EXPANDER", a });
         constexpr int K = 52;
         const int c1 = 58, c2 = 138;
@@ -1126,6 +1321,7 @@ public:
         compBtn.onClick = [this] { proc.compOpen = ! proc.compOpen; applySize(); };
         gateBtn.onClick = [this] { proc.gateOpen = ! proc.gateOpen; applySize(); };
         scale = jlimit (0.6f, 2.0f, proc.uiScale);
+        lastState = proc.uiStateVersion.load();
         setResizable (true, true);
         applySize();
         ready = true;
@@ -1147,7 +1343,7 @@ public:
             c->setVisible (vis);
             if (! vis) continue;
             if (order[i] == ModEq) eqX = x;
-            c->setBounds (x, 0, c->getWidth(), EqPanel::kH);
+            c->setBounds (x, 0, c->getWidth(), baseHeight());
             c->setTransform (t);
             x += c->getWidth();
         }
@@ -1166,6 +1362,8 @@ public:
 
 private:
     int baseWidth() const { return EqPanel::kW + (proc.compOpen ? CompPanel::kW : 0) + (proc.gateOpen ? GatePanel::kW : 0); }
+    // concentric layout makes the plugin shorter while only the EQ is shown (comp / gate still need the full height)
+    int baseHeight() const { return proc.compactEq && ! proc.compOpen && ! proc.gateOpen ? EqPanel::kHc : EqPanel::kH; }
     void move (int module, int dir)
     {
         int o[3]; proc.currentOrder (o);
@@ -1180,12 +1378,12 @@ private:
     }
     void applySize()
     {
-        const int bw = baseWidth();
+        const int bw = baseWidth(), bh = baseHeight();
         if (auto* c = getConstrainer()) {
-            c->setFixedAspectRatio ((double) bw / EqPanel::kH);
-            c->setSizeLimits ((int) (bw * 0.6f), (int) (EqPanel::kH * 0.6f), bw * 2, EqPanel::kH * 2);
+            c->setFixedAspectRatio ((double) bw / bh);
+            c->setSizeLimits ((int) (bw * 0.6f), (int) (bh * 0.6f), bw * 2, bh * 2);
         }
-        setSize ((int) std::round (bw * scale), (int) std::round (EqPanel::kH * scale));
+        setSize ((int) std::round (bw * scale), (int) std::round (bh * scale));
         resized();
         timerCallback();
     }
@@ -1209,12 +1407,17 @@ private:
         m.addSectionHeader ("FILTERS");
         m.addItem (20, "Low latency", cur != 1 && cur != 4, ! lin && cur != 4);
         m.addItem (21, "Linear phase  (64 samples latency)", cur != 1, lin || cur == 4);
+        m.addSectionHeader ("LAYOUT");
+        m.addItem (40, "Classic knobs", true, ! proc.compactEq);
+        m.addItem (41, "Concentric knobs  (frequency ring + gain cap, smaller plugin)", true, proc.compactEq);
         m.addSeparator();
         m.addItem (30, "Running at " + String (proc.activeFactor.load()) + "x, 64-bit processing", false, false);
-        m.showMenuAsync (PopupMenu::Options().withTargetComponent (&settings), [os, filt] (int r) {
+        Component::SafePointer<N1081Editor> safe (this);
+        m.showMenuAsync (PopupMenu::Options().withTargetComponent (&settings), [os, filt, safe] (int r) {
             if (r >= 1 && r <= 6) os->setValueNotifyingHost (os->convertTo0to1 ((float) (r - 1)));
             if (r == 20) filt->setValueNotifyingHost (0.0f);
             if (r == 21) filt->setValueNotifyingHost (1.0f);
+            if ((r == 40 || r == 41) && safe != nullptr) { safe->proc.compactEq = r == 41; safe->eq.refresh(); safe->applySize(); }
         });
     }
     void timerCallback() override
@@ -1229,6 +1432,8 @@ private:
         label (gateBtn, "GATE", proc.apvts.getRawParameterValue (ids::gIn)->load() > 0.5f, proc.gateOpen);
         const int ord = (int) proc.apvts.getRawParameterValue (ids::order)->load();
         if (ord != lastOrder) { lastOrder = ord; resized(); }
+        const int st = proc.uiStateVersion.load();
+        if (st != lastState && ready) { lastState = st; scale = jlimit (0.6f, 2.0f, proc.uiScale); comp.syncVu(); eq.refresh(); applySize(); }
     }
 
     N1081Processor& proc;
@@ -1237,7 +1442,8 @@ private:
     CompPanel comp;
     GatePanel gate;
     TextButton zoomOut, zoomIn, zoomPct, settings, compBtn, gateBtn;
-    float scale = 1.0f; bool ready = false; int lastOrder = -1;
+    TooltipWindow tips { this, 700 };
+    float scale = 1.0f; bool ready = false; int lastOrder = -1, lastState = 0;
 };
 
 AudioProcessorEditor* N1081Processor::createEditor() { return new N1081Editor (*this); }
