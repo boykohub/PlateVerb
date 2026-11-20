@@ -869,10 +869,76 @@ struct MBandAlgo : AlgoBase {
 };
 
 // ============================================================================ one 480L machine
+
+// ---------------------------------------------------------------- Surround/HD Cart (banks 22-26)
+// Two separately levelled parts, as the cart's manual describes: a randomly varying early-reflection pattern in the
+// 20-50 ms range (ELV) and a low-coloration late reverb (RLV). Twelve reflections, half of them "rear": the rear ones get
+// RDL extra delay, the ELR roll-off and the ELRA attenuation. Surround folds the rear outputs into the stereo pair at
+// -3 dB; HD sums them at full level (the two-channel algorithm sums all four outputs, twice the echo density).
+// LFB adds a delayed (LBD) low-frequency boost below LBF to the reverb; HFC is a 6 dB/oct low-pass on the reverb outputs.
+struct HDAlgo : AlgoBase {
+    static constexpr int kT = 12;
+    static constexpr float kMs[kT]  = { 20.7f, 23.3f, 26.1f, 28.9f, 31.7f, 34.3f, 37.9f, 40.3f, 43.1f, 45.7f, 48.3f, 50.0f };
+    static constexpr float kG[kT]   = { 1.0f, 0.86f, 0.92f, 0.78f, 0.82f, 0.70f, 0.66f, 0.71f, 0.60f, 0.56f, 0.52f, 0.47f };
+    static constexpr int   kSide[kT] = { 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1 };
+    static constexpr bool  kRear[kT] = { false, false, true, false, true, true, false, true, false, true, true, false };
+    pv::TankAlgo tank; Line pdL, pdR, erIn[2], lbL, lbR; OnePole hfc[2], elr[2], lbf[2]; RandLfo lfo[kT];
+    float tapS[kT] = {}, wanS = 0, rpdS = 1, lbdS = 1, elv = 1, rlv = 1, lfbG = 0, rearG = 0.5f, fold = 0.707f, trim = 1;
+    void prepare (float sr) override {
+        fs = sr; tank.init (4, fs); tank.fs = fs;
+        pdL.init ((int) (0.21f * fs)); pdR.init ((int) (0.21f * fs)); lbL.init ((int) (0.21f * fs)); lbR.init ((int) (0.21f * fs));
+        for (auto& l : erIn) l.init ((int) (0.40f * fs));
+        for (int i = 0; i < kT; ++i) lfo[i].init ((uint32_t) (101 + i * 13));
+    }
+    void reset() override {
+        tank.clear(); pdL.clear(); pdR.clear(); lbL.clear(); lbR.clear(); for (auto& l : erIn) l.clear();
+        for (int c = 0; c < 2; ++c) { hfc[c].reset(); elr[c].reset(); lbf[c].reset(); }
+    }
+    void set (const float* v, int) override {
+        elv = lvGain (v[0]); rlv = lvGain (v[1]);
+        const float rt = v[2], spr = v[3], siz = v[10];
+        for (auto& h : hfc) h.setCut (fs, v[4] >= 21000.0f ? 0.45f * fs : v[4]);
+        lfbG = dbToGain (6.0f * v[5] / 512.0f) - 1.0f;
+        const float size = clampf (0.5f + siz / 31.0f * 0.45f, 0.5f, 1.4f);
+        tank.update (rt, v[8] >= 21000.0f ? 20000.0f : v[8], size, v[6], 1.0f, clampf (3.0f + spr / 255.0f * 200.0f, 3, 230), v[14] / 99.0f,
+                     pv::surfaceEffect (0, 0, 0.0f, 3.0f * size), 0.0f, std::max (0.05f, v[9] / 50.0f), v[7]);
+        rpdS = msToS (v[11], fs);
+        lbdS = msToS (v[12], fs);
+        for (auto& f : lbf) f.setCut (fs, v[13]);
+        const float sc = clampf (siz / 31.0f, 0.3f, 2.0f), eld = v[18] * 0.001f * fs, rdl = v[22] * 0.001f * fs;
+        for (int i = 0; i < kT; ++i) tapS[i] = std::max (1.0f, kMs[i] * sc * 0.001f * fs + eld + (kRear[i] ? rdl : 0.0f));
+        wanS = 0.0004f * fs * v[19] / 50.0f;                              // early spin: up to about +-0.8 ms of movement
+        for (int i = 0; i < kT; ++i) lfo[i].setRate (fs, std::max (0.05f, v[19] / 40.0f) * (0.8f + 0.04f * (float) i));
+        for (auto& e : elr) e.setCut (fs, v[20] >= 21000.0f ? 0.45f * fs : v[20]);
+        const bool hd = v[23] > 0.5f;
+        rearG = dbToGain (v[21]); fold = hd ? 1.0f : 0.707f;
+        trim = dbToGain (tankTrimDb (rt));
+    }
+    void process (float& L, float& R, const Ctx&) override {
+        const float xL = L, xR = R;
+        erIn[0].push (0.8f * xL + 0.2f * xR); erIn[1].push (0.8f * xR + 0.2f * xL);
+        float f[2] = {}, r[2] = {};
+        for (int i = 0; i < kT; ++i) {
+            const int c = kSide[i];
+            const float t = erIn[c].read (tapS[i] + wanS * (1.0f + lfo[i].next())) * kG[i];
+            if (kRear[i]) r[c] += t; else f[c] += t;
+        }
+        const float eg = elv * 0.42f;
+        const float eL = (f[0] + elr[0].lp (r[0]) * rearG * fold) * eg, eR = (f[1] + elr[1].lp (r[1]) * rearG * fold) * eg;
+        const float pl = pdL.read (rpdS), pr = pdR.read (rpdS); pdL.push (xL); pdR.push (xR);
+        float oL, oR; tank.process (pl, pr, 0.5f, 0.0f, oL, oR);
+        oL *= trim; oR *= trim;
+        const float bL = lbL.read (lbdS), bR = lbR.read (lbdS); lbL.push (lbf[0].lp (oL)); lbR.push (lbf[1].lp (oR));
+        oL += bL * lfbG; oR += bR * lfbG;
+        L = eL + hfc[0].lp (oL) * rlv; R = eR + hfc[1].lp (oR) * rlv;
+    }
+};
+
 inline std::unique_ptr<AlgoBase> makeAlgo (int a) {
     switch (a) {
         case aRev6: case aRev2: case aRHall: return std::make_unique<ReverbAlgo> (a);
         case aAmb: return std::make_unique<AmbienceAlgo>();
+        case aHD: return std::make_unique<HDAlgo>();
         case aFx: return std::make_unique<EffectsAlgo>();
         case aTwin: return std::make_unique<TwinAlgo>();
         case aSamp: return std::make_unique<SamplerAlgo>();

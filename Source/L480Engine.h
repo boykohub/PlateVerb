@@ -1,5 +1,5 @@
 // Flexiverb 480 engine: two 480L machines (A, B) in the 480L's configurations, then the drawer
-// (EQ, compressor, delay), the 480L hardware model and the output stage. No JUCE dependency.
+// (EQ, compressor, delay: now on the LARC's CTRL pages), the 480L hardware model and the output stage. No JUCE dependency.
 #pragma once
 #include "L480Dsp.h"
 
@@ -64,6 +64,8 @@ public:
             if (hwInOn) hwIn.input (hL, hR, p.hw);
             Ctx c; c.dryL = xL; c.dryR = xR;
             float yL, yR;
+            {
+            pv::ScopedLineQuant mem (p.hw.on ? 18 : 0);    // the 480L's 18-bit audio memory, machines only
             switch (p.config) {
                 case kCascade: {
                     float aL = hL, aR = hR; mach[0].process (aL, aR, c);
@@ -91,6 +93,7 @@ public:
                     if (hwOutOn) hwA.output (aL, aR, p.hw);
                     yL = aL; yR = aR; break;
                 }
+            }
             }
             // drawer: EQ and compressor on the 480L's output
             if (p.eqOn) for (int b = 0; b < 4; ++b) { yL = eq[0][b].process (yL); yR = eq[1][b].process (yR); }

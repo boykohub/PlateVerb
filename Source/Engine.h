@@ -24,11 +24,26 @@ inline float dbToGain (float db) { return std::pow (10.0f, db * 0.05f); }
 inline float clampf (float x, float a, float b) { return std::min (b, std::max (a, x)); }
 
 // ---------------------------------------------------------------- building blocks
+// Word length of delay memory. 0 = float (the default, used by every plugin except where an engine sets it).
+// The 480L's audio memory (HSP boards, 4464 DRAMs) stores 18-bit words, so Flexiverb sets 18 bits around its
+// machines while the hardware model is on: every delay-line write is rounded to 1/131072 of full scale.
+struct LineQuant { float step = 0.0f, inv = 0.0f; };
+inline LineQuant& lineQuant() { static thread_local LineQuant q; return q; }
+struct ScopedLineQuant {
+    LineQuant saved;
+    explicit ScopedLineQuant (int bits) : saved (lineQuant()) { auto& q = lineQuant(); if (bits > 0) { q.inv = (float) (1 << (bits - 1)); q.step = 1.0f / q.inv; } else q = {}; }
+    ~ScopedLineQuant() { lineQuant() = saved; }
+};
+
 struct Line {
     std::vector<float> b; int mask = 0, w = 0;
     void init (int maxLen) { int n = 1; while (n < maxLen + 8) n <<= 1; b.assign ((size_t) n, 0.0f); mask = n - 1; w = 0; }
     void clear() { std::fill (b.begin(), b.end(), 0.0f); w = 0; }
-    inline void push (float x) { b[(size_t) w] = x; w = (w + 1) & mask; }
+    inline void push (float x) {
+        const auto& q = lineQuant();
+        if (q.step > 0.0f) x = std::nearbyint (x * q.inv) * q.step;
+        b[(size_t) w] = x; w = (w + 1) & mask;
+    }
     // zero only the n most recent samples (what can still be read at the current rate), not the whole buffer
     void clearRange (int start, int n) {          // zero n samples starting at ring index 'start'
         const int size = (int) b.size();
@@ -776,8 +791,22 @@ struct HwParams {
 };
 
 // one stereo analog input (with its A/D), or one stereo analog output (D/A onwards)
+// first-order high-pass (a coupling capacitor into its load)
+struct CouplingHp {
+    float a = 1, x1 = 0, y1 = 0;
+    void set (float fs, float f) { a = 1.0f / (1.0f + 2.0f * kPi * f / fs); }
+    void reset() { x1 = y1 = 0; }
+    inline float process (float x) { y1 = a * (y1 + x - x1); x1 = x; return y1; }
+};
+
+// Analog paths as drawn in the 480L motherboard schematics (060-04377 rev 7):
+//  in:  balanced LM833 receiver -> 9-pole 20 kHz LPF module -> 0.68 uF / 33.2k coupling (7 Hz) -> second 0.68 uF
+//       coupling into the A/D buffer (7 Hz) -> sample-and-hold -> PCM53 successive-approximation A/D with gain ranging
+//  out: PCM53 + 2 extra LSBs (18 bit) -> 5534 I/V with 4.22k/510 pF (74 kHz pole) -> SD5000 deglitcher (hold)
+//       -> LM833 2-pole low-pass (~31 kHz) -> 9-pole 20 kHz LPF module -> LLA5200 line driver -> optional transformer
 struct HwPath {
-    float fs = 48000, baseFs = 48000; LowPass9 lpf; Biquad zoh[2]; Transformer xf; uint32_t seed = 777u;
+    float fs = 48000, baseFs = 48000; LowPass9 lpf; Biquad zoh[2], post[2]; OnePole i2v[2]; CouplingHp cpl[2][2];
+    Transformer xf; uint32_t seed = 777u; bool postReal = false;
     bool xfReady = false;
     void prepare (float internalFs, float hostFs) {
         fs = internalFs; baseFs = hostFs;
@@ -786,22 +815,34 @@ struct HwPath {
         // zero-order hold droop of the deglitcher at the hardware rate (sin x / x): about -3.9 dB at Nyquist,
         // -1.6 dB at 15 kHz (44.1 kHz); a high shelf follows that curve closely up to 20 kHz
         for (int c = 0; c < 2; ++c) zoh[c].highShelf (fs, 0.36f * baseFs, -3.9f, 0.55f);
+        // post-deglitch filters (31 kHz 2-pole + 74 kHz pole): about -1 dB at 20 kHz, -0.4 dB at 15 kHz.
+        // At high host rates they are run as drawn; at 44.1/48 kHz they lie above Nyquist, so a shelf gives their in-band droop.
+        postReal = fs > 88000.0f;
+        for (int c = 0; c < 2; ++c)
+        {
+            if (postReal) { post[c].lowpass (fs, 31000.0f, 0.707f); i2v[c].setCut (fs, 74000.0f); }
+            else post[c].highShelf (fs, 0.42f * fs, -1.0f, 0.6f);
+            for (auto& k : cpl[c]) k.set (fs, 7.0f);
+        }
         xf.fs = fs; xf.set (2, 60.0f, 0.15f); xf.clear(); xfReady = true;     // Jensen-style, nearly clean
         reset();
     }
-    void reset() { lpf.reset(); for (auto& b : zoh) b.reset(); xf.clear(); }
+    void reset() { lpf.reset(); for (auto& b : zoh) b.reset(); for (auto& b : post) b.reset(); for (auto& o : i2v) o.reset(); for (auto& c : cpl) for (auto& k : c) k.reset(); xf.clear(); }
     inline float rnd() { seed = seed * 1664525u + 1013904223u; return (float) (seed >> 8) / 8388608.0f - 1.0f; }
     // analog in -> A/D
     inline void input (float& L, float& R, const HwParams& h) {
         if (h.xfIn) { L = xf.process (0, L); R = xf.process (1, R); }
         L = lpf.process (0, railClip (L)); R = lpf.process (1, railClip (R));
+        L = cpl[0][1].process (cpl[0][0].process (L)); R = cpl[1][1].process (cpl[1][0].process (R));
         L = adc18 (L); R = adc18 (R);
     }
     // D/A -> analog out
     inline void output (float& L, float& R, const HwParams& h) {
         if (h.noise) { const float n = 1.3e-5f; L += n * (rnd() + rnd()); R += n * (rnd() + rnd()); }   // about -98 dBFS
         L = dac18 (L); R = dac18 (R);
+        if (postReal) { L = i2v[0].lp (L); R = i2v[1].lp (R); }
         L = zoh[0].process (L); R = zoh[1].process (R);
+        L = post[0].process (L); R = post[1].process (R);
         L = railClip (lpf.process (0, L)); R = railClip (lpf.process (1, R));
         if (h.xfOut) { L = xf.process (0, L); R = xf.process (1, R); }
     }

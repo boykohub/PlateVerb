@@ -1,6 +1,6 @@
 // Flexiverb 480 - a 480L-style multi-effects system with a LARC-style remote.
-// Two machines (A, B) run any of the 480L's 21 banks of programs in Single, Cascade, Stereo Split or Mono Split.
-// A drawer adds EQ, compressor and delay; SETUP holds the 480L hardware model and output stage; LOOK the colours.
+// Two machines (A, B) run any of the 26 banks (the 480L's 21 plus the Surround/HD Cart) in Single, Cascade, Stereo Split
+// or Mono Split. The LARC's CTRL pages hold the configuration, the 480L hardware model, EQ, compressor and delay.
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_audio_formats/juce_audio_formats.h>
 #include "L480Engine.h"
@@ -169,7 +169,7 @@ public:
             if (auto* sp = apvts.getParameter (slotId (m, i))) if (std::abs (sp->getValue() - t) > 1.0e-6f) sp->setValueNotifyingHost (t);
         }
         if (m == 0) currentHostProgram = index;
-        registerName[m] = {};
+        registerName[m] = {}; variation[m] = 1;
         lastProg[m] = index;
         programLoaded.store (true);
     }
@@ -196,35 +196,60 @@ public:
         return false;
     }
 
-    // registers: the user's own programs (STO / REG), one file per register
-    StringArray registerNames() const
+    // registers (REG / STO): the user's own programs, 10 banks x 10 numbers like the 480L's register memory.
+    // Variations (VAR): per factory program, 1 = the factory values, 2-0 = the user's stored versions.
+    static File registerFile (int bank, int num)   { return registerFolder().getChildFile ("R" + String (bank) + "-" + String (num) + ".flxreg"); }
+    static File variationFile (int prog, int v)    { return registerFolder().getParentDirectory().getChildFile ("Variations").getChildFile ("P" + String (prog) + "-V" + String (v) + ".flxvar"); }
+    bool writeSnapshot (int m, const File& f) const
     {
-        StringArray n;
-        for (auto& f : registerFolder().findChildFiles (File::findFiles, false, "*.flxreg")) n.add (f.getFileNameWithoutExtension());
-        n.sortNatural();
-        return n;
-    }
-    bool storeRegister (int m, const String& name)
-    {
-        auto dir = registerFolder(); dir.createDirectory();
+        f.getParentDirectory().createDirectory();
         XmlElement x ("FLEXIVERB_REGISTER");
         x.setAttribute ("program", programOf (m));
+        x.setAttribute ("name", String (prog (m).name));
         for (int i = 0; i < l480::kMaxParams; ++i) x.setAttribute ("s" + String (i), (double) pSlot[m][i]->load());
-        const bool ok = x.writeTo (dir.getChildFile (File::createLegalFileName (name) + ".flxreg"));
-        if (ok) registerName[m] = name;
-        return ok;
+        return x.writeTo (f);
     }
-    bool recallRegister (int m, const String& name)
+    bool readSnapshot (int m, const File& f)
     {
-        auto x = parseXML (registerFolder().getChildFile (name + ".flxreg"));
+        auto x = parseXML (f);
         if (x == nullptr) return false;
         loadProgram (m, x->getIntAttribute ("program"));
         for (int i = 0; i < l480::kMaxParams; ++i)
             if (auto* sp = apvts.getParameter (slotId (m, i))) sp->setValueNotifyingHost ((float) x->getDoubleAttribute ("s" + String (i), sp->getValue()));
-        registerName[m] = name;
         return true;
     }
-    String registerName[2];
+    static String snapshotName (const File& f) { if (auto x = parseXML (f)) return x->getStringAttribute ("name"); return {}; }
+    bool registerExists (int bank, int num) const { return registerFile (bank, num).existsAsFile(); }
+    String registerTitle (int bank, int num) const { return snapshotName (registerFile (bank, num)); }
+    bool storeRegister (int m, int bank, int num)
+    {
+        if (! writeSnapshot (m, registerFile (bank, num))) return false;
+        registerName[m] = String (bank) + "." + String (num); variation[m] = 0;
+        return true;
+    }
+    bool recallRegister (int m, int bank, int num)
+    {
+        if (! readSnapshot (m, registerFile (bank, num))) return false;
+        registerName[m] = String (bank) + "." + String (num); variation[m] = 0;
+        return true;
+    }
+    bool variationExists (int m, int v) const { return v == 1 || variationFile (programOf (m), v).existsAsFile(); }
+    bool storeVariation (int m, int v)
+    {
+        if (v < 2 || ! writeSnapshot (m, variationFile (programOf (m), v))) return false;
+        registerName[m] = {}; variation[m] = v;
+        return true;
+    }
+    bool recallVariation (int m, int v)
+    {
+        const int pr = programOf (m);
+        if (v == 1) { loadProgram (m, pr); return true; }
+        if (! readSnapshot (m, variationFile (pr, v))) return false;
+        variation[m] = v;
+        return true;
+    }
+    String registerName[2];   // "bank.num" when the machine holds a recalled register
+    int variation[2] = { 1, 1 };   // 1 = factory, 2-10 = user variation, 0 = from a register
 
     // ------------------------------------------------------------------ audio
     void prepareToPlay (double sampleRate, int) override
@@ -323,6 +348,7 @@ public:
     {
         auto st = apvts.copyState();
         st.setProperty ("regA", registerName[0], nullptr); st.setProperty ("regB", registerName[1], nullptr);
+        st.setProperty ("varA", variation[0], nullptr); st.setProperty ("varB", variation[1], nullptr);
         if (auto xml = st.createXml()) copyXmlToBinary (*xml, dest);
     }
     void setStateInformation (const void* data, int size) override
@@ -332,6 +358,9 @@ public:
             {
                 apvts.replaceState (ValueTree::fromXml (*xml));
                 registerName[0] = apvts.state.getProperty ("regA").toString(); registerName[1] = apvts.state.getProperty ("regB").toString();
+                // registers saved by older versions were named, not numbered: drop those labels
+                for (auto& r : registerName) if (! r.containsOnly ("0123456789.")) r = {};
+                variation[0] = (int) apvts.state.getProperty ("varA", 1); variation[1] = (int) apvts.state.getProperty ("varB", 1);
                 for (int m = 0; m < 2; ++m) lastProg[m] = programOf (m);
                 programLoaded.store (true);
             }

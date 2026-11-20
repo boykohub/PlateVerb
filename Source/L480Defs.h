@@ -103,7 +103,7 @@ inline std::string formatValue (const PSpec& s, float v) {
 
 // ---------------------------------------------------------------- algorithms
 enum Algo { aRev6 = 0, aRev2, aRHall, aAmb, aFx, aTwin, aSamp, aPitch, aDopp, aInOut, aSAdj, aPons, aSPeq, aMPeq, aPano, aComp,
-            aPrime, aFDyn, aDist, aOsc, aPink, aBin, aCHall, aRPlate, aChorus, aMBand, kNumAlgos };
+            aPrime, aFDyn, aDist, aOsc, aPink, aBin, aCHall, aRPlate, aChorus, aMBand, aHD, kNumAlgos };
 
 struct AlgoDef { const char* name; int pages; PSpec p[kMaxParams]; };
 
@@ -278,6 +278,15 @@ inline const AlgoDef& algoDef (int a) {
                                    MS ("DL1", "Band 1 Delay", 1500), MS ("DL2", "Band 2 Delay", 1500), MS ("DL3", "Band 3 Delay", 1500), MS ("DL4", "Band 4 Delay", 1500), MS ("DL5", "Band 5 Delay", 1500), MS ("DL6", "Band 6 Delay", 1500),
                                    LV0 ("LV1", "Band 1 Level"), LV0 ("LV2", "Band 2 Level"), LV0 ("LV3", "Band 3 Level"), LV0 ("LV4", "Band 4 Level"), LV0 ("LV5", "Band 5 Level"), LV0 ("LV6", "Band 6 Level"),
                                    HZ ("FR1", "Band 1 Freq", 60, 12000), HZ ("FR2", "Band 2 Freq", 60, 12000), HZ ("FR3", "Band 3 Freq", 60, 12000), HZ ("FR4", "Band 4 Freq", 60, 12000), HZ ("FR5", "Band 5 Freq", 60, 12000), HZ ("FR6", "Band 6 Freq", 60, 12000) } },
+        // aHD: Surround/HD Reverb Cartridge (banks 22-26). Pages as in the cart's manual; no MIX (the cart is meant for a send).
+        // OUT: Surround = the four-output algorithm folded to stereo, HD = the two-channel high-density algorithm.
+        { "Surround/HD", 4, { LV0 ("ELV", "Early Level"), LV0 ("RLV", "Reverb Level"), PSpec { "RTM", "Mid Reverb Time", uSec, 0.1f, 20, 2, cLog },
+                              N ("SPR", "Spread", 0, 255), HZF ("HFC", "High Freq Cutoff", 200), N ("LFB", "Low Freq Boost", 0, 512),
+                              PSpec { "BAS", "Bass Multiply", uMult, 0.2f, 4, 1, cLog }, HZ ("XOV", "Crossover", 50, 2000), HZF ("RTC", "RT High Cut", 500),
+                              N ("SPN", "Spin", 0, 99), N ("SIZ", "Size", 1, 63), MS ("RPD", "Predelay", 200),
+                              MS ("LBD", "LF Boost Delay", 200), HZ ("LBF", "LF Boost Freq", 30, 500), N ("DIFF", "Diffusion", 0, 99), B, B, B,
+                              MS ("ELD", "Early Delay", 100), N ("ELS", "Early Spin", 0, 99), HZF ("ELR", "Rear Early Rolloff", 500),
+                              PSpec { "ELRA", "Rear Early Atten", uDb, -24, 0, 0 }, MS ("RDL", "Rear Delay Offset", 100), C ("OUT", "Output", "Surround|HD") } },
     };
     return defs[std::max (0, std::min (kNumAlgos - 1, a))];
 }
@@ -308,10 +317,11 @@ inline int realIndex (int algo, int i) { const auto& s = algoDef (algo).p[i]; re
 inline const char* bankName (int bank) {
     static const char* n[] = { "", "480 Halls", "480 Rooms", "Wild Spaces", "Plates", "Effects", "Twin Delays", "Samplers", "Pitch/Doppler", "Mastering", "Compressor",
                                "Random Hall", "Random Spaces", "Ambience", "Post Ambience", "Prime Time III", "Freq. Stuff", "Test & Reference",
-                               "Concert Hall", "Rich Plate", "6-Voice Chorus", "Multiband Delays" };
-    return (bank >= 1 && bank <= 21) ? n[bank] : "";
+                               "Concert Hall", "Rich Plate", "6-Voice Chorus", "Multiband Delays",
+                               "HD Combo", "Surround", "Classic Surround", "HD Reverb", "HD Classic" };
+    return (bank >= 1 && bank <= 26) ? n[bank] : "";
 }
-constexpr int kNumBanks = 21;
+constexpr int kNumBanks = 26;
 
 constexpr float OFF = -1.0e9f, FULL = 1.0e9f;   // bottom / top of a parameter's range
 constexpr float RV = 0, EF = 1;                 // Random Hall MOD
@@ -325,8 +335,10 @@ struct Program { int bank, num; const char* name; int algo; float v[kMaxParams];
 #define Z6 0, 0, 0, 0, 0, 0
 #define OFF4 OFF, OFF, OFF, OFF
 
+inline void addSurroundCart (std::vector<Program>& v);
+
 inline const std::vector<Program>& programs() {
-    static const std::vector<Program> p = {
+    static const std::vector<Program> p = [] { std::vector<Program> t = {
         // ---------------- Bank 1: 480 Halls
         { 1, 1, "Large Hall",    aRev6, { 2.19f, 126, 179, 37, 2862, 24,  1.2f, 752, 4186, 99, R7, 100,  OFF6,  Z6 } },
         { 1, 2, "Large + Stage", aRev6, { 2.19f, 126, 179, 37, 2862, 24,  1.2f, 752, 4186, 99, R7, 100,  -12, -10, -8, -8, -9, -9,  16, 22, 64, 56, 112, 102 } },
@@ -553,8 +565,79 @@ inline const std::vector<Program>& programs() {
         { 21, 8, "BandBounce",     aMBand, { 50, 60, 0, 0, 8000, 100,  125, 250, 375, 500, 625, 750,  0, 0, -2, -2, -4, -4,  3000, 300, 2000, 500, 1200, 800 } },
         { 21, 9, "Whispers",       aMBand, { 20, 40, 0.15f, 1.0f, 10000, 100,  30, 55, 85, 120, 160, 210,  -3, -3, -6, -6, -9, -9,  4000, 5000, 6000, 7000, 8000, 9000 } },
         { 21, 0, "On Stage",       aMBand, { 15, 10, 0, 0, 9000, 100,  18, 32, 51, 77, 105, 140,  0, -3, -5, -7, -9, -11,  500, 1000, 2000, 3000, 4000, 5000 } },
-    };
+    }; addSurroundCart (t); return t; }();
     return p;
+}
+
+// ---------------- Banks 22-26: the Surround/HD Reverb Cartridge. The program names and bank layout are the cart's
+// (its manual; its bank 6, a copy of bank 1, is left out). The manual prints no parameter values, so these settings
+// are Flexiverb's own, following its guidance: SPN about 46, SIZ about 31, RPD about 10 ms, LBD about 80 ms,
+// LBF 180 Hz or lower, BAS 1.5x or less, XOV below 180 Hz, RTC about 4 kHz, ELV 3 dB lower on the HD versions.
+//  ELV RLV RTM SPR HFC LFB | BAS XOV RTC SPN SIZ RPD | LBD LBF DIFF | ELD ELS ELR ELRA RDL (OUT added per bank)
+inline void addSurroundCart (std::vector<Program>& v) {
+    struct Voice { const char* name; float p[23]; };
+    static const Voice V[] = {
+        /* 0 */ { "Large SR",      { 0, -4, 2.40f, 140, 2600, 128,  1.3f, 160, 4200, 46, 34, 10,  80, 180, 60,  2, 30, 4000, -4, 12 } },
+        /* 1 */ { "Small SR",      { 0, -6, 1.20f,  90, 3200,  96,  1.2f, 170, 4800, 46, 24,  8,  70, 180, 55,  0, 30, 5500, -2,  6 } },
+        /* 2 */ { "Opera SR",      { 0, -5, 1.90f, 120, 2800,  96,  1.2f, 160, 4600, 46, 30, 12,  80, 170, 45,  4, 28, 4500, -3, 10 } },
+        /* 3 */ { "Acoustisolo",   { 0, -8, 1.50f, 100, 3800,  64,  1.1f, 150, 5500, 44, 27,  6,  80, 160, 40,  0, 32, 6000, -2,  4 } },
+        /* 4 */ { "Lil Bigger",    { 0, OFF, 0.80f, 60, 5000,   0,  1.0f, 150, 6000, 40, 22,  0,  80, 180, 50,  0, 36, 7000, -1,  2 } },
+        /* 5 */ { "Bigfoot",       { -6, -4, 0.90f, 80, 1800, 512,  1.8f, 140, 3000, 46, 28,  6,  60, 140, 70,  0, 26, 3000, -4,  4 } },
+        /* 6 */ { "Voc Enhance",   { 0, -6, 2.20f, 130, 4500,  64,  1.2f, 170, 5000, 46, 33, 14,  80, 180, 40,  2, 30, 5000, -3,  8 } },
+        /* 7 */ { "Slap Hall",     { 0, -5, 1.70f, 120, 3000,  96,  1.2f, 160, 4200, 46, 30, 12,  80, 180, 50, 35, 30, 4500, -3, 18 } },
+        /* 8 */ { "Slap Room",     { 0, -7, 0.90f,  70, 3500,  64,  1.1f, 170, 5000, 46, 20,  8,  70, 180, 50, 55, 30, 5000, -2, 20 } },
+        /* 9 */ { "Chamber",       { 0, -5, 1.30f, 100, 4000,  96,  1.1f, 160, 4600, 46, 26, 10,  80, 170, 75,  2, 28, 5000, -3,  8 } },
+        /*10 */ { "Church",        { 0, -3, 3.20f, 190, 2200, 160,  1.4f, 150, 3600, 46, 42, 14,  90, 160, 65,  6, 26, 3500, -5, 16 } },
+        /*11 */ { "Cathedral",     { 0, -2, 5.20f, 230, 1900, 192,  1.5f, 140, 3200, 46, 52, 18, 100, 150, 70,  8, 24, 3000, -6, 20 } },
+        /*12 */ { "Nice Place",    { 0, -6, 1.40f, 100, 4200,  96,  1.2f, 170, 5200, 47, 28,  8,  80, 180, 60,  0, 32, 5500, -2,  6 } },
+        /*13 */ { "Percusspace",   { 0, -6, 1.60f, 110, 1600,  64,  1.0f, 160, 2400, 46, 30, 10,  80, 180, 80,  0, 30, 4000, -3,  8 } },
+        /*14 */ { "Large Amb",     { 0, -8, 0.70f,  60, 4500,  64,  1.1f, 170, 6000, 46, 34,  4,  70, 180, 85,  0, 34, 6000, -2,  6 } },
+        /*15 */ { "Snare Amb",     { 0, -6, 0.80f,  70, 6500,  32,  1.0f, 170, 7000, 46, 24,  4,  60, 180, 90,  0, 34, 7000, -2,  4 } },
+        /*16 */ { "Gately",        { 0,  0, 0.35f, 255, 5000,  64,  1.0f, 170, 6000, 46, 30,  0,  60, 180, 99,  0, 30, 6000, -2,  6 } },
+        /*17 */ { "Lead Solo",     { 0, -8, 1.10f,  90, 4500,  64,  1.1f, 170, 5000, 46, 26, 20,  80, 180, 40, 80, 35, 5000, -1, 40 } },
+        /*18 */ { "Large Hall",    { 0, -3, 2.60f, 160, 2500, 128,  1.3f, 160, 3900, 46, 36, 12,  80, 170, 65,  4, 28, 4000, -4, 12 } },
+        /*19 */ { "Medium Hall",   { 0, -4, 1.90f, 130, 3000, 112,  1.2f, 160, 4300, 46, 31, 10,  80, 170, 65,  2, 28, 4500, -3, 10 } },
+        /*20 */ { "Small Hall",    { 0, -5, 1.30f, 100, 3400,  96,  1.2f, 170, 4700, 46, 26,  8,  70, 180, 60,  0, 30, 5000, -3,  8 } },
+        /*21 */ { "Studio A",      { 0, -6, 1.00f,  80, 4800,  64,  1.1f, 170, 6000, 46, 24,  4,  70, 180, 70,  0, 32, 6000, -2,  6 } },
+        /*22 */ { "Contemplate",   { 0, -4, 1.80f, 140, 7500,  64,  1.1f, 170, 8000, 47, 30, 10,  80, 180, 90,  0, 34, 8000, -2,  8 } },
+        /*23 */ { "Sm Woodroom",   { 0, -7, 0.80f,  70, 3800,  64,  0.8f, 180, 5000, 46, 20,  4,  70, 180, 70,  0, 30, 5000, -2,  4 } },
+        /*24 */ { "Lg Woodroom",   { 0, -6, 1.20f,  90, 3600,  80,  0.8f, 180, 4800, 46, 27,  6,  80, 180, 70,  0, 30, 4800, -3,  6 } },
+        /*25 */ { "Large Chamber", { 0, -5, 1.50f, 110, 4000,  96,  1.1f, 160, 4800, 46, 28,  8,  80, 170, 75,  2, 30, 5000, -3,  8 } },
+        /*26 */ { "Snare Plate",   { 0, -3, 1.40f, 120, FULL,  32,  1.0f, 170, FULL, 46, 22,  0,  60, 180, 99,  0, 34, 8000, -1,  2 } },
+        /*27 */ { "Fat Plate",     { 0, -3, 2.20f, 180, 3500, 256,  1.4f, 150, 4200, 46, 33,  4,  80, 160, 99,  0, 30, 4500, -2,  4 } },
+    };
+    auto add = [&v] (int bank, int num, const char* name, int voice, bool hd) {
+        Program p { bank, num, name, aHD, {} };
+        const auto& s = V[voice].p;
+        for (int i = 0; i < 15; ++i) p.v[i] = s[i];            // pages 1-3
+        for (int i = 0; i < 5; ++i) p.v[18 + i] = s[15 + i];   // page 4
+        p.v[23] = hd ? 1.0f : 0.0f;
+        if (hd && p.v[0] > -45.0f) p.v[0] -= 3.0f;              // the HD algorithm's early level runs 3 dB hotter
+        v.push_back (p);
+    };
+    // bank 22: Combo (surround and HD)
+    add (22, 1, "Large SR", 0, false);    add (22, 2, "Small SR", 1, false);   add (22, 3, "Opera SR", 2, false);
+    add (22, 4, "Acoustisolo SR", 3, false); add (22, 5, "Lil Bigger", 4, false); add (22, 6, "Bigfoot", 5, false);
+    add (22, 7, "Voc Enhance", 6, false); add (22, 8, "Large HD", 0, true);    add (22, 9, "Small HD", 1, true);
+    add (22, 0, "Acoustisolo HD", 3, true);
+    // bank 23: Surround
+    add (23, 1, "Slap Hall SR", 7, false); add (23, 2, "Slap Room SR", 8, false); add (23, 3, "Chamber SR", 9, false);
+    add (23, 4, "Church SR", 10, false);  add (23, 5, "Cathedral SR", 11, false); add (23, 6, "Nice Place SR", 12, false);
+    add (23, 7, "Percusspace SR", 13, false); add (23, 8, "Large Amb SR", 14, false); add (23, 9, "Gately SR", 16, false);
+    add (23, 0, "Lead Solo SR", 17, false);
+    // bank 24: "Classic" Surround (the first five from the 300/300L, the second five from the 480L)
+    const char* cl[] = { "Large Hall SR", "Medium Hall SR", "Small Hall SR", "Studio A SR", "Contemplate SR",
+                         "Sm Woodroom SR", "Lg Woodroom SR", "Large Chamber SR", "Snare Plate SR", "Fat Plate SR" };
+    for (int i = 0; i < 10; ++i) add (24, (i + 1) % 10, cl[i], 18 + i, false);
+    // bank 25: HD Reverb
+    add (25, 1, "Slap Hall HD", 7, true);  add (25, 2, "Slap Room HD", 8, true);  add (25, 3, "Chamber HD", 9, true);
+    add (25, 4, "Church HD", 10, true);   add (25, 5, "Cathedral HD", 11, true); add (25, 6, "Nice Place HD", 12, true);
+    add (25, 7, "Percusspace HD", 13, true); add (25, 8, "Snare Amb HD", 15, true); add (25, 9, "Gately HD", 16, true);
+    add (25, 0, "Lead Solo HD", 17, true);
+    // bank 26: HD Reverb (classic)
+    const char* hc[] = { "Large Hall HD", "Medium Hall HD", "Small Hall HD", "Studio A HD", "Contemplate HD",
+                         "Sm Woodroom HD", "Lg Woodroom HD", "LG Chamber HD", "Snare Plate HD", "Fat Plate HD" };
+    for (int i = 0; i < 10; ++i) add (26, (i + 1) % 10, hc[i], 18 + i, true);
 }
 #undef OFF6
 #undef Z6
