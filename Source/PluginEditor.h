@@ -1827,7 +1827,7 @@ private:
             c.onRemove = [this, key]
             {
                 auto v = loadPins(); v.erase (std::remove_if (v.begin(), v.end(), [&key] (const Pin& p) { return p.key == key; }), v.end());
-                savePins (v); MessageManager::callAsync ([sp = Component::SafePointer<Flexiverb480Editor> (this)] { if (sp) sp->placeCells(); });
+                savePins (v); Component::SafePointer<Flexiverb480Editor> sp (this); MessageManager::callAsync ([sp] { if (sp != nullptr) sp->placeCells(); });
             };
             const int w = c.preferredWidth(), h = c.preferredHeight();
             c.setBounds (jlimit (0, sb.getWidth() - w, roundToInt (pin.x * sb.getWidth())), jlimit (0, sb.getHeight() - h, roundToInt (pin.y * sb.getHeight())), w, h);
