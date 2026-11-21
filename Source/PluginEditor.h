@@ -1202,7 +1202,11 @@ public:
         auto dk = [this] (const String& t) { auto k = std::make_unique<LarcKey> (theme, t); drawer.addAndMakeVisible (*k); return k; };
         auto pk = [this] (const String& id, const String& t) { auto k = std::make_unique<ParamKey> (theme, proc.apvts, id, t); drawer.addAndMakeVisible (*k); return k; };
         auto ck = [this] (const String& id, const String& t) { auto k = std::make_unique<CycleKey> (theme, proc.apvts, id, t); drawer.addAndMakeVisible (*k); return k; };
-        combineKey = ck ("config", ""); combineKey->sync(); machAKey = dk ("MACHINE A"); machBKey = dk ("MACHINE B"); muteKey = dk ("MUTE"); setupKey = dk ("SETUP");
+        // ENGINE: single (machine A) or dual (machines A and B side by side)
+        drawer.addAndMakeVisible (engineBox); engineBox.addItemList ({ "Single", "Dual" }, 1);
+        engineBox.onChange = [this] { auto* c = proc.apvts.getParameter ("config"); const int v = engineBox.getSelectedItemIndex() == 0 ? 0 : 2;
+                                      if ((config() != 0) != (v != 0)) { c->beginChangeGesture(); c->setValueNotifyingHost (c->convertTo0to1 ((float) v)); c->endChangeGesture(); } };
+        machAKey = dk ("MACHINE A"); machBKey = dk ("MACHINE B"); muteKey = dk ("MUTE"); setupKey = dk ("SETUP");
         machAKey->onClick = [this] { selectMachine (0); }; machBKey->onClick = [this] { selectMachine (1); };
         muteKey->onClick = [this] { proc.mute.store (! proc.mute.load()); };
         setupKey->onClick = [this] { setupOpen = ! setupOpen; if (setupOpen) setup.sync(); applySize(); };
@@ -1244,6 +1248,8 @@ public:
 
         lnf.setColour (PopupMenu::backgroundColourId, Colour (0xff1c1d1f)); lnf.setColour (PopupMenu::textColourId, Colour (0xffe8e6e1));
         lnf.setColour (PopupMenu::highlightedBackgroundColourId, theme.keyLight.darker (0.2f)); lnf.setColour (PopupMenu::highlightedTextColourId, Colours::black);
+        lnf.setColour (ComboBox::backgroundColourId, theme.display); lnf.setColour (ComboBox::textColourId, theme.displayText);
+        lnf.setColour (ComboBox::outlineColourId, Colours::black); lnf.setColour (ComboBox::arrowColourId, theme.keyLight);
         lnf.setDefaultSansSerifTypeface (FlexFonts::get().medium);
         setLookAndFeel (&lnf);
         setResizable (true, true);
@@ -1343,6 +1349,7 @@ private:
         auto r = drawer.getLocalBounds().toFloat();
         g.setGradientFill (ColourGradient (theme.hi (theme.panel, 0.4f), 0, 0, theme.lo (theme.panel, 0.5f), 0, r.getBottom(), false));
         g.fillRect (r);
+        drawLegend (g, "ENGINE", Rectangle<float> (18, (float) engineLabelY, 64, (float) keyH()), ui (jmax (9.0f, theme.keyPt * 0.9f), W::Bold, 0.08f), theme.panelText, Justification::centredLeft);
         for (auto& s : sections)
         {
             auto b = s.area.toFloat().expanded (8, 6).withTrimmedTop (-10);
@@ -1420,7 +1427,8 @@ private:
         auto sec = [&] (const String& t, int top) { sections.push_back ({ t, { x0, top, wAll, y - top } }); y += 30; };
         int top = y;
         machAKey->setVisible (config() != 0); machBKey->setVisible (config() != 0);
-        y = flowKeys ({ combineKey.get(), machAKey.get(), machBKey.get(), muteKey.get(), setupKey.get() }, x0, wAll, y, kh, gap);
+        engineLabelY = y; engineBox.setBounds (x0 + 70, y, 120, kh); y += kh + gap;
+        y = flowKeys ({ machAKey.get(), machBKey.get(), muteKey.get(), setupKey.get() }, x0, wAll, y, kh, gap);
         y = flowKeys ({ hwKey.get(), inKey.get(), outKey.get(), noiseKey.get(), xfInKey.get(), xfOutKey.get(), ironKey.get() }, x0, wAll, y, kh, gap);
         const int qw = wAll / 4;
         for (int i = 0; i < 4; ++i) sysKnob[i]->setBounds (x0 + i * qw - 4, y, qw + 8, 70 + kTxt);
@@ -1644,7 +1652,7 @@ private:
     // ---------------------------------------------------------------- 30 Hz
     void timerCallback() override
     {
-        if (config() != lastConfig) { lastConfig = config(); if (lastConfig == 0 && machine == 1) machine = 0; layoutDrawer(); refreshPage (true); }
+        if (config() != lastConfig) { lastConfig = config(); if (lastConfig == 0 && machine == 1) machine = 0; engineBox.setSelectedItemIndex (lastConfig == 0 ? 0 : 1, dontSendNotification); layoutDrawer(); refreshPage (true); drawer.repaint(); }
         if (proc.programLoaded.exchange (false) || proc.algoOf (machine) != lastAlgo) { lastAlgo = proc.algoOf (machine); refreshPage (false); }
         // preset bar
         {
@@ -1700,7 +1708,7 @@ private:
         if (drawerOpen)
         {
             for (auto* k : { hwKey.get(), noiseKey.get(), xfInKey.get(), xfOutKey.get(), ironKey.get(), anOnKey.get(), eqOnKey.get(), cpOnKey.get(), satKey.get(), duckKey.get() }) k->sync();
-            bool relayout = false; for (auto* k : { combineKey.get(), inKey.get(), outKey.get() }) relayout = k->sync() || relayout;
+            bool relayout = false; for (auto* k : { inKey.get(), outKey.get() }) relayout = k->sync() || relayout;
             if (relayout) layoutDrawer();
         }
     }
@@ -1719,7 +1727,7 @@ private:
     std::vector<std::unique_ptr<LarcKey>> algKeys;
     std::vector<std::unique_ptr<LarcFader>> faders;
     Viewport drawerView; Drawer drawer;
-    std::unique_ptr<CycleKey> combineKey, inKey, outKey;
+    std::unique_ptr<CycleKey> inKey, outKey; ComboBox engineBox; int engineLabelY = 0;
     std::unique_ptr<ParamKey> hwKey, noiseKey, xfInKey, xfOutKey, ironKey, anOnKey, eqOnKey, cpOnKey, satKey, duckKey;
     std::unique_ptr<ScaleKnob> sysKnob[4], anKnob[5], eqKnob2[2], cpKnob[7];
     std::unique_ptr<DualKnob> eqKnob[4];
