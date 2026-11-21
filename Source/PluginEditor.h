@@ -11,6 +11,7 @@
 //  SETUP        opens beside the plugin: colours, gradient, 3D depth, text sizes, oversampling, 64-bit.
 #include "FlexFonts.h"
 #include <set>
+#include <map>
 
 // ============================================================================ fonts
 struct FlexFonts
@@ -71,6 +72,7 @@ struct Theme
                                                x.setAttribute ("t" + String (i), gTop[i].toString()); x.setAttribute ("b" + String (i), gBot[i].toString()); x.setAttribute ("o" + String (i), gOwn[i]); ++i; }
         x.setAttribute ("grad", gradient); x.setAttribute ("keyPt", keyPt); x.setAttribute ("knobPt", knobPt); x.setAttribute ("dispPt", displayPt);
         x.setAttribute ("faderPt", faderPt); x.setAttribute ("depth", depth); x.setAttribute ("keyH", keyHeight); x.setAttribute ("keyPad", keyPad); x.setAttribute ("v", 7);
+        for (auto& t : texts) { auto* e = x.createNewChildElement ("T"); e->setAttribute ("id", t.first); e->setAttribute ("pt", t.second.pt); e->setAttribute ("col", t.second.col.toString()); e->setAttribute ("hc", t.second.hasCol); }
         return x.toString (XmlElement::TextFormat().singleLine().withoutHeader());
     }
     bool fromString (const String& s)
@@ -83,8 +85,16 @@ struct Theme
         knobPt = (float) x->getDoubleAttribute ("knobPt", knobPt); displayPt = (float) x->getDoubleAttribute ("dispPt", displayPt);
         faderPt = (float) x->getDoubleAttribute ("faderPt", faderPt); depth = jlimit (0, 3, x->getIntAttribute ("depth", depth));
         keyHeight = (float) x->getDoubleAttribute ("keyH", keyHeight); keyPad = (float) x->getDoubleAttribute ("keyPad", keyPad);
+        texts.clear();
+        for (auto* e : x->getChildWithTagNameIterator ("T"))
+        { TextStyle t; t.pt = (float) e->getDoubleAttribute ("pt"); t.col = Colour::fromString (e->getStringAttribute ("col")); t.hasCol = e->getBoolAttribute ("hc"); texts[e->getStringAttribute ("id")] = t; }
         return true;
     }
+    // your own size / colour for a single text (by its id); 0 / no colour = the usual one
+    struct TextStyle { float pt = 0; Colour col; bool hasCol = false; };
+    std::map<String, TextStyle> texts;
+    float tpt (const String& id, float def) const { auto it = texts.find (id); return it != texts.end() && it->second.pt > 0 ? it->second.pt : def; }
+    Colour tcol (const String& id, Colour def) const { auto it = texts.find (id); return it != texts.end() && it->second.hasCol ? it->second.col : def; }
     int indexOf (Colour Theme::* c) const { int i = 0; for (auto& it : items()) { if (it.c == c) return i; ++i; } return -1; }
     // the three colours of an object's gradient: top, middle (its colour), bottom - automatic, or your own
     std::array<Colour, 3> stops (Colour Theme::* c, float k = 1.0f) const
@@ -107,6 +117,10 @@ struct Theme
     static File defaultFile() { return registerFolder().getParentDirectory().getChildFile ("Look.xml"); }
 };
 
+using TextHook = std::function<void (const String& id, const String& label, float defPt, Colour defCol, Component* at, Rectangle<int> area)>;
+static TextHook& textHook() { static TextHook h; return h; }
+static void editText (const String& id, const String& label, float defPt, Colour defCol, Component* at, Rectangle<int> area)
+{ if (textHook()) textHook() (id, label, defPt, defCol, at, area); }
 static void drawLegend (Graphics& g, const String& s, Rectangle<float> r, const Font& f, Colour c, Justification j = Justification::centred)
 {
     g.setFont (f);
@@ -124,7 +138,9 @@ public:
     void setLit (bool b) { if (b != lit) { lit = b; repaint(); } }
     void setText (const String& s) { if (s != text) { text = s; repaint(); } }
     const String& getText() const { return text; }
-    float preferredWidth() const { return textW (ui (th.keyPt, W::Bold, 0.06f), text) + th.keyPt * 1.6f + 8.0f + th.keyPad; }
+    String textId() const { return "button:" + text; }
+    float textPt() const { return th.tpt (textId(), th.keyPt); }
+    float preferredWidth() const { return textW (ui (textPt(), W::Bold, 0.06f), text) + textPt() * 1.6f + 8.0f + th.keyPad; }
     std::function<void()> onRightClick;
     void paint (Graphics& g) override
     {
@@ -152,8 +168,8 @@ public:
         g.setColour (Colours::black.withAlpha (0.35f)); g.drawRoundedRectangle (face, rad - 1.0f, 0.6f);
         if (isMouseOver() && ! pressed && ! on) { g.setColour (Colours::white.withAlpha (0.07f)); g.fillRoundedRectangle (face, rad - 1.0f); }
         const bool darkCap = c.getPerceivedBrightness() < 0.45f;
-        const Colour ink = darkCap && th.keyText.getPerceivedBrightness() < 0.45f ? Colours::white : th.keyText;
-        g.setFont (ui (jmin (th.keyPt, face.getHeight() * 0.62f), W::Bold, 0.06f));
+        const Colour ink = th.tcol (textId(), darkCap && th.keyText.getPerceivedBrightness() < 0.45f ? Colours::white : th.keyText);
+        g.setFont (ui (jmin (textPt(), face.getHeight() * 0.62f), W::Bold, 0.06f));
         g.setColour (darkCap ? Colours::black.withAlpha (0.5f) : Colours::white.withAlpha (0.4f)); g.drawText (text, face.translated (0, darkCap ? -0.8f : 0.8f), Justification::centred, false);
         g.setColour (ink); g.drawText (text, face, Justification::centred, false);
     }
@@ -161,7 +177,7 @@ public:
     void mouseUp (const MouseEvent& e) override
     {
         pressed = false; flash = true; startTimer (130); repaint();
-        if (e.mods.isPopupMenu()) { if (onRightClick) onRightClick(); return; }
+        if (e.mods.isPopupMenu()) { if (onRightClick) onRightClick(); else editText (textId(), "Button " + text, th.keyPt, th.keyText, this, getLocalBounds()); return; }
         if (getLocalBounds().contains (e.getPosition()) && onClick) onClick();
     }
 private:
@@ -376,17 +392,29 @@ public:
         auto lab = r.removeFromBottom (th.knobPt + 5);
         const float d = jmin (r.getWidth(), r.getHeight()) * 0.5f;
         const auto c = r.getCentre().translated (0, 3);
-        drawScale (g, param, c, d * 0.5f + 11.0f, marks, th.panelText.withAlpha (0.85f), jmax (7.5f, th.knobPt * 0.75f));
+        drawScale (g, param, c, d * 0.5f + 11.0f, marks, th.tcol ("knob numbers:" + name, th.panelText.withAlpha (0.85f)), th.tpt ("knob numbers:" + name, jmax (7.5f, th.knobPt * 0.75f)));
         drawKnobBody (g, th, Rectangle<float> (d, d).withCentre (c), knobAngle (param->getValue()), capColour, th.panelText, true);
-        drawLegend (g, name, lab, ui (th.knobPt, W::Bold, 0.06f), th.panelText);
+        drawLegend (g, name, lab, ui (th.tpt ("knob:" + name, th.knobPt), W::Bold, 0.06f), th.tcol ("knob:" + name, th.panelText));
     }
-    void mouseDown (const MouseEvent&) override { start = param->getValue(); param->beginChangeGesture(); show(); }
+    void mouseDown (const MouseEvent& e) override
+    {
+        styling = e.mods.isPopupMenu();
+        if (styling)
+        {
+            if (e.y > getHeight() - th.knobPt - 6) editText ("knob:" + name, "Knob name " + name, th.knobPt, th.panelText, this, getLocalBounds());
+            else editText ("knob numbers:" + name, "Numbers around " + name, jmax (7.5f, th.knobPt * 0.75f), th.panelText, this, getLocalBounds());
+            return;
+        }
+        start = param->getValue(); param->beginChangeGesture(); show();
+    }
+    bool styling = false;
     void mouseDrag (const MouseEvent& e) override
     {
+        if (styling) return;
         const float fine = e.mods.isShiftDown() || e.mods.isAltDown() ? 0.1f : 1.0f;
         param->setValueNotifyingHost (snapped (param, jlimit (0.0f, 1.0f, start - (float) e.getDistanceFromDragStartY() * 0.005f * fine), step)); show();
     }
-    void mouseUp (const MouseEvent&) override { param->endChangeGesture(); }
+    void mouseUp (const MouseEvent&) override { if (styling) { styling = false; return; } param->endChangeGesture(); }
     void mouseDoubleClick (const MouseEvent&) override { param->beginChangeGesture(); param->setValueNotifyingHost (param->getDefaultValue()); param->endChangeGesture(); show(); }
     void mouseWheelMove (const MouseEvent&, const MouseWheelDetails& w) override
     {
@@ -421,16 +449,27 @@ public:
             const float a = knobAngle (gP->convertTo0to1 (db));
             g.drawLine (Line<float> (c.getPointOnCircumference (rOuter + 2.0f, a), c.getPointOnCircumference (rOuter + (std::fmod (db, 4.0f) == 0 ? 5.5f : 3.8f), a)), 1.0f);
         }
-        drawScale (g, fP, c, rOuter + 27.0f, fm, th.panelText.withAlpha (0.9f), jmax (7.5f, th.knobPt * 0.75f));
+        drawScale (g, fP, c, rOuter + 27.0f, fm, th.tcol ("knob numbers:" + name, th.panelText.withAlpha (0.9f)), th.tpt ("knob numbers:" + name, jmax (7.5f, th.knobPt * 0.75f)));
         drawScale (g, gP, c, rOuter + 12.5f, gm, red, 7.0f);
         drawKnobBody (g, th, Rectangle<float> (rOuter * 2, rOuter * 2).withCentre (c), knobAngle (fP->getValue()), &Theme::eqKnob, th.panelText, true);
         drawKnobBody (g, th, Rectangle<float> (rInner * 2, rInner * 2).withCentre (c), knobAngle (gP->getValue()), &Theme::eqInner, Colours::white, false);
-        drawLegend (g, name, lab, ui (th.knobPt, W::Bold, 0.06f), th.panelText);
+        drawLegend (g, name, lab, ui (th.tpt ("knob:" + name, th.knobPt), W::Bold, 0.06f), th.tcol ("knob:" + name, th.panelText));
     }
     bool hitTest (int x, int y) override { geometry (bodyArea()); return Point<float> ((float) x, (float) y).getDistanceFrom (c) < rOuter + 6.0f || y > getHeight() - th.knobPt - 5; }
-    void mouseDown (const MouseEvent& e) override { geometry (bodyArea()); active = pick (e); start = active->getValue(); active->beginChangeGesture(); show(); }
+    void mouseDown (const MouseEvent& e) override
+    {
+        if (e.mods.isPopupMenu())
+        {
+            active = nullptr;
+            if (e.y > getHeight() - th.knobPt - 6) editText ("knob:" + name, "Knob name " + name, th.knobPt, th.panelText, this, getLocalBounds());
+            else editText ("knob numbers:" + name, "Numbers around " + name, jmax (7.5f, th.knobPt * 0.75f), th.panelText, this, getLocalBounds());
+            return;
+        }
+        geometry (bodyArea()); active = pick (e); start = active->getValue(); active->beginChangeGesture(); show();
+    }
     void mouseDrag (const MouseEvent& e) override
     {
+        if (active == nullptr) return;
         const float fine = e.mods.isShiftDown() || e.mods.isAltDown() ? 0.1f : 1.0f;
         active->setValueNotifyingHost (snapped (active, jlimit (0.0f, 1.0f, start - (float) e.getDistanceFromDragStartY() * 0.005f * fine), active == gP ? 2.0f : 0.0f)); show();
     }
@@ -1025,7 +1064,7 @@ private:
 };
 
 // ============================================================================ what a number or fader controls: a program slot or a plugin parameter
-struct Target { int slot = -1; RangedAudioParameter* param = nullptr; String name; bool trigger = false; };
+struct Target { int slot = -1; RangedAudioParameter* param = nullptr; String name; bool trigger = false; String group; };
 
 // ============================================================================ the reverb picture: early reflections and low / mid / high decay
 // Animated: the curves glide to each new response; live bars show the output's low, mid and high level.
@@ -1357,6 +1396,45 @@ private:
     const Theme& th; float shown = 0;
 };
 
+// ============================================================================ one text's own size and colour
+class TextStyleEditor : public Component
+{
+public:
+    TextStyleEditor (Theme& t, const String& textId, const String& label, float defPt, Colour defCol) : th (t), id (textId), name (label), dPt (defPt), dCol (defCol)
+    {
+        setSize (320, 132);
+        size.setSliderStyle (Slider::LinearHorizontal); size.setTextBoxStyle (Slider::TextBoxRight, false, 48, 20); size.setRange (6, 40, 0.5);
+        size.setValue (th.tpt (id, dPt), dontSendNotification); addAndMakeVisible (size);
+        size.onValueChange = [this] { th.texts[id].pt = (float) size.getValue(); if (changed) changed(); repaint(); };
+        addAndMakeVisible (resetBtn); resetBtn.onClick = [this] { th.texts.erase (id); size.setValue (dPt, dontSendNotification); if (changed) changed(); repaint(); };
+    }
+    std::function<void()> changed;
+    void resized() override { size.setBounds (70, 34, getWidth() - 82, 24); resetBtn.setBounds (12, getHeight() - 34, getWidth() - 24, 26); }
+    void paint (Graphics& g) override
+    {
+        g.fillAll (Colour (0xff1c1d1f));
+        drawLegend (g, name, Rectangle<float> (12, 6, (float) getWidth() - 24, 20), ui (12.5f, W::Bold), Colours::white, Justification::centredLeft);
+        drawLegend (g, "Size", Rectangle<float> (12, 34, 56, 24), ui (12.0f, W::Medium), Colours::white.withAlpha (0.8f), Justification::centredLeft);
+        drawLegend (g, "Colour", Rectangle<float> (12, 64, 56, 26), ui (12.0f, W::Medium), Colours::white.withAlpha (0.8f), Justification::centredLeft);
+        g.setColour (th.tcol (id, dCol)); g.fillRoundedRectangle (swatch().toFloat(), 4);
+        g.setColour (Colours::white.withAlpha (0.5f)); g.drawRoundedRectangle (swatch().toFloat(), 4, 1.0f);
+    }
+    void mouseDown (const MouseEvent& e) override
+    {
+        if (! swatch().contains (e.getPosition())) return;
+        auto sel = std::make_unique<ColourSelector> (ColourSelector::showColourspace | ColourSelector::showSliders | ColourSelector::showColourAtTop);
+        sel->setSize (300, 300); sel->setCurrentColour (th.tcol (id, dCol));
+        struct Lst : ChangeListener { TextStyleEditor* p; void changeListenerCallback (ChangeBroadcaster* b) override
+        { auto& t = p->th.texts[p->id]; t.col = static_cast<ColourSelector*> (b)->getCurrentColour(); t.hasCol = true; p->repaint(); if (p->changed) p->changed(); } };
+        auto* l = new Lst(); l->p = this; sel->addChangeListener (l); listener.reset (l);
+        CallOutBox::launchAsynchronously (std::move (sel), swatch().translated (getScreenX(), getScreenY()), nullptr);
+    }
+    Theme& th; String id;
+private:
+    Rectangle<int> swatch() const { return { 70, 64, getWidth() - 82, 26 }; }
+    String name; float dPt; Colour dCol; Slider size; TextButton resetBtn { "BACK TO NORMAL" }; std::unique_ptr<ChangeListener> listener;
+};
+
 // ============================================================================ an object's three colours: top, middle, bottom
 class GradEditor : public Component
 {
@@ -1531,6 +1609,13 @@ public:
         reverbView.setRt = [this] (float rt) { const int s = l480::algoMainRtSlot (proc.algoOf (machine)); proc.setSlot (machine, s, l480::toNorm (proc.spec (machine, s), rt)); };
         reverbView.gesture = [this] (bool b) { for (int s : { findSlot ({ "PDL", "RPD" }), l480::algoMainRtSlot (proc.algoOf (machine)) }) if (s >= 0) { if (b) proc.beginSlot (machine, s); else proc.endSlot (machine, s); } };
         for (int i = 0; i < 40; ++i) { cells.push_back (std::make_unique<NumberCell> (theme)); screen.addChildComponent (*cells.back()); }
+        textHook() = [sp = Component::SafePointer<Flexiverb480Editor> (this)] (const String& id, const String& label, float defPt, Colour defCol, Component* at, Rectangle<int> area)
+        {
+            if (sp == nullptr) return;
+            auto ed = std::make_unique<TextStyleEditor> (sp->theme, id, label, defPt, defCol);
+            ed->changed = [sp] { if (sp != nullptr) sp->lookChanged(); };
+            CallOutBox::launchAsynchronously (std::move (ed), at->localAreaToGlobal (area), nullptr);
+        };
         holdRev.ed = this; holdRev.busy = [this] { return reverbView.busy(); }; reverbView.addMouseListener (&holdRev, false);
         holdDelay.ed = this; holdDelay.busy = [this] { return delayView.busy(); }; delayView.addMouseListener (&holdDelay, false);
 
@@ -1548,8 +1633,8 @@ public:
         for (auto& a : algs) { auto k = mk (a.name); int pi = l480::findProgram (a.bank, a.num);
                                 if (isMatchedOriginal (pi)) for (int i = 0; i < l480::numPrograms(); ++i)   // the matched version of it
                                 { const auto& q = l480::programs()[(size_t) i]; if (q.bank >= 27 && q.bank <= 31 && presetKey (q.name) == presetKey (l480::programs()[(size_t) pi].name)) { pi = i; break; } } k->onClick = [this, pi] { proc.loadProgram (machine, pi); page = 0; refreshPage (true); };
-                                k->onRightClick = [this] { keyMenu (-1); }; algKeys.push_back (std::move (k)); }
-        pageKey->onRightClick = [this] { keyMenu (-1); };
+                                auto* kp = k.get(); k->onRightClick = [this, kp] { keyMenu (-1, kp); }; algKeys.push_back (std::move (k)); }
+        pageKey->onRightClick = [this] { keyMenu (-1, pageKey.get()); };
         loadMyKeys();
 
         for (int i = 0; i < kMaxFaders; ++i)
@@ -1625,7 +1710,7 @@ public:
         layout(); applySize(); refreshPage (true);
         startTimerHz (30);
     }
-    ~Flexiverb480Editor() override { stopTimer(); setLookAndFeel (nullptr); }
+    ~Flexiverb480Editor() override { textHook() = nullptr; stopTimer(); setLookAndFeel (nullptr); }
 
     void paint (Graphics& g) override { g.setGradientFill (theme.grad (&Theme::cheek, getLocalBounds().toFloat(), 0.6f)); g.fillAll(); }
     void resized() override
@@ -1641,13 +1726,13 @@ public:
     {
         Flexiverb480Editor* ed = nullptr;
         void paint (Graphics& g) override { if (ed) ed->paintPanel (g); }
-        void mouseDown (const MouseEvent& e) override { if (ed && e.mods.isPopupMenu()) ed->showSizeMenu(); }
+        void mouseDown (const MouseEvent& e) override { if (ed && e.mods.isPopupMenu()) ed->panelRightClick (e.getPosition()); }
     };
     struct Drawer : public Component
     {
         Flexiverb480Editor* ed = nullptr;
         void paint (Graphics& g) override { if (ed) ed->paintDrawer (g); }
-        void mouseDown (const MouseEvent& e) override { if (ed && e.mods.isPopupMenu()) ed->showSizeMenu(); }
+        void mouseDown (const MouseEvent& e) override { if (ed && e.mods.isPopupMenu()) ed->drawerRightClick (e.getPosition()); }
     };
     struct Screen : public Component
     {
@@ -1679,14 +1764,20 @@ public:
             g.fillRoundedRectangle (in, 4);
             if (isMouseOver()) { g.setColour (th.displayText.withAlpha (0.08f)); g.fillRoundedRectangle (in, 4); }
             auto t = in.reduced (12, 0);
-            g.setColour (th.displayText.withAlpha (0.6f)); g.setFont (ui (jmin (12.0f, th.keyPt), W::Medium));
+            g.setColour (th.tcol ("preset category", th.displayText.withAlpha (0.6f))); g.setFont (ui (th.tpt ("preset category", jmin (12.0f, th.keyPt)), W::Medium));
             g.drawText (sub + "   v", t, Justification::centredRight, true);
-            g.setColour (th.displayText); g.setFont (ui (jmin (17.0f, th.keyPt * 1.3f), W::Bold));
+            g.setColour (th.tcol ("preset name", th.displayText)); g.setFont (ui (th.tpt ("preset name", jmin (17.0f, th.keyPt * 1.3f)), W::Bold));
             g.drawText (text, t, Justification::centredLeft, true);
         }
         void mouseEnter (const MouseEvent&) override { repaint(); }
         void mouseExit (const MouseEvent&) override { repaint(); }
-        void mouseDown (const MouseEvent&) override { ed->openBrowser(); }
+        void mouseDown (const MouseEvent& e) override
+        {
+            if (! e.mods.isPopupMenu()) { ed->openBrowser(); return; }
+            const auto& th = ed->theme;
+            if (e.x > getWidth() * 0.6f) editText ("preset category", "Preset category", jmin (12.0f, th.keyPt), th.displayText, this, getLocalBounds());
+            else editText ("preset name", "Preset name", jmin (17.0f, th.keyPt * 1.3f), th.displayText, this, getLocalBounds());
+        }
     };
 
 private:
@@ -1696,15 +1787,25 @@ private:
         auto face = Rectangle<float> (0, 0, (float) kL, (float) kH);
         g.setGradientFill (theme.grad (&Theme::panel, face, 0.45f));
         g.fillRect (face);
-        // names and values above the faders, in their own text size
+        // group headings, then each fader's name and value - every one of them in its own size and colour
+        for (auto& gb : groupBoxes)
+        {
+            const String id = "group:" + gb.group; const Colour c = theme.tcol (id, theme.keyLight);
+            const auto f = ui (groupPtFor (gb.group), W::Bold, 0.14f);
+            const auto h = gb.head.toFloat(); const String t = groupTitle (gb.group); const float tw = textW (f, t) + 12;
+            g.setColour (c.withAlpha (0.55f));
+            g.drawLine (h.getX() + 4, h.getCentreY(), h.getCentreX() - tw / 2, h.getCentreY(), 1.0f);
+            g.drawLine (h.getCentreX() + tw / 2, h.getCentreY(), h.getRight() - 4, h.getCentreY(), 1.0f);
+            g.drawLine (h.getX() + 4, h.getCentreY(), h.getX() + 4, h.getBottom() + 2, 1.0f); g.drawLine (h.getRight() - 4, h.getCentreY(), h.getRight() - 4, h.getBottom() + 2, 1.0f);
+            g.setColour (c); g.setFont (f); g.drawText (t, h, Justification::centred, false);
+        }
         for (int i = 0; i < nShown; ++i)
         {
-            auto b = faders[(size_t) i]->getBounds().toFloat();
-            auto nr = Rectangle<float> (b.getX(), b.getY() - labelH, b.getWidth(), labelH - theme.faderPt - 4);
-            g.setColour (theme.panelText); g.setFont (ui (theme.faderPt, W::Semibold));
-            g.drawFittedText (targetName (pageTargets[(size_t) i]), nr.toNearestInt(), Justification::centredBottom, 3, 0.75f);
-            g.setColour (theme.keyLight); g.setFont (ui (theme.faderPt, W::Bold));
-            g.drawFittedText (targetText (pageTargets[(size_t) i]), Rectangle<float> (b.getX(), nr.getBottom() + 1, b.getWidth(), theme.faderPt + 3).toNearestInt(), Justification::centred, 1, 0.7f);
+            const auto& tg = pageTargets[(size_t) i];
+            g.setColour (theme.tcol ("fader name:" + tg.name, theme.panelText)); g.setFont (ui (theme.tpt ("fader name:" + tg.name, theme.faderPt), W::Semibold));
+            g.drawFittedText (targetName (tg), nameR[(size_t) i], Justification::centredBottom, nameLines, 0.75f);
+            g.setColour (theme.tcol ("fader value:" + tg.name, theme.keyLight)); g.setFont (ui (theme.tpt ("fader value:" + tg.name, theme.faderPt), W::Bold));
+            g.drawFittedText (targetText (tg), valueR[(size_t) i], Justification::centred, 1, 0.7f);
         }
         if (nShown == 0) drawLegend (g, "nothing on this page", faderArea.toFloat(), ui (13.0f, W::Medium), theme.panelText.withAlpha (0.5f));
         const auto f1 = ui (18.0f, W::Bold, -0.02f), f2 = ui (18.0f, W::Regular);
@@ -1717,7 +1818,9 @@ private:
         auto r = drawer.getLocalBounds().toFloat();
         g.setGradientFill (theme.grad (&Theme::drawerPanel, r.withHeight ((float) kH), 0.45f));
         g.fillRect (r);
-        drawLegend (g, "ENGINE", Rectangle<float> ((float) engineLabelX, (float) engineLabelY, 90, (float) keyH()), ui (jmax (9.0f, theme.keyPt * 0.9f), W::Bold, 0.08f), theme.panelText, Justification::centredLeft);
+        engineLabelR = Rectangle<int> (engineLabelX, engineLabelY, 90, keyH());
+        drawLegend (g, "ENGINE", engineLabelR.toFloat(), ui (theme.tpt ("label:ENGINE", jmax (9.0f, theme.keyPt * 0.9f)), W::Bold, 0.08f), theme.tcol ("label:ENGINE", theme.panelText), Justification::centredLeft);
+        titleR.clear();
         for (auto& s : sections)
         {
             auto b = s.area.toFloat();
@@ -1736,13 +1839,19 @@ private:
                     g.setGradientFill (ColourGradient (Colour (0xffe2e4e6), sr.getX(), sr.getY(), Colour (0xff6d7277), sr.getRight(), sr.getBottom(), false)); g.fillEllipse (sr);
                     g.setColour (Colours::black.withAlpha (0.55f)); g.drawLine (sr.getX() + 2, sr.getCentreY(), sr.getRight() - 2, sr.getCentreY(), 1.2f);
                 }
-                const auto f = ui (jmax (10.0f, theme.knobPt * 1.0f), W::Bold, 0.18f);
-                drawLegend (g, s.title, Rectangle<float> (b.getX() + 20, b.getY() + 4, b.getWidth() - 40, (float) keyH()), f, Colours::white.withAlpha (0.92f), Justification::centredLeft);
+                const String tid = "section:" + s.title;
+                const auto f = ui (theme.tpt (tid, jmax (10.0f, theme.knobPt * 1.0f)), W::Bold, 0.18f);
+                const auto tr = Rectangle<float> (b.getX() + 20, b.getY() + 4, textW (f, s.title) + 10, (float) keyH());
+                titleR.push_back ({ s.title, tr.toNearestInt() });
+                drawLegend (g, s.title, tr, f, theme.tcol (tid, Colours::white.withAlpha (0.92f)), Justification::centredLeft);
                 continue;
             }
             g.setColour (theme.panelText.withAlpha (0.25f)); g.drawRoundedRectangle (b, 4, 1.0f);
-            const auto f = ui (jmax (10.0f, theme.knobPt * 1.0f), W::Bold, 0.18f);
-            drawLegend (g, s.title, Rectangle<float> (b.getX() + 10, b.getY() + 6, b.getWidth() - 20, (float) keyH()), f, theme.panelText.withAlpha (0.85f), Justification::centredLeft);
+            const String tid = "section:" + s.title;
+            const auto f = ui (theme.tpt (tid, jmax (10.0f, theme.knobPt * 1.0f)), W::Bold, 0.18f);
+            const auto tr = Rectangle<float> (b.getX() + 10, b.getY() + 6, textW (f, s.title) + 10, (float) keyH());
+            titleR.push_back ({ s.title, tr.toNearestInt() });
+            drawLegend (g, s.title, tr, f, theme.tcol (tid, theme.panelText.withAlpha (0.85f)), Justification::centredLeft);
         }
     }
 
@@ -1763,7 +1872,12 @@ private:
         screen.setBounds (x0, y, wAll, 360); layoutScreen(); y += 370;
         std::vector<LarcKey*> keys { pageKey.get() }; for (auto& k : algKeys) keys.push_back (k.get()); for (auto& k : myKeys) keys.push_back (k.get());
         y = flowKeys (keys, x0, wAll, y, kh, gap) + 4;
-        labelH = theme.faderPt * 3.6f + 14;
+        {
+            float gp = theme.faderPt * 0.95f, np = theme.faderPt, vp = theme.faderPt;
+            for (auto& t : pageTargets) { gp = jmax (gp, groupPtFor (t.group)); np = jmax (np, theme.tpt ("fader name:" + t.name, theme.faderPt)); vp = jmax (vp, theme.tpt ("fader value:" + t.name, theme.faderPt)); }
+            nameLines = 3;
+            labelH = gp + 10 + np * (nameLines + 0.3f) + vp + 10;
+        }
         faderArea = Rectangle<int> (x0, y + (int) labelH, wAll, kH - 46 - (y + (int) labelH));
         layoutFaders();
         layoutDrawer();
@@ -1859,7 +1973,7 @@ private:
     void addControlMenu (Point<int> atInScreen)
     {
         const auto pins = loadPins();
-        const StringArray order = page == 1 ? StringArray { "TIME", "REPEATS", "LEVEL", "TONE", "SHAPE", "OTHER" } : StringArray { "EARLY", "DECAY", "SPACE", "TONE", "MIX", "OTHER" };
+        const StringArray order = groupOrder();
         PopupMenu m; m.addSectionHeader ("Put a control here");
         for (auto& gname : order)
         {
@@ -1891,19 +2005,55 @@ private:
         void timerCallback() override { stopTimer(); if (armed && ! (busy && busy())) { armed = false; ed->addControlMenu (down); } }
     };
     HoldWatch holdRev, holdDelay;
+    // faders in groups (a heading over each, a gap between); one row, or two when there are many - a group never splits
+    struct GroupBox { String group; Rectangle<int> head; };
+    std::vector<GroupBox> groupBoxes;
+    std::vector<Rectangle<int>> nameR, valueR; int nameLines = 2;
+    float groupPtFor (const String& g) const { return theme.tpt ("group:" + g, theme.faderPt * 0.95f); }
     void layoutFaders()
     {
         nShown = jmin ((int) pageTargets.size(), kMaxFaders);
-        const int rows = nShown > 16 ? 2 : 1, perRow = (nShown + rows - 1) / jmax (1, rows);
-        const float colW = perRow > 0 ? faderArea.getWidth() / (float) perRow : 0;
-        const int rowH = (faderArea.getHeight() - (rows - 1) * (int) labelH) / rows;
-        for (int i = 0; i < kMaxFaders; ++i)
-        {
-            auto& f = *faders[(size_t) i];
-            if (i >= nShown) { f.setVisible (false); continue; }
-            const int row = i / perRow, col = i % perRow;
-            f.setBounds ((int) (faderArea.getX() + col * colW), faderArea.getY() + row * (rowH + (int) labelH), (int) colW, rowH); f.setVisible (true);
+        groupBoxes.clear(); nameR.assign ((size_t) kMaxFaders, {}); valueR.assign ((size_t) kMaxFaders, {});
+        // runs of the same group
+        std::vector<std::pair<int, int>> runs;   // first, count
+        for (int i = 0; i < nShown; ++i) { if (runs.empty() || pageTargets[(size_t) i].group != pageTargets[(size_t) runs.back().first].group) runs.push_back ({ i, 0 }); ++runs.back().second; }
+        const int rows = nShown > 16 ? 2 : 1;
+        std::vector<std::vector<int>> rowRuns ((size_t) rows);
+        {   // two rows: split between groups where the rows come out most even
+            size_t split = runs.size();
+            if (rows == 2) { int best = 1 << 30, cnt = 0; for (size_t k = 0; k + 1 < runs.size(); ++k) { cnt += runs[k].second; const int d = std::abs (nShown - 2 * cnt); if (d < best) { best = d; split = k + 1; } } }
+            for (size_t k = 0; k < runs.size(); ++k) rowRuns[(size_t) (k < split ? 0 : 1)].push_back ((int) k);
         }
+        const int gapG = 16;
+        const int rowH = (faderArea.getHeight() - (rows - 1) * (int) labelH) / rows;
+        for (int r = 0; r < rows; ++r)
+        {
+            int n = 0; for (int k : rowRuns[(size_t) r]) n += runs[(size_t) k].second;
+            if (n == 0) continue;
+            const int ng = (int) rowRuns[(size_t) r].size();
+            const float colW = (faderArea.getWidth() - gapG * (ng - 1)) / (float) n;
+            const int y = faderArea.getY() + r * (rowH + (int) labelH);
+            float x = (float) faderArea.getX();
+            for (int k : rowRuns[(size_t) r])
+            {
+                const auto& run = runs[(size_t) k];
+                const float x0 = x;
+                for (int q = 0; q < run.second; ++q)
+                {
+                    const int i = run.first + q;
+                    faders[(size_t) i]->setBounds ((int) x, y, (int) colW, rowH); faders[(size_t) i]->setVisible (true);
+                    const float vpt = theme.tpt ("fader value:" + pageTargets[(size_t) i].name, theme.faderPt);
+                    valueR[(size_t) i] = Rectangle<int> ((int) x, y - (int) (vpt + 6), (int) colW, (int) (vpt + 4));
+                    nameR[(size_t) i] = Rectangle<int> ((int) x + 1, y - (int) labelH + (int) (groupPtFor (run.second > 0 ? pageTargets[(size_t) run.first].group : String()) + 10), (int) colW - 2,
+                                                          valueR[(size_t) i].getY() - (y - (int) labelH + (int) (groupPtFor (pageTargets[(size_t) run.first].group) + 10)));
+                    x += colW;
+                }
+                const auto& g = pageTargets[(size_t) run.first].group;
+                groupBoxes.push_back ({ g, Rectangle<int> ((int) x0, y - (int) labelH, (int) (x - x0), (int) groupPtFor (g) + 6) });
+                x += gapG;
+            }
+        }
+        for (int i = nShown; i < kMaxFaders; ++i) faders[(size_t) i]->setVisible (false);
         content.repaint();
     }
     void layoutDrawer()
@@ -1926,8 +2076,8 @@ private:
         {
             int y = A + 6;
             machAKey->setVisible (config() != 0); machBKey->setVisible (config() != 0);
-            const int lw = (int) textW (ui (jmax (9.0f, theme.keyPt * 0.9f), W::Bold, 0.08f), "ENGINE") + 14;
-            engineLabelY = y; engineLabelX = x0 + (int) textW (ui (jmax (10.0f, theme.knobPt), W::Bold, 0.18f), "SYSTEM") + 24;
+            const int lw = (int) textW (ui (theme.tpt ("label:ENGINE", jmax (9.0f, theme.keyPt * 0.9f)), W::Bold, 0.08f), "ENGINE") + 14;
+            engineLabelY = y; engineLabelX = x0 + (int) textW (ui (theme.tpt ("section:SYSTEM", jmax (10.0f, theme.knobPt)), W::Bold, 0.18f), "SYSTEM") + 24;
             engineBox.setBounds (engineLabelX + lw, y, 120, kh); y += kh + gap;
             y = flowKeys ({ machAKey.get(), machBKey.get(), muteKey.get(), setupKey.get(), ironKey.get() }, x0, wAll, y, kh, gap);
             const int qw = wAll / 4, kb = S - 4 - 6 - y;
@@ -1984,6 +2134,23 @@ private:
         setSize (roundToInt (w * scale), roundToInt (kH * scale));
         applying = false;
         resized(); repaint(); content.repaint();
+    }
+    void panelRightClick (Point<int> p)
+    {
+        for (auto& gb : groupBoxes) if (gb.head.expanded (0, 4).contains (p)) { editText ("group:" + gb.group, "Group heading " + groupTitle (gb.group), theme.faderPt * 0.95f, theme.keyLight, &content, gb.head); return; }
+        for (int i = 0; i < nShown; ++i)
+        {
+            const auto& tg = pageTargets[(size_t) i];
+            if (nameR[(size_t) i].contains (p)) { editText ("fader name:" + tg.name, "Fader name " + tg.name, theme.faderPt, theme.panelText, &content, nameR[(size_t) i]); return; }
+            if (valueR[(size_t) i].contains (p)) { editText ("fader value:" + tg.name, "Fader value " + tg.name, theme.faderPt, theme.keyLight, &content, valueR[(size_t) i]); return; }
+        }
+        showSizeMenu();
+    }
+    void drawerRightClick (Point<int> p)
+    {
+        if (engineLabelR.contains (p)) { editText ("label:ENGINE", "ENGINE", jmax (9.0f, theme.keyPt * 0.9f), theme.panelText, &drawer, engineLabelR); return; }
+        for (auto& t : titleR) if (t.second.contains (p)) { editText ("section:" + t.first, "Title " + t.first, jmax (10.0f, theme.knobPt), t.first == "SYSTEM" ? theme.panelText : Colours::white, &drawer, t.second); return; }
+        showSizeMenu();
     }
     void showSizeMenu()
     {
@@ -2046,7 +2213,13 @@ private:
             addP ("dlOn", "Delay On"); addP ("dlSync", "Tempo Sync"); addP (sync ? "dlDivL" : "dlTimeL", "Delay Left"); addP (sync ? "dlDivR" : "dlTimeR", "Delay Right");
             addP ("dlFb", "Feedback"); addP ("dlMix", "Delay Level"); addP ("dlAtk", "Delay Attack"); addP ("dlPing", "Ping-Pong"); addP ("dlLow", "Delay Bass"); addP ("dlHigh", "Delay Treble");
         }
+        // grouped by function, in a fixed order
+        const StringArray order = groupOrder();
+        for (auto& t : pageTargets) t.group = groupOf (t.name, page);
+        std::stable_sort (pageTargets.begin(), pageTargets.end(), [&order] (const Target& a, const Target& b) { return order.indexOf (a.group) < order.indexOf (b.group); });
     }
+    StringArray groupOrder() const { return page == 1 ? StringArray { "TIME", "REPEATS", "LEVEL", "TONE", "SHAPE", "OTHER" } : StringArray { "EARLY", "DECAY", "SPACE", "TONE", "MIX", "OTHER" }; }
+    static String groupTitle (const String& g) { return g == "OTHER" ? String ("MORE") : g; }
     String targetName (const Target& t) const { return t.name; }
     float targetNorm (const Target& t) const { if (t.param) return t.param->getValue(); const auto& s = proc.spec (machine, t.slot); return (s.unit == l480::uKey) ? 0.0f : proc.slotNorm (machine, t.slot); }
     String targetText (const Target& t) const
@@ -2096,7 +2269,7 @@ private:
     }
     void refreshPage (bool snap)
     {
-        buildPage(); layoutScreen(); layoutFaders();
+        buildPage(); layout();            // the label height follows the page's texts
         pageKey->setText (page == 0 ? "REVERB" : "DELAY");
         for (int i = 0; i < nShown; ++i)
         {
@@ -2193,7 +2366,7 @@ private:
             if (! tg.trigger) faders[(size_t) i]->setTarget (targetNorm (tg));
             if (faders[(size_t) i]->animate()) { faders[(size_t) i]->repaint(); labels = true; }
         }
-        if (labels || ++labelTick % 6 == 0) content.repaint (faderArea.withTrimmedTop (-(int) labelH));
+        if (labels || ++labelTick % 6 == 0) content.repaint (faderArea.withTrimmedTop (-(int) labelH * 2 - 10));
         // keys light themselves while on
         const int algo = proc.algoOf (machine), bank = proc.prog (machine).bank;
         static const char* algName[] = { "HALL", "RANDOM HALL", "ROOM", "CHAMBER", "PLATE", "AMBIENCE", "INVERSE", "DELAY", "CHORUS", "PITCH" };
@@ -2264,7 +2437,7 @@ private:
             auto k = std::make_unique<LarcKey> (theme, myDefs[i].label.toUpperCase()); k->kc = &Theme::keyMine; content.addAndMakeVisible (*k);
             k->onClick = [this, i] { if (i >= myDefs.size()) return; const auto d = myDefs[i];
                                      if (d.user.isNotEmpty()) proc.loadUserPreset (d.user); else proc.loadProgram (machine, d.program); page = 0; refreshPage (true); };
-            k->onRightClick = [this, i] { keyMenu ((int) i); };
+            auto* kp = k.get(); k->onRightClick = [this, i, kp] { keyMenu ((int) i, kp); };
             myKeys.push_back (std::move (k));
         }
     }
@@ -2274,14 +2447,17 @@ private:
         d.label = d.user.isNotEmpty() ? d.user : String (proc.prog (machine).name);
         myDefs.push_back (d); saveMyKeys(); rebuildMyKeys(); layout(); content.repaint();
     }
-    void keyMenu (int mine)
+    void keyMenu (int mine, LarcKey* key = nullptr)
     {
         PopupMenu m;
         const String cur = proc.userPresetName.isNotEmpty() ? proc.userPresetName : String (proc.prog (machine).name);
         m.addItem (1, "Make a button for the current preset  (" + cur + ")");
         if (mine >= 0) { m.addSeparator(); m.addItem (2, "Rename this button..."); m.addItem (3, "Remove this button"); }
-        m.showMenuAsync (PopupMenu::Options(), [this, mine] (int r)
+        if (key != nullptr) { m.addSeparator(); m.addItem (4, "Text size and colour of this button..."); }
+        Component::SafePointer<LarcKey> kp (key);
+        m.showMenuAsync (PopupMenu::Options(), [this, mine, kp] (int r)
         {
+            if (r == 4 && kp != nullptr) { editText (kp->textId(), "Button " + kp->getText(), theme.keyPt, theme.keyText, kp.getComponent(), kp->getLocalBounds()); return; }
             if (r == 1) addMyKey();
             else if (r == 3 && mine >= 0 && mine < (int) myDefs.size()) { myDefs.erase (myDefs.begin() + mine); saveMyKeys(); rebuildMyKeys(); layout(); content.repaint(); }
             else if (r == 2 && mine >= 0 && mine < (int) myDefs.size())
@@ -2297,7 +2473,7 @@ private:
     }
     std::vector<std::unique_ptr<LarcFader>> faders;
     Viewport drawerView; Drawer drawer;
-    ComboBox engineBox; int engineLabelY = 0, engineLabelX = 18;
+    ComboBox engineBox; int engineLabelY = 0, engineLabelX = 18; Rectangle<int> engineLabelR; std::vector<std::pair<String, Rectangle<int>>> titleR;
     VuMeter vu { theme };
     Viewport setupView;
     std::unique_ptr<ParamKey> ironKey, anOnKey, eqOnKey, cpOnKey, satKey, duckKey;
