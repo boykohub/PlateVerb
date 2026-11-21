@@ -2,11 +2,13 @@ name: Build Flexiverb
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [main, flexiverb-larc]
     paths:
       - 'Source/**'
       - 'CMakeLists.txt'
       - '.github/workflows/build-PlateVerb.yml'
+permissions:
+  contents: write
 jobs:
   build:
     runs-on: windows-latest
@@ -18,3 +20,16 @@ jobs:
         with:
           name: Flexiverb-VST3
           path: build/PlateVerb_artefacts/Release/VST3
+      # a fixed download link per branch: the release "flexiverb-<branch>" always holds the newest build
+      - name: Publish download
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "flexiverb-${{ github.ref_name }}"
+          Compress-Archive -Path build/PlateVerb_artefacts/Release/VST3/Flexiverb.vst3 -DestinationPath Flexiverb-VST3-Windows.zip -Force
+          gh release delete $tag --yes --cleanup-tag 2>$null
+          $global:LASTEXITCODE = 0
+          gh release create $tag Flexiverb-VST3-Windows.zip --prerelease --target ${{ github.sha }} `
+            --title "Flexiverb ${{ github.ref_name }} (newest build)" `
+            --notes "Windows VST3. Unzip and copy Flexiverb.vst3 into C:\Program Files\Common Files\VST3, then rescan plugins in your DAW. Built from commit ${{ github.sha }}."
