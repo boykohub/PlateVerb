@@ -40,8 +40,9 @@ struct Theme
 {
     Colour panel { 0xff2c2d30 }, panelText { 0xffe9e5da }, cheek { 0xff141415 }, key { 0xffbdbab2 }, keyText { 0xff1c1d1f },
            keyLight { 0xffffa63a }, display { 0xff140707 }, displayText { 0xffff3a1e }, fader { 0xff2b2c2f },
-           eqKnob { 0xff5a6470 }, eqInner { 0xff8a2a22 }, compKnob { 0xff3a3c40 }, analogKnob { 0xff6b4a2c };
-    float gradient = 0.45f, keyPt = 12.5f, knobPt = 11.5f, displayPt = 12.0f, faderPt = 10.5f;
+           eqKnob { 0xff5a6470 }, eqInner { 0xff8a2a22 }, compKnob { 0xff3a3c40 }, analogKnob { 0xff6b4a2c },
+           lowCol { 0xffff3b24 }, midCol { 0xffffb22e }, highCol { 0xff5cc8ff };
+    float gradient = 0.45f, keyPt = 12.5f, knobPt = 11.5f, displayPt = 15.0f, faderPt = 13.5f;
     int depth = 1;                                         // 3D: 0 flat, 1 soft, 2 deep
 
     struct Item { const char* name; Colour Theme::* c; };
@@ -52,7 +53,8 @@ struct Theme
             { "Buttons", &Theme::key }, { "Button text", &Theme::keyText }, { "Button light", &Theme::keyLight },
             { "Screen", &Theme::display }, { "Screen text", &Theme::displayText }, { "Faders", &Theme::fader },
             { "EQ knobs", &Theme::eqKnob }, { "EQ gain caps", &Theme::eqInner }, { "Compressor knobs", &Theme::compKnob },
-            { "Analog knobs", &Theme::analogKnob } };
+            { "Analog knobs", &Theme::analogKnob },
+            { "Graph low", &Theme::lowCol }, { "Graph mid", &Theme::midCol }, { "Graph high", &Theme::highCol } };
         return v;
     }
     String toString() const
@@ -60,18 +62,19 @@ struct Theme
         XmlElement x ("LOOK");
         int i = 0; for (auto& it : items()) x.setAttribute ("c" + String (i++), (this->*it.c).toString());
         x.setAttribute ("grad", gradient); x.setAttribute ("keyPt", keyPt); x.setAttribute ("knobPt", knobPt); x.setAttribute ("dispPt", displayPt);
-        x.setAttribute ("faderPt", faderPt); x.setAttribute ("depth", depth); x.setAttribute ("v", 3);
+        x.setAttribute ("faderPt", faderPt); x.setAttribute ("depth", depth); x.setAttribute ("v", 4);
         return x.toString (XmlElement::TextFormat().singleLine().withoutHeader());
     }
     bool fromString (const String& s)
     {
-        auto x = parseXML (s); if (x == nullptr || ! x->hasTagName ("LOOK") || x->getIntAttribute ("v") < 3) return false;   // older looks: start fresh
+        auto x = parseXML (s); if (x == nullptr || ! x->hasTagName ("LOOK") || x->getIntAttribute ("v") < 4) return false;   // older looks: start fresh
         int i = 0; for (auto& it : items()) { const auto a = x->getStringAttribute ("c" + String (i++)); if (a.isNotEmpty()) this->*it.c = Colour::fromString (a); }
         gradient = (float) x->getDoubleAttribute ("grad", gradient); keyPt = (float) x->getDoubleAttribute ("keyPt", keyPt);
         knobPt = (float) x->getDoubleAttribute ("knobPt", knobPt); displayPt = (float) x->getDoubleAttribute ("dispPt", displayPt);
         faderPt = (float) x->getDoubleAttribute ("faderPt", faderPt); depth = jlimit (0, 2, x->getIntAttribute ("depth", depth));
         return true;
     }
+    float sz (float base) const { return base * displayPt / 12.0f; }   // screen text grows with the screen text size
     float d3() const { return depth == 0 ? 0.15f : depth == 1 ? 0.6f : 1.0f; }     // 3D amount
     Colour hi (Colour c, float k = 1.0f) const { return c.brighter (0.35f * gradient * k * (0.4f + 0.6f * d3())); }
     Colour lo (Colour c, float k = 1.0f) const { return c.darker (0.55f * gradient * k * (0.4f + 0.6f * d3())); }
@@ -409,23 +412,23 @@ public:
     std::function<void (const String&, const String&)> onShow;
     void paint (Graphics& g) override
     {
-        plot = getLocalBounds().toFloat().reduced (36, 6).withTrimmedRight (-24).withTrimmedBottom (10);
+        plot = getLocalBounds().toFloat().reduced (th.sz (40.0f), 6).withTrimmedRight (-th.sz (28.0f)).withTrimmedBottom (th.sz (11.0f)).withTrimmedTop (th.sz (8.0f));
         const int m = machine ? machine() : 0;
         const Colour col = th.displayText;
         if (! proc.hasDecayCurve (m)) return;
         rtMain = jmax (0.05f, proc.mainRt (m));
         yLo = jmax (0.02f, rtMain / 10.0f); yHi = rtMain * 6.0f;
-        g.setFont (ui (8.5f, W::Medium));
+        g.setFont (ui (th.sz (8.5f), W::Medium));
         for (float f : { 50.0f, 100.0f, 200.0f, 500.0f, 1000.0f, 2000.0f, 5000.0f, 10000.0f })
         {
             const float x = xOf (f); g.setColour (col.withAlpha (0.10f)); g.drawVerticalLine ((int) x, plot.getY(), plot.getBottom());
-            g.setColour (col.withAlpha (0.55f)); g.drawText (f >= 1000 ? String (f / 1000, 0) + "k" : String ((int) f), Rectangle<float> (x - 15, plot.getBottom() + 1, 30, 10), Justification::centred, false);
+            g.setColour (col.withAlpha (0.55f)); g.drawText (f >= 1000 ? String (f / 1000, 0) + "k" : String ((int) f), Rectangle<float> (x - th.sz (18.0f), plot.getBottom() + 1, th.sz (36.0f), th.sz (12.0f)), Justification::centred, false);
         }
         for (float t : { 0.05f, 0.1f, 0.2f, 0.5f, 1.0f, 2.0f, 5.0f, 10.0f, 20.0f, 50.0f })
         {
             if (t < yLo || t > yHi) continue;
             const float y = yOf (t); g.setColour (col.withAlpha (0.10f)); g.drawHorizontalLine ((int) y, plot.getX(), plot.getRight());
-            g.setColour (col.withAlpha (0.55f)); g.drawText (String (t, t < 1 ? 2 : 0) + " s", Rectangle<float> (plot.getX() - 36, y - 5, 33, 10), Justification::centredRight, false);
+            g.setColour (col.withAlpha (0.55f)); g.drawText (String (t, t < 1 ? 2 : 0) + " s", Rectangle<float> (plot.getX() - th.sz (40.0f), y - th.sz (6.0f), th.sz (37.0f), th.sz (12.0f)), Justification::centredRight, false);
         }
         {
             Path pp;
@@ -447,8 +450,8 @@ public:
                 g.setColour ((int) i == drag || (int) i == hover ? Colours::white : col); g.drawEllipse (Rectangle<float> (9, 9).withCentre (pt), 2.0f);
             }
         }
-        g.setColour (col.withAlpha (0.6f)); g.setFont (ui (9.0f, W::Bold, 0.05f));
-        g.drawText (proc.curveOn[m] ? "Decay time: your curve  (double-click a point to remove it)" : "Decay time: click to add a point", getLocalBounds().toFloat().reduced (36, 0).withHeight (12), Justification::topLeft, false);
+        g.setColour (col.withAlpha (0.6f)); g.setFont (ui (th.sz (9.0f), W::Bold, 0.05f));
+        g.drawText (proc.curveOn[m] ? "Decay time: your curve  (double-click a point to remove it)" : "Decay time: click to add a point", getLocalBounds().toFloat().reduced (th.sz (36.0f), 0).withHeight (th.sz (12.0f) + 2), Justification::topLeft, false);
     }
     void mouseMove (const MouseEvent& e) override { const int h = hit (e.position); if (h != hover) { hover = h; repaint(); } }
     void mouseExit (const MouseEvent&) override { hover = -1; repaint(); }
@@ -539,21 +542,21 @@ public:
     bool hasTaps() const { return (utility && utility()) || ! delayTaps (proc.algoOf (machine ? machine() : 0)).empty(); }
     void paint (Graphics& g) override
     {
-        plot = getLocalBounds().toFloat().reduced (36, 6).withTrimmedRight (-24).withTrimmedBottom (10).withTrimmedTop (22);
+        plot = getLocalBounds().toFloat().reduced (th.sz (40.0f), 6).withTrimmedRight (-th.sz (28.0f)).withTrimmedBottom (th.sz (11.0f)).withTrimmedTop (th.sz (22.0f));
         collect();
         const Colour col = th.displayText;
         // time grid
-        g.setFont (ui (8.5f, W::Medium));
+        g.setFont (ui (th.sz (8.5f), W::Medium));
         const float step = tMax <= 200 ? 25 : tMax <= 600 ? 100 : tMax <= 1500 ? 250 : 500;
         for (float t = 0; t <= tMax + 1; t += step)
         {
             const float x = xOf (t); g.setColour (col.withAlpha (0.10f)); g.drawVerticalLine ((int) x, plot.getY(), plot.getBottom());
-            g.setColour (col.withAlpha (0.55f)); g.drawText (String ((int) t) + " ms", Rectangle<float> (x - 22, plot.getBottom() + 1, 44, 10), Justification::centred, false);
+            g.setColour (col.withAlpha (0.55f)); g.drawText (String ((int) t) + " ms", Rectangle<float> (x - th.sz (26.0f), plot.getBottom() + 1, th.sz (52.0f), th.sz (12.0f)), Justification::centred, false);
         }
         for (float db : { 0.0f, -12.0f, -24.0f, -36.0f })
         {
             const float y = yOf (db); g.setColour (col.withAlpha (0.10f)); g.drawHorizontalLine ((int) y, plot.getX(), plot.getRight());
-            g.setColour (col.withAlpha (0.55f)); g.drawText (String ((int) db) + " dB", Rectangle<float> (plot.getX() - 36, y - 5, 33, 10), Justification::centredRight, false);
+            g.setColour (col.withAlpha (0.55f)); g.drawText (String ((int) db) + " dB", Rectangle<float> (plot.getX() - th.sz (40.0f), y - th.sz (6.0f), th.sz (37.0f), th.sz (12.0f)), Justification::centredRight, false);
         }
         for (size_t i = 0; i < taps.size(); ++i)
         {
@@ -569,11 +572,11 @@ public:
             g.setColour (col); g.drawLine (x, plot.getBottom(), x, y, 1.8f);
             g.setColour (Colours::black); g.fillEllipse (Rectangle<float> (12, 12).withCentre ({ x, y }));
             g.setColour ((int) i == drag || (int) i == hover ? Colours::white : col); g.drawEllipse (Rectangle<float> (10, 10).withCentre ({ x, y }), 2.0f);
-            g.setFont (ui (9.0f, W::Bold)); g.setColour (col.withAlpha (0.85f));
+            g.setFont (ui (th.sz (9.0f), W::Bold)); g.setColour (col.withAlpha (0.85f));
             g.drawText (t.label, Rectangle<float> (x + 9, y - 5, 44, 11), Justification::left, false);
         }
-        g.setColour (col.withAlpha (0.6f)); g.setFont (ui (9.0f, W::Bold, 0.05f));
-        g.drawText ("Delay taps: drag a point - sideways for time, up and down for level", getLocalBounds().toFloat().reduced (36, 0).withHeight (12), Justification::topLeft, false);
+        g.setColour (col.withAlpha (0.6f)); g.setFont (ui (th.sz (9.0f), W::Bold, 0.05f));
+        g.drawText ("Delay taps: drag a point - sideways for time, up and down for level", getLocalBounds().toFloat().reduced (th.sz (36.0f), 0).withHeight (th.sz (12.0f) + 2), Justification::topLeft, false);
     }
     void mouseMove (const MouseEvent& e) override { collect(); const int h = hit (e.position); if (h != hover) { hover = h; repaint(); } }
     void mouseExit (const MouseEvent&) override { hover = -1; repaint(); }
@@ -828,7 +831,8 @@ private:
 class ResponseRenderer : public Thread
 {
 public:
-    struct Result { std::vector<float> er; std::vector<float> band[3]; int version = 0; };
+    static constexpr int kWfBands = 28;
+    struct Result { std::vector<float> er; std::vector<float> band[3]; std::vector<float> wf[kWfBands]; int version = 0; };
     ResponseRenderer() : Thread ("Flexiverb response") { startThread (Thread::Priority::low); }
     ~ResponseRenderer() override { stopThread (3000); }
     void request (const l480::EngineParams& p, double rate) { { const ScopedLock sl (lock); pending = p; pendingFs = rate; has = true; } notify(); }
@@ -873,6 +877,23 @@ private:
                 for (double v : e[bnd]) top = std::max (top, v);
             }
             for (int bnd = 0; bnd < 3; ++bnd) for (double v : e[bnd]) r.band[bnd].push_back ((float) std::max (-80.0, 10 * std::log10 (v / top + 1e-30)));
+            // waterfall: 28 bands, 40 Hz - 16 kHz (about a third of an octave apart), energy in 10 ms frames, dB re the loudest
+            {
+                std::vector<double> m ((size_t) (nf * fr)); for (int i = 0; i < nf * fr; ++i) m[(size_t) i] = 0.5 * (L[(size_t) i] + R[(size_t) i]);
+                std::vector<std::vector<double>> w (kWfBands); double wtop = 1e-30;
+                for (int bnd = 0; bnd < kWfBands && ! threadShouldExit(); ++bnd)
+                {
+                    const double fc = 40.0 * std::pow (400.0, bnd / (double) (kWfBands - 1));
+                    auto& v = w[(size_t) bnd]; v.assign ((size_t) nf, 0.0);
+                    if (fc > 0.45 * rate) continue;
+                    Bq q[2];
+                    for (auto& qq : q) { const double om = 2 * MathConstants<double>::pi * fc / rate, al = std::sin (om) / (2 * 4.3), a0 = 1 + al;
+                        qq.b0 = al / a0; qq.b1 = 0; qq.b2 = -al / a0; qq.a1 = -2 * std::cos (om) / a0; qq.a2 = (1 - al) / a0; }
+                    for (int i = 0; i < nf * fr; ++i) { const double y = q[1].p (q[0].p (m[(size_t) i])); v[(size_t) (i / fr)] += y * y; }
+                    for (double x : v) wtop = std::max (wtop, x);
+                }
+                for (int bnd = 0; bnd < kWfBands; ++bnd) for (double x : w[(size_t) bnd]) r.wf[bnd].push_back ((float) std::max (-80.0, 10 * std::log10 (x / wtop + 1e-30)));
+            }
             r.version = ++counter;
             { const ScopedLock sl (lock); result = r; }
             version.store (counter);
@@ -904,19 +925,21 @@ public:
         auto glide = [&moving] (std::vector<float>& a, const std::vector<float>& b)
         { if (a.size() != b.size()) { a = b; moving = true; return; } for (size_t i = 0; i < a.size(); ++i) { const float d = b[i] - a[i]; if (std::abs (d) > 0.05f) { a[i] += d * 0.25f; moving = true; } else a[i] = b[i]; } };
         glide (shown.er, target.er); for (int k = 0; k < 3; ++k) glide (shown.band[k], target.band[k]);
+        for (int k = 0; k < ResponseRenderer::kWfBands; ++k) glide (shown.wf[k], target.wf[k]);
         return moving;
     }
     void paint (Graphics& g) override
     {
         const Colour col = th.displayText;
         auto r = getLocalBounds().toFloat().reduced (6, 4);
-        auto erA = r.removeFromLeft (r.getWidth() * 0.3f).reduced (0, 2); r.removeFromLeft (10);
+        auto erA = r.removeFromLeft (r.getWidth() * 0.26f).reduced (0, 2); r.removeFromLeft (10);
         auto meters = r.removeFromRight (26); r.removeFromRight (6);
-        erArea = erA.withTrimmedTop (14).withTrimmedBottom (12).withTrimmedLeft (24); decArea = r.withTrimmedTop (14).withTrimmedBottom (12).withTrimmedLeft (30);
-        g.setFont (ui (9.0f, W::Bold, 0.05f)); g.setColour (col.withAlpha (0.7f));
-        g.drawText ("EARLY REFLECTIONS", erA.withHeight (12), Justification::left, false);
-        g.drawText ("DECAY  -  LOW  MID  HIGH", r.withHeight (12), Justification::left, false);
-        grid (g, erArea, 150.0f, 50.0f, "ms"); grid (g, decArea, tMax(), tMax() > 2.0f ? 1.0f : 0.5f, "s");
+        const float lh = th.sz (12.0f);
+        erArea = erA.withTrimmedTop (lh + 4).withTrimmedBottom (lh + 2).withTrimmedLeft (lh * 2.2f); decArea = r.withTrimmedTop (lh + 4).withTrimmedBottom (lh + 2).withTrimmedLeft (lh * 2.4f).withTrimmedRight (lh * 3.2f);
+        g.setFont (ui (th.sz (9.0f), W::Bold, 0.05f)); g.setColour (col.withAlpha (0.7f));
+        g.drawText ("EARLY REFLECTIONS", erA.withHeight (th.sz (12.0f) + 2), Justification::left, false);
+        g.drawText ("DECAY  -  LOW / MID / HIGH,  TIME COMING FORWARD", r.withHeight (th.sz (12.0f) + 2), Justification::left, false);
+        grid (g, erArea, 150.0f, 50.0f, "ms");
         if (shown.er.empty()) return;
         // early reflections as stems
         for (size_t k = 0; k < shown.er.size(); ++k)
@@ -937,36 +960,21 @@ public:
             pdAnchor = { x + 3, erArea.getY() };
         }
         else pdAnchor = { -1, -1 };
-        // band decay curves
-        const Colour bc[3] = { col.withMultipliedSaturation (0.6f).darker (0.15f), col, col.interpolatedWith (Colours::white, 0.55f) };
-        for (int b = 0; b < 3; ++b)
-        {
-            Path p; const auto& e = shown.band[b]; bool started = false;
-            for (size_t i = 0; i < e.size(); ++i)
-            {
-                const float t = (float) i * 0.01f; if (t > tMax()) break;
-                float sm = 0; int nsm = 0;                                   // 50 ms smoothing of the energy (in power, then dB)
-                for (int k = -2; k <= 2; ++k) { const int j = (int) i + k; if (j >= 0 && j < (int) e.size()) { sm += std::pow (10.0f, e[(size_t) j] / 10.0f); ++nsm; } }
-                const float v = 10.0f * std::log10 (sm / (float) jmax (1, nsm) + 1e-12f);
-                const Point<float> pt (decArea.getX() + decArea.getWidth() * t / tMax(), yOf (decArea, v));
-                if (! started) { p.startNewSubPath (pt); started = true; } else p.lineTo (pt);
-            }
-            g.setColour (bc[b].withAlpha (0.25f)); g.strokePath (p, PathStrokeType (4.0f));
-            g.setColour (bc[b]); g.strokePath (p, PathStrokeType (1.6f));
-        }
-        // decay handle: where the mid curve falls 30 dB
+        waterfall (g);
+        const Colour bc[3] = { th.lowCol, th.midCol, th.highCol };
+        // decay handle: on the 1 kHz line where it has fallen 30 dB (drag sideways for decay time)
         const float th30 = t30();
         if (th30 > 0)
         {
-            handle = { decArea.getX() + decArea.getWidth() * th30 / tMax(), yOf (decArea, -30.0f) };
+            handle = P (wfIndex (1000.0f), jmin (th30, tMax()), -30.0f);
             g.setColour (Colours::black); g.fillEllipse (Rectangle<float> (12, 12).withCentre (handle));
             g.setColour (dragging == 2 ? Colours::white : col); g.drawEllipse (Rectangle<float> (10, 10).withCentre (handle), 2.0f);
             rtAnchor = handle.translated (8, -22);
         }
         else rtAnchor = { -1, -1 };
-        g.setFont (ui (8.5f, W::Bold));
-        const char* bn[3] = { "LOW", "MID", "HIGH" };
-        for (int b = 0; b < 3; ++b) { g.setColour (bc[b]); g.drawText (bn[b], Rectangle<float> (decArea.getRight() - 120 + b * 40, decArea.getY() - 13, 40, 11), Justification::right, false); }
+        g.setFont (ui (th.sz (8.0f), W::Bold));
+        const char* bn[3] = { "L", "M", "H" };
+        for (int b = 0; b < 3; ++b) { g.setColour (bc[b]); g.drawText (bn[b], Rectangle<float> (meters.getX() + b * 9.0f - 1, decArea.getBottom() + 1, 9, th.sz (12.0f)), Justification::centred, false); }
         // live output bars
         for (int b = 0; b < 3; ++b)
         {
@@ -992,22 +1000,90 @@ public:
     }
     void mouseUp (const MouseEvent&) override { if (dragging && gesture) gesture (false); dragging = 0; repaint(); }
 private:
+    // ---- the 3D waterfall: frequency across (log), time going back (up and to the right), level up
+    static constexpr float kDepthX = 0.30f, kDepthY = 0.42f;
+    static float wfIndex (float f) { return (float) (ResponseRenderer::kWfBands - 1) * std::log (jlimit (40.0f, 16000.0f, f) / 40.0f) / std::log (400.0f); }
+    Point<float> P (float band, float t, float db) const
+    {
+        const float fw = decArea.getWidth() * (1.0f - kDepthX), lh = decArea.getHeight() * (1.0f - kDepthY), k = 1.0f - jlimit (0.0f, 1.0f, t / tMax());   // the start at the back, the tail comes toward you
+        return { decArea.getX() + fw * band / (float) (ResponseRenderer::kWfBands - 1) + decArea.getWidth() * kDepthX * k,
+                 decArea.getBottom() - lh * (jlimit (-60.0f, 0.0f, db) + 60.0f) / 60.0f - decArea.getHeight() * kDepthY * k };
+    }
+    float wfLevel (int band, float t) const      // 50 ms average of the band's energy around t
+    {
+        const auto& e = shown.wf[band]; if (e.empty()) return -80.0f;
+        const int c = (int) (t / 0.01f); float sm = 0; int n = 0;
+        for (int j = c - 2; j <= c + 2; ++j) if (j >= 0 && j < (int) e.size()) { sm += std::pow (10.0f, e[(size_t) j] / 10.0f); ++n; }
+        return 10.0f * std::log10 (sm / (float) jmax (1, n) + 1e-12f);
+    }
+    void waterfall (Graphics& g)
+    {
+        const Colour col = th.displayText; const int nb = ResponseRenderer::kWfBands;
+        const float tm = tMax();
+        // the floor and walls
+        g.setColour (col.withAlpha (0.10f));
+        for (float f : { 100.0f, 1000.0f, 10000.0f }) g.drawLine (Line<float> (P (wfIndex (f), 0, -60), P (wfIndex (f), tm, -60)), 1.0f);
+        const float step = tm > 2.0f ? 0.5f : tm > 1.0f ? 0.25f : 0.1f;
+        g.setFont (ui (th.sz (8.0f), W::Medium));
+        for (float t = 0; t <= tm + 1e-4f; t += step)
+        {
+            g.setColour (col.withAlpha (0.10f)); g.drawLine (Line<float> (P (0, t, -60), P ((float) nb - 1, t, -60)), 1.0f);
+            const auto q = P ((float) nb - 1, t, -60);
+            g.setColour (col.withAlpha (0.5f)); g.drawText (String (t, step < 0.5f ? 2 : 1) + " s", Rectangle<float> (q.x + 3, q.y - th.sz (6.0f), th.sz (48.0f), th.sz (12.0f)), Justification::left, false);
+        }
+        for (float db : { 0.0f, -20.0f, -40.0f, -60.0f })
+        {
+            const auto a = P (0, 0, db), b = P (0, tm, db);
+            g.setColour (col.withAlpha (0.08f)); g.drawLine (Line<float> (a, b), 1.0f);
+            g.setColour (col.withAlpha (0.5f)); g.drawText (String ((int) db), Rectangle<float> (a.x - th.sz (30.0f), a.y - th.sz (6.0f), th.sz (26.0f), th.sz (12.0f)), Justification::right, false);
+        }
+        for (float f : { 100.0f, 1000.0f, 10000.0f })
+        {
+            const auto a = P (wfIndex (f), 0, -60);
+            g.setColour (col.withAlpha (0.5f)); g.drawText (f >= 1000 ? String ((int) (f / 1000)) + "k" : String ((int) f), Rectangle<float> (a.x - th.sz (18.0f), a.y + 1, th.sz (36.0f), th.sz (12.0f)), Justification::centred, false);
+        }
+        if (shown.wf[0].empty()) return;
+        // slices from the back (the start) to the front (the tail), each hiding what is behind it
+        const int ns = 34;
+        for (int si = 0; si < ns; ++si)
+        {
+            const float t = tm * (float) si / (float) (ns - 1), age = (float) si / (float) (ns - 1);
+            // one filled piece per range (low < 250 Hz, mid to 2.5 kHz, high above), each hiding what is behind it
+            const float edge[4] = { 0.0f, wfIndex (250.0f), wfIndex (2500.0f), (float) nb - 1 };
+            const Colour rc[3] = { th.lowCol, th.midCol, th.highCol };
+            for (int k = 0; k < 3; ++k)
+            {
+                Path top, fill; const float b0 = edge[k], b1 = edge[k + 1];
+                auto lvl = [&] (float bf) { const int i = jlimit (0, nb - 2, (int) bf); const float fr = bf - (float) i;
+                                            return wfLevel (i, t) * (1.0f - fr) + wfLevel (i + 1, t) * fr; };
+                fill.startNewSubPath (P (b0, t, -60));
+                for (float bf = b0; ; bf = jmin (b1, std::floor (bf) + 1.0f))
+                {
+                    const auto q = P (bf, t, lvl (bf)); if (bf == b0) top.startNewSubPath (q); else top.lineTo (q); fill.lineTo (q);
+                    if (bf >= b1) break;
+                }
+                fill.lineTo (P (b1, t, -60)); fill.closeSubPath();
+                g.setColour (th.display.interpolatedWith (rc[k], 0.06f + 0.16f * (1.0f - age))); g.fillPath (fill);
+                g.setColour (rc[k].withAlpha (0.3f + 0.7f * (1.0f - age))); g.strokePath (top, PathStrokeType (si == 0 ? 1.9f : 1.1f));
+            }
+        }
+    }
     float tMax() const { const float t = t30(); return t <= 0 ? 2.5f : jlimit (0.5f, 2.5f, t * 1.5f); }
     float t30() const { const auto& e = shown.band[1]; for (size_t i = 0; i < e.size(); ++i) if (e[i] < -30.0f) return (float) i * 0.01f; return e.empty() ? -1.0f : 2.5f; }
     static float yOf (Rectangle<float> a, float db) { return a.getBottom() - a.getHeight() * (jlimit (-60.0f, 0.0f, db) + 60.0f) / 60.0f; }
     void grid (Graphics& g, Rectangle<float> a, float tm, float step, const String& unit)
     {
-        const Colour col = th.displayText; g.setFont (ui (8.0f, W::Medium));
+        const Colour col = th.displayText; g.setFont (ui (th.sz (8.0f), W::Medium));
         for (float t = 0; t <= tm + 1e-4f; t += step)
         {
             const float x = a.getX() + a.getWidth() * t / tm;
             g.setColour (col.withAlpha (0.08f)); g.drawVerticalLine ((int) x, a.getY(), a.getBottom());
-            g.setColour (col.withAlpha (0.5f)); g.drawText (String (t, unit == "s" && step < 1 ? 1 : 0) + " " + unit, Rectangle<float> (x - 20, a.getBottom() + 1, 40, 10), Justification::centred, false);
+            g.setColour (col.withAlpha (0.5f)); g.drawText (String (t, unit == "s" && step < 1 ? 1 : 0) + " " + unit, Rectangle<float> (x - th.sz (24.0f), a.getBottom() + 1, th.sz (48.0f), th.sz (12.0f)), Justification::centred, false);
         }
         for (float db : { 0.0f, -20.0f, -40.0f, -60.0f })
         {
             const float y = yOf (a, db); g.setColour (col.withAlpha (0.08f)); g.drawHorizontalLine ((int) y, a.getX(), a.getRight());
-            g.setColour (col.withAlpha (0.5f)); g.drawText (String ((int) db), Rectangle<float> (a.getX() - 24, y - 5, 21, 10), Justification::right, false);
+            g.setColour (col.withAlpha (0.5f)); g.drawText (String ((int) db), Rectangle<float> (a.getX() - th.sz (28.0f), y - th.sz (6.0f), th.sz (25.0f), th.sz (12.0f)), Justification::right, false);
         }
     }
     const Theme& th; ResponseRenderer::Result target, shown; Rectangle<float> erArea, decArea; Point<float> handle { -100, -100 };
@@ -1407,8 +1483,8 @@ private:
     {
         auto r = screen.getLocalBounds().reduced (8);
         r.removeFromTop ((int) theme.displayPt + 8);                      // the status line
-        reverbView.setBounds (r.withHeight (r.getHeight() * 52 / 100));
-        decay.setBounds (r.withTrimmedTop (r.getHeight() * 52 / 100 + 4));
+        reverbView.setBounds (r.withHeight (r.getHeight() * 64 / 100));
+        decay.setBounds (r.withTrimmedTop (r.getHeight() * 64 / 100 + 4));
         delayView.setBounds (r);
         placeCells();
     }
@@ -1445,7 +1521,7 @@ private:
             }
             return { -1, -1 };
         };
-        auto area = (rev ? decay.getBounds() : delayView.getBounds()).reduced (40, 0).withTrimmedTop (16);
+        auto area = (rev ? decay.getBounds() : delayView.getBounds()).reduced ((int) theme.sz (40.0f), 0).withTrimmedTop ((int) theme.sz (16.0f));
         std::vector<Rectangle<int>> used;
         int x = area.getX(), y = area.getY();
         if (! rev)      // delay picture: the taps rise from the bottom up to their level, so the list goes under them, at the bottom
