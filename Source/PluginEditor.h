@@ -687,6 +687,9 @@ public:
 private:
     struct Tap { float ms, db, fb; String label; int timeSlot, levelSlot; bool util; int side; };
     std::vector<Tap> taps; float tMax = 500, dragTMax = 500;
+public:
+    bool busy() const { return drag >= 0; }
+private:
     void collect()
     {
         taps.clear();
@@ -1208,16 +1211,22 @@ private:
     }
     const Theme& th; ResponseRenderer::Result target, shown; Rectangle<float> erArea, decArea; Point<float> handle { -100, -100 };
     int dragging = 0; float startRt = 1, startX = 0;
+public:
+    bool busy() const { return dragging != 0; }
+private:
 };
 
-// ============================================================================ a number on the screen: click and drag up/down, or double-click and type
+// ============================================================================ a control you put on the screen: the number drags up/down or types on double-click;
+// the name drags it anywhere, and a double-click on the name removes it
 class NumberCell : public Component, private TextEditor::Listener
 {
 public:
     explicit NumberCell (const Theme& t) : th (t) { addChildComponent (ed); ed.addListener (this); ed.setJustification (Justification::centred); }
     std::function<String()> name, value;
     std::function<float()> getNorm; std::function<void (float)> setNorm; std::function<void (bool)> gesture; std::function<void (const String&)> setText;
+    std::function<void()> onMoved, onRemove;           // the name part: drag to move, double-click to remove
     bool hot = false;
+    float nameSplit() const { return textW (ui (nameH(), W::Medium), name ? name() : String()) + 7.0f; }
     void paint (Graphics& g) override
     {
         auto r = getLocalBounds().toFloat().reduced (1, 1);
@@ -1238,22 +1247,39 @@ public:
     void mouseDown (const MouseEvent& e) override
     {
         if (ed.isVisible()) return;
+        if (e.position.x < nameSplit()) { moving = true; grab = e.getPosition(); setMouseCursor (MouseCursor::DraggingHandCursor); return; }
         dragging = true; start = getNorm ? getNorm() : 0.0f; if (gesture) gesture (true); setMouseCursor (MouseCursor::UpDownResizeCursor);
     }
-    void mouseDoubleClick (const MouseEvent&) override
+    void mouseMove (const MouseEvent& e) override { setMouseCursor (e.position.x < nameSplit() ? MouseCursor::DraggingHandCursor : MouseCursor::UpDownResizeCursor); }
+    void mouseDoubleClick (const MouseEvent& e) override
     {
+        if (e.position.x < nameSplit()) { moving = false; if (onRemove) onRemove(); return; }
         ed.setFont (ui (th.displayPt, W::Bold)); ed.setColour (TextEditor::backgroundColourId, th.display.brighter (0.15f)); ed.setColour (TextEditor::textColourId, th.displayText);
         ed.setColour (TextEditor::outlineColourId, th.displayText.withAlpha (0.5f));
         ed.setText (value ? value() : String(), false); ed.setVisible (true); ed.grabKeyboardFocus(); ed.selectAll(); repaint();
     }
     void mouseDrag (const MouseEvent& e) override
     {
+        if (moving)
+        {
+            if (auto* p = getParentComponent())
+            {
+                const auto at = e.getEventRelativeTo (p).getPosition() - grab;
+                setTopLeftPosition (jlimit (0, p->getWidth() - getWidth(), at.x), jlimit (0, p->getHeight() - getHeight(), at.y));
+            }
+            return;
+        }
         if (! dragging || ! setNorm) return;
         const float fine = e.mods.isShiftDown() ? 0.1f : 1.0f;
         setNorm (jlimit (0.0f, 1.0f, start - (float) e.getDistanceFromDragStartY() * 0.004f * fine)); repaint();
     }
-    void mouseUp (const MouseEvent&) override { if (dragging) { dragging = false; if (gesture) gesture (false); setMouseCursor (MouseCursor::NormalCursor); } }
+    void mouseUp (const MouseEvent&) override
+    {
+        if (moving) { moving = false; if (onMoved) onMoved(); }
+        if (dragging) { dragging = false; if (gesture) gesture (false); }
+    }
 private:
+    bool moving = false; Point<int> grab;
     void textEditorReturnKeyPressed (TextEditor&) override { if (setText) setText (ed.getText()); ed.setVisible (false); repaint(); }
     void textEditorEscapeKeyPressed (TextEditor&) override { ed.setVisible (false); repaint(); }
     void textEditorFocusLost (TextEditor&) override { ed.setVisible (false); repaint(); }
@@ -1505,6 +1531,8 @@ public:
         reverbView.setRt = [this] (float rt) { const int s = l480::algoMainRtSlot (proc.algoOf (machine)); proc.setSlot (machine, s, l480::toNorm (proc.spec (machine, s), rt)); };
         reverbView.gesture = [this] (bool b) { for (int s : { findSlot ({ "PDL", "RPD" }), l480::algoMainRtSlot (proc.algoOf (machine)) }) if (s >= 0) { if (b) proc.beginSlot (machine, s); else proc.endSlot (machine, s); } };
         for (int i = 0; i < 40; ++i) { cells.push_back (std::make_unique<NumberCell> (theme)); screen.addChildComponent (*cells.back()); }
+        holdRev.ed = this; holdRev.busy = [this] { return reverbView.busy(); }; reverbView.addMouseListener (&holdRev, false);
+        holdDelay.ed = this; holdDelay.busy = [this] { return delayView.busy(); }; delayView.addMouseListener (&holdDelay, false);
 
         // preset bar, page and algorithm keys
         auto mk = [this] (const String& t) { auto k = std::make_unique<LarcKey> (theme, t); content.addAndMakeVisible (*k); return k; };
@@ -1752,77 +1780,117 @@ private:
     // the numbers sit on the picture: predelay at its line, decay time at the decay handle, the rest written across the
     // top of the lower graph (decay page) or of the delay picture. Click to type, or right-click and drag up/down.
     int slotPd() const { return findSlot ({ "PDL", "RPD" }); }
+    // ---- your controls on the screen: click and hold the picture to add one; positions are kept per algorithm and page
+    struct Pin { String key; float x, y; };
+    String pinsId() const { return "pins_" + String (proc.algoOf (machine)) + "_" + String (page); }
+    std::vector<Pin> loadPins() const
+    {
+        std::vector<Pin> v; StringArray t; t.addTokens (proc.getUiProperty (pinsId(), String()).toString(), ";", "");
+        for (auto& e : t) { StringArray f; f.addTokens (e, "|", ""); if (f.size() == 3) v.push_back ({ f[0], f[1].getFloatValue(), f[2].getFloatValue() }); }
+        return v;
+    }
+    void savePins (const std::vector<Pin>& v)
+    {
+        String s; for (auto& p : v) s << p.key << "|" << String (p.x, 4) << "|" << String (p.y, 4) << ";";
+        proc.setUiProperty (pinsId(), s);
+    }
+    String targetKey (const Target& t) const
+    {
+        if (t.param) if (auto* w = dynamic_cast<AudioProcessorParameterWithID*> (t.param)) return "p:" + w->getParameterID();
+        return "s:" + String (t.slot);
+    }
+    int targetIndex (const String& key) const { for (size_t i = 0; i < pageTargets.size(); ++i) if (targetKey (pageTargets[i]) == key) return (int) i; return -1; }
     void placeCells()
     {
-        const int n = (int) jmin (pageTargets.size(), cells.size());
-        const int algo = proc.algoOf (machine), rtSlot = l480::algoMainRtSlot (algo), pd = slotPd();
-        const int xov = findSlot ({ "XOV" }), bas = findSlot ({ "BAS" }), rtc = findSlot ({ "RTC" });
-        const bool rev = page == 0 && reverbView.isVisible();
-        const float rt = decay.mainRtShown();
-        // anchor of target i on the picture (screen coordinates), or -1 when it has no place of its own
-        auto anchor = [&] (const Target& tg) -> Point<float>
+        const auto pins = loadPins();
+        const auto sb = screen.getLocalBounds();
+        size_t ci = 0;
+        for (auto& pin : pins)
         {
-            auto in = [] (const Component& v, Point<float> a, float dx = 0, float dy = 0) { return a.x < 0 ? a : a + v.getPosition().toFloat() + Point<float> (dx, dy); };
-            if (rev && tg.param == nullptr)
+            const int ti = targetIndex (pin.key);
+            if (ti < 0 || ci >= cells.size()) continue;
+            auto& c = *cells[ci++];
+            const String key = pin.key;
+            c.name = [this, key] { const int i = targetIndex (key); return i >= 0 ? targetName (pageTargets[(size_t) i]) : String(); };
+            c.value = [this, key] { const int i = targetIndex (key); return i >= 0 ? targetText (pageTargets[(size_t) i]) : String(); };
+            c.getNorm = [this, key] { const int i = targetIndex (key); return i >= 0 ? targetNorm (pageTargets[(size_t) i]) : 0.0f; };
+            c.setNorm = [this, key] (float v) { const int i = targetIndex (key); if (i >= 0) setTargetNorm (pageTargets[(size_t) i], v); };
+            c.gesture = [this, key] (bool b) { const int i = targetIndex (key); if (i >= 0) targetGesture (pageTargets[(size_t) i], b); };
+            c.setText = [this, key] (const String& t) { const int i = targetIndex (key); if (i >= 0) setTargetText (pageTargets[(size_t) i], t); };
+            auto* cp = &c;
+            c.onMoved = [this, key, cp]
             {
-                if (tg.slot == pd) return in (reverbView, reverbView.pdAnchor);
-                if (tg.slot == rtSlot) return in (reverbView, reverbView.rtAnchor);
-                if (tg.slot == xov) return in (reverbView, reverbView.floorAt (proc.slotValue (machine, xov)), -20, -22);
-                if (tg.slot == bas) return in (reverbView, reverbView.floorAt (60.0f), 0, -22);
-                if (tg.slot == rtc) return in (reverbView, reverbView.floorAt (jmin (12000.0f, proc.slotValue (machine, rtc))), -60, -22);
-            }
-            if (! rev && delayView.isVisible())
+                auto v = loadPins(); const auto b = screen.getLocalBounds();
+                for (auto& p : v) if (p.key == key) { p.x = cp->getX() / (float) jmax (1, b.getWidth()); p.y = cp->getY() / (float) jmax (1, b.getHeight()); }
+                savePins (v);
+            };
+            c.onRemove = [this, key]
             {
-                if (tg.param == nullptr && tg.slot >= 0) { const auto a = delayView.tapAt (tg.slot, -1); const String nm (proc.spec (machine, tg.slot).name);
-                    const bool lvl = nm.contains ("Level"); return in (delayView, a, 6, lvl ? -18.0f : -36.0f); }
-                if (tg.param != nullptr && (tg.name == "Delay Left" || tg.name == "Delay Right"))
-                    return in (delayView, delayView.tapAt (-1, tg.name == "Delay Left" ? 0 : 1), 6, -36);
-            }
-            return { -1, -1 };
-        };
-        auto area = rev ? (reverbView.graphArea() + reverbView.getPosition().toFloat()).toNearestInt().withTrimmedTop (2)
-                        : delayView.getBounds().reduced ((int) theme.sz (40.0f), 0).withTrimmedTop ((int) theme.sz (16.0f));
-        std::vector<Rectangle<int>> used;
-        int x = area.getX(), y = area.getY();
-        if (! rev)      // delay picture: the taps rise from the bottom up to their level, so the list goes under them, at the bottom
-        {
-            int rows = 1, xx = area.getX(), hh = 16;
-            for (int i = 0; i < n; ++i)
-            {
-                if (anchor (pageTargets[(size_t) i]).x >= 0) continue;
-                const int w = cells[(size_t) i]->preferredWidth(); hh = cells[(size_t) i]->preferredHeight();
-                if (xx + w > area.getRight() && xx > area.getX()) { xx = area.getX(); ++rows; }
-                xx += w + 4;
-            }
-            y = jmax (area.getY(), area.getBottom() - 16 - rows * (hh + 2));
-        }
-        std::vector<int> anchored;
-        for (int i = 0; i < (int) cells.size(); ++i)
-        {
-            auto& c = *cells[(size_t) i];
-            if (i >= n) { c.setVisible (false); continue; }
-            const auto& tg = pageTargets[(size_t) i];
-            if (anchor (tg).x >= 0) { anchored.push_back (i); continue; }
+                auto v = loadPins(); v.erase (std::remove_if (v.begin(), v.end(), [&key] (const Pin& p) { return p.key == key; }), v.end());
+                savePins (v); MessageManager::callAsync ([sp = Component::SafePointer<Flexiverb480Editor> (this)] { if (sp) sp->placeCells(); });
+            };
             const int w = c.preferredWidth(), h = c.preferredHeight();
-            if (x + w > area.getRight() && x > area.getX()) { x = area.getX(); y += h + 2; }
-            c.setBounds (x, y, w, h); c.setVisible (true); used.push_back (c.getBounds()); x += w + 10;
+            c.setBounds (jlimit (0, sb.getWidth() - w, roundToInt (pin.x * sb.getWidth())), jlimit (0, sb.getHeight() - h, roundToInt (pin.y * sb.getHeight())), w, h);
+            c.setVisible (true); c.toFront (false);
         }
-        const auto sb = screen.getLocalBounds().reduced (6);
-        for (int i : anchored)
-        {
-            auto& c = *cells[(size_t) i]; const auto a = anchor (pageTargets[(size_t) i]);
-            const int w = c.preferredWidth(), h = c.preferredHeight();
-            Rectangle<int> rc (jlimit (sb.getX(), sb.getRight() - w, (int) a.x), jlimit (sb.getY(), sb.getBottom() - h, (int) a.y), w, h);
-            const int dir = rc.getCentreY() > area.getCentreY() ? -1 : 1;
-            for (int k = 0; k < 10; ++k)                      // step clear of numbers already placed
-            {
-                bool hitAny = false; for (auto& u : used) if (u.intersects (rc)) { hitAny = true; break; }
-                if (! hitAny) break;
-                rc.setY (jlimit (sb.getY(), sb.getBottom() - h, rc.getY() + dir * (h + 2)));
-            }
-            c.setBounds (rc); c.setVisible (true); used.push_back (rc);
-        }
+        for (; ci < cells.size(); ++ci) cells[ci]->setVisible (false);
     }
+    // the function a control belongs to (for the menu, and the faders)
+    static String groupOf (const String& n, int pg)
+    {
+        auto has = [&n] (std::initializer_list<const char*> w) { for (auto* x : w) if (n.containsIgnoreCase (x)) return true; return false; };
+        if (pg == 1)
+        {
+            if (has ({ "Feedback", "Ping" })) return "REPEATS";
+            if (has ({ "Level", "Pan", "Dry", "Mix" })) return "LEVEL";
+            if (has ({ "Rolloff", "Bass", "Treble", "Cutoff" })) return "TONE";
+            if (has ({ "Attack" })) return "SHAPE";
+            if (has ({ "Delay", "Time", "Value", "Sync", "Multiplier", "Fine", "Echo" })) return "TIME";
+            return "OTHER";
+        }
+        if (has ({ "Predelay", "Pre-Delay", "Reflection", "Echo", "Attack", "Early" })) return "EARLY";
+        if (has ({ "Reverb Time", "RT ", "Multiply", "Crossover", "Decay", "Infinite" })) return "DECAY";
+        if (has ({ "Mix", "Level", "Wet", "Dry", "Balance" })) return "MIX";
+        if (has ({ "Cutoff", "Frequency", "Bass", "Treble", "EQ", "Filter" })) return "TONE";
+        if (has ({ "Size", "Shape", "Spread", "Diffusion", "Density", "Definition", "Spin", "Wander", "Chorus", "Width", "Depth", "Rate", "Modulation" })) return "SPACE";
+        return "OTHER";
+    }
+    // click and hold on the picture: choose a control to put there
+    void addControlMenu (Point<int> atInScreen)
+    {
+        const auto pins = loadPins();
+        const StringArray order = page == 1 ? StringArray { "TIME", "REPEATS", "LEVEL", "TONE", "SHAPE", "OTHER" } : StringArray { "EARLY", "DECAY", "SPACE", "TONE", "MIX", "OTHER" };
+        PopupMenu m; m.addSectionHeader ("Put a control here");
+        for (auto& gname : order)
+        {
+            PopupMenu sub; bool any = false;
+            for (size_t i = 0; i < pageTargets.size(); ++i)
+            {
+                if (groupOf (pageTargets[i].name, page) != gname) continue;
+                const String key = targetKey (pageTargets[i]);
+                bool on = false; for (auto& p : pins) on = on || p.key == key;
+                sub.addItem (1 + (int) i, pageTargets[i].name, ! on, on); any = true;
+            }
+            if (any) m.addSubMenu (gname.substring (0, 1) + gname.substring (1).toLowerCase(), sub);
+        }
+        const auto b = screen.getLocalBounds();
+        m.showMenuAsync (PopupMenu::Options().withTargetScreenArea (Rectangle<int> (screen.localPointToGlobal (atInScreen), screen.localPointToGlobal (atInScreen)).expanded (1)),
+            [this, atInScreen, b] (int r)
+            {
+                if (r <= 0 || r > (int) pageTargets.size()) return;
+                auto v = loadPins(); v.push_back ({ targetKey (pageTargets[(size_t) r - 1]), atInScreen.x / (float) jmax (1, b.getWidth()), atInScreen.y / (float) jmax (1, b.getHeight()) });
+                savePins (v); placeCells();
+            });
+    }
+    struct HoldWatch : public MouseListener, private Timer
+    {
+        Flexiverb480Editor* ed = nullptr; std::function<bool()> busy; Component* src = nullptr; Point<int> down; bool armed = false;
+        void mouseDown (const MouseEvent& e) override { if (e.mods.isPopupMenu() || e.getNumberOfClicks() > 1) return; src = e.eventComponent; down = e.getEventRelativeTo (&ed->screen).getPosition(); armed = true; startTimer (450); }
+        void mouseDrag (const MouseEvent& e) override { if (armed && e.getDistanceFromDragStart() > 4) { armed = false; stopTimer(); } }
+        void mouseUp (const MouseEvent&) override { armed = false; stopTimer(); }
+        void timerCallback() override { stopTimer(); if (armed && ! (busy && busy())) { armed = false; ed->addControlMenu (down); } }
+    };
+    HoldWatch holdRev, holdDelay;
     void layoutFaders()
     {
         nShown = jmin ((int) pageTargets.size(), kMaxFaders);
@@ -1978,18 +2046,6 @@ private:
             addP ("dlOn", "Delay On"); addP ("dlSync", "Tempo Sync"); addP (sync ? "dlDivL" : "dlTimeL", "Delay Left"); addP (sync ? "dlDivR" : "dlTimeR", "Delay Right");
             addP ("dlFb", "Feedback"); addP ("dlMix", "Delay Level"); addP ("dlAtk", "Delay Attack"); addP ("dlPing", "Ping-Pong"); addP ("dlLow", "Delay Bass"); addP ("dlHigh", "Delay Treble");
         }
-        // the screen's number cells mirror the faders
-        for (size_t i = 0; i < cells.size(); ++i)
-        {
-            auto& c = *cells[i];
-            if (i >= pageTargets.size()) { c.name = nullptr; c.value = nullptr; continue; }
-            c.name = [this, i] { return i < pageTargets.size() ? targetName (pageTargets[i]) : String(); };
-            c.value = [this, i] { return i < pageTargets.size() ? targetText (pageTargets[i]) : String(); };
-            c.getNorm = [this, i] { return i < pageTargets.size() ? targetNorm (pageTargets[i]) : 0.0f; };
-            c.setNorm = [this, i] (float v) { if (i < pageTargets.size()) setTargetNorm (pageTargets[i], v); };
-            c.gesture = [this, i] (bool b) { if (i < pageTargets.size()) targetGesture (pageTargets[i], b); };
-            c.setText = [this, i] (const String& t) { if (i < pageTargets.size()) setTargetText (pageTargets[i], t); };
-        }
     }
     String targetName (const Target& t) const { return t.name; }
     float targetNorm (const Target& t) const { if (t.param) return t.param->getValue(); const auto& s = proc.spec (machine, t.slot); return (s.unit == l480::uKey) ? 0.0f : proc.slotNorm (machine, t.slot); }
@@ -2128,8 +2184,7 @@ private:
         if (decay.isVisible() && sigChanged()) decay.repaint();
         if (delayView.isVisible()) delayView.repaint();
         if (Time::getMillisecondCounter() < msgUntil + 100) screen.repaint (screen.getLocalBounds().withHeight ((int) theme.displayPt + 14));
-        placeCells();
-        for (auto& c : cells) if (c->isVisible()) c->repaint();
+        for (auto& c : cells) if (c->isVisible()) { const int w = c->preferredWidth(); if (w != c->getWidth()) c->setSize (w, c->getHeight()); c->repaint(); }
         // faders follow their targets (and the screen's edits)
         bool labels = false;
         for (int i = 0; i < nShown; ++i)
