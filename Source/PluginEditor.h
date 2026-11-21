@@ -69,28 +69,47 @@ public:
     void blink() { flashOn = true; startTimer (140); repaint(); }
     void paint (Graphics& g) override
     {
-        auto r = getLocalBounds().toFloat().reduced (1.0f);
-        const float rad = 2.5f;
-        g.setColour (Colours::black.withAlpha (0.6f)); g.fillRoundedRectangle (r, rad + 1);            // well
-        auto cap = r.reduced (1.5f).withTrimmedBottom (pressed ? 0.0f : 1.5f).translated (0, pressed ? 1.0f : 0.0f);
+        auto r = getLocalBounds().toFloat().reduced (0.5f);
+        const float rad = 3.5f;
+        const bool on = lit || flashOn;
+        // panel cut-out (bezel): dark ring with a light lower lip
+        g.setColour (Colours::black.withAlpha (0.75f)); g.fillRoundedRectangle (r, rad + 1.5f);
+        g.setColour (Colours::white.withAlpha (0.07f)); g.drawLine (r.getX() + 3, r.getBottom() - 0.5f, r.getRight() - 3, r.getBottom() - 0.5f, 1.0f);
+        // the cap: sides (darker skirt) and a slightly smaller, dished top face
+        const float travel = pressed ? 1.2f : 0.0f;
+        auto skirt = r.reduced (2.0f).translated (0, travel);
         const Colour c = darkCap ? larc::keyDark : larc::key;
-        g.setGradientFill (ColourGradient (c.brighter (0.22f), cap.getX(), cap.getY(), c.darker (0.35f), cap.getX(), cap.getBottom(), false));
-        g.fillRoundedRectangle (cap, rad);
-        g.setColour (Colours::white.withAlpha (0.25f)); g.drawLine (cap.getX() + 2, cap.getY() + 0.8f, cap.getRight() - 2, cap.getY() + 0.8f, 1.0f);
-        g.setColour (Colours::black.withAlpha (0.4f)); g.drawRoundedRectangle (cap, rad, 0.8f);
-        if (isMouseOver() && ! pressed) { g.setColour (Colours::white.withAlpha (0.08f)); g.fillRoundedRectangle (cap, rad); }
-        auto txt = cap;
+        g.setGradientFill (ColourGradient (c.darker (0.15f), skirt.getX(), skirt.getY(), c.darker (0.7f), skirt.getX(), skirt.getBottom(), false));
+        g.fillRoundedRectangle (skirt, rad);
+        auto face = skirt.reduced (2.0f, 1.5f).withTrimmedBottom (pressed ? 1.0f : 2.5f);
+        ColourGradient fg (c.brighter (0.28f), face.getCentreX(), face.getY(), c.darker (0.12f), face.getCentreX(), face.getBottom(), false);
+        fg.addColour (0.45, c.brighter (0.08f));
+        g.setGradientFill (fg); g.fillRoundedRectangle (face, rad - 1.0f);
+        // dish: a soft darker centre and a crisp top highlight
+        g.setGradientFill (ColourGradient (Colours::black.withAlpha (0.10f), face.getCentreX(), face.getCentreY(), Colours::transparentBlack, face.getCentreX(), face.getY() - face.getHeight() * 0.2f, true));
+        g.fillRoundedRectangle (face, rad - 1.0f);
+        g.setColour (Colours::white.withAlpha (darkCap ? 0.22f : 0.55f)); g.drawLine (face.getX() + 3, face.getY() + 0.7f, face.getRight() - 3, face.getY() + 0.7f, 1.0f);
+        g.setColour (Colours::black.withAlpha (0.35f)); g.drawRoundedRectangle (face, rad - 1.0f, 0.6f);
+        if (isMouseOver() && ! pressed) { g.setColour (Colours::white.withAlpha (0.07f)); g.fillRoundedRectangle (face, rad - 1.0f); }
+        auto txt = face;
         if (led)
-        {
-            auto l = txt.removeFromTop (cap.getHeight() * 0.36f).withSizeKeepingCentre (jmin (14.0f, cap.getWidth() * 0.4f), 4.0f).translated (0, 2.0f);
-            const bool on = lit || flashOn;
-            g.setColour (Colours::black.withAlpha (0.55f)); g.fillRoundedRectangle (l.expanded (1.0f), 1.5f);
-            g.setColour (on ? larc::led : larc::led.withAlpha (0.18f).overlaidWith (Colour (0x30000000))); g.fillRoundedRectangle (l, 1.0f);
-            if (on) { g.setColour (larc::led.withAlpha (0.35f)); g.fillRoundedRectangle (l.expanded (2.0f), 2.5f); }
+        {   // round red LED lens near the top edge of the cap, with a glint
+            const float d = jlimit (4.5f, 7.0f, face.getHeight() * 0.2f);
+            auto l = Rectangle<float> (d, d).withCentre ({ face.getCentreX(), face.getY() + d * 0.5f + 3.0f });
+            txt = face.withTrimmedTop (d + 3.0f);
+            if (on) { g.setGradientFill (ColourGradient (larc::led.withAlpha (0.55f), l.getCentreX(), l.getCentreY(), larc::led.withAlpha (0.0f), l.getCentreX() + d * 1.6f, l.getCentreY(), true)); g.fillEllipse (l.expanded (d * 1.2f)); }
+            g.setColour (Colours::black.withAlpha (0.6f)); g.fillEllipse (l.expanded (1.0f));
+            g.setGradientFill (ColourGradient (on ? larc::led.brighter (0.5f) : Colour (0xff4a1510), l.getCentreX() - d * 0.2f, l.getY(),
+                                               on ? larc::led.darker (0.2f) : Colour (0xff220806), l.getCentreX(), l.getBottom(), false));
+            g.fillEllipse (l);
+            g.setColour (Colours::white.withAlpha (on ? 0.7f : 0.18f)); g.fillEllipse (l.getX() + d * 0.22f, l.getY() + d * 0.15f, d * 0.3f, d * 0.25f);
         }
-        g.setColour (darkCap ? larc::legend : larc::ink);
-        g.setFont (ui (jmin (txt.getHeight() * 0.62f, 12.0f), W::Bold, 0.05f));
-        g.drawText (text, txt, Justification::centred, false);
+        // legend: bold, upper case, tracked, printed (slight emboss)
+        const Colour ink = darkCap ? larc::legend : larc::ink;
+        const float th = jmin (txt.getHeight() * 0.6f, 12.5f);
+        g.setFont (ui (th, W::Bold, 0.09f));
+        g.setColour (darkCap ? Colours::black.withAlpha (0.5f) : Colours::white.withAlpha (0.45f)); g.drawText (text, txt.translated (0, darkCap ? -0.8f : 0.8f), Justification::centred, false);
+        g.setColour (ink); g.drawText (text, txt, Justification::centred, false);
     }
     void mouseDown (const MouseEvent&) override { pressed = true; repaint(); }
     void mouseUp (const MouseEvent& e) override

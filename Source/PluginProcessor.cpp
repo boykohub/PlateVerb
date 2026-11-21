@@ -170,6 +170,7 @@ public:
         }
         if (m == 0) currentHostProgram = index;
         registerName[m] = {}; variation[m] = 1;
+        setCurve (m, {}, false);                    // a curve is an edit of the loaded program
         lastProg[m] = index;
         programLoaded.store (true);
     }
@@ -207,6 +208,7 @@ public:
         x.setAttribute ("program", programOf (m));
         x.setAttribute ("name", String (prog (m).name));
         for (int i = 0; i < l480::kMaxParams; ++i) x.setAttribute ("s" + String (i), (double) pSlot[m][i]->load());
+        x.setAttribute ("curve", curveToString (curvePts[m])); x.setAttribute ("curveOn", curveOn[m]);
         return x.writeTo (f);
     }
     bool readSnapshot (int m, const File& f)
@@ -216,6 +218,7 @@ public:
         loadProgram (m, x->getIntAttribute ("program"));
         for (int i = 0; i < l480::kMaxParams; ++i)
             if (auto* sp = apvts.getParameter (slotId (m, i))) sp->setValueNotifyingHost ((float) x->getDoubleAttribute ("s" + String (i), sp->getValue()));
+        setCurve (m, curveFromString (x->getStringAttribute ("curve")), x->getBoolAttribute ("curveOn"));
         return true;
     }
     static String snapshotName (const File& f) { if (auto x = parseXML (f)) return x->getStringAttribute ("name"); return {}; }
@@ -248,6 +251,66 @@ public:
         variation[m] = v;
         return true;
     }
+    // ------------------------------------------------------------------ decay-time curve (RT graph), per machine
+    // Points are (frequency Hz, multiplier of the program's main reverb time), joined in log-log, flat beyond the ends.
+    struct CurvePt { float f, m; };
+    std::vector<CurvePt> curvePts[2]; bool curveOn[2] = { false, false };
+    static float curveEval (const std::vector<CurvePt>& pts, float f)
+    {
+        if (pts.empty()) return 1.0f;
+        if (f <= pts.front().f) return pts.front().m;
+        if (f >= pts.back().f) return pts.back().m;
+        for (size_t i = 1; i < pts.size(); ++i)
+            if (f <= pts[i].f)
+            {
+                const float t = std::log (f / pts[i - 1].f) / std::log (pts[i].f / pts[i - 1].f);
+                return std::exp (std::log (pts[i - 1].m) + t * (std::log (pts[i].m) - std::log (pts[i - 1].m)));
+            }
+        return pts.back().m;
+    }
+    static String curveToString (const std::vector<CurvePt>& pts) { String s; for (auto& p : pts) s << String (p.f, 1) << ":" << String (p.m, 4) << ";"; return s; }
+    static std::vector<CurvePt> curveFromString (const String& s)
+    {
+        std::vector<CurvePt> v; StringArray t; t.addTokens (s, ";", "");
+        for (auto& k : t) if (k.contains (":")) v.push_back ({ jlimit (20.0f, 20000.0f, k.upToFirstOccurrenceOf (":", false, false).getFloatValue()),
+                                                               jlimit (0.02f, 20.0f, k.fromFirstOccurrenceOf (":", false, false).getFloatValue()) });
+        std::sort (v.begin(), v.end(), [] (const CurvePt& a, const CurvePt& b) { return a.f < b.f; });
+        return v;
+    }
+    void setCurve (int m, std::vector<CurvePt> pts, bool on)
+    {
+        std::sort (pts.begin(), pts.end(), [] (const CurvePt& a, const CurvePt& b) { return a.f < b.f; });
+        curvePts[m] = pts; curveOn[m] = on && ! pts.empty();
+        for (int b = 0; b < pv::DecayEq::N; ++b) aCurveMul[m][b].store (curveEval (pts, pv::DecayEq::centre (b)));
+        aCurveOn[m].store (curveOn[m]);
+        apvts.state.setProperty (m == 0 ? "curveA" : "curveB", curveToString (pts), nullptr);
+        apvts.state.setProperty (m == 0 ? "curveOnA" : "curveOnB", curveOn[m], nullptr);
+    }
+    bool hasDecayCurve (int m) const { return l480::algoHasDecayCurve (algoOf (m)); }
+    float mainRt (int m) const { return slotValue (m, l480::algoMainRtSlot (algoOf (m))); }
+    // the program's own decay shape (BAS/XOV and the RT high cut), as a multiplier of the main reverb time
+    float programDecayMul (int m, float f) const
+    {
+        const int a = algoOf (m);
+        float bas = 1, xov = 500, hf = 21000;
+        if (a == l480::aRev6 || a == l480::aRev2 || a == l480::aRHall || a == l480::aHD)
+        { bas = slotValue (m, a == l480::aHD ? 6 : 6); xov = slotValue (m, 7); hf = slotValue (m, 8); }
+        else if (a == l480::aCHall || a == l480::aRPlate) { bas = slotValue (m, 0) / jmax (0.05f, slotValue (m, 1)); xov = slotValue (m, 2); hf = slotValue (m, 3); }
+        else if (a == l480::aAmb) hf = 9000;
+        const float w = 1.0f / (1.0f + (f / xov) * (f / xov));
+        float mul = bas * w + (1.0f - w);
+        if (hf < 20500.0f) mul /= 1.0f + 0.5f * (f / hf) * (f / hf);
+        return mul;
+    }
+    std::vector<CurvePt> programCurve (int m) const
+    {
+        std::vector<CurvePt> v;
+        for (float f : { 40.0f, 125.0f, 400.0f, 1000.0f, 2500.0f, 6300.0f, 14000.0f }) v.push_back ({ f, programDecayMul (m, f) });
+        return v;
+    }
+    std::atomic<bool> aCurveOn[2] { false, false };
+    std::atomic<float> aCurveMul[2][pv::DecayEq::N] {};
+
     String registerName[2];   // "bank.num" when the machine holds a recalled register
     int variation[2] = { 1, 1 };   // 1 = factory, 2-10 = user variation, 0 = from a register
 
@@ -301,6 +364,7 @@ public:
             for (int i = 0; i < l480::kMaxParams; ++i) p.val[m][i] = l480::toValue (l480::algoDef (a).p[i], pSlot[m][l480::realIndex (a, i)]->load());
         }
         p.config = jlimit (0, 3, (int) f (pCfg)); p.mute = mute.load();
+        for (int m = 0; m < 2; ++m) { p.curveOn[m] = aCurveOn[m].load(); for (int b = 0; b < pv::DecayEq::N; ++b) p.curveMul[m][b] = aCurveMul[m][b].load(); }
         p.eqOn = on (pEqOn); for (int b = 0; b < 4; ++b) { p.eqF[b] = f (pEqF[b]); p.eqG[b] = f (pEqG[b]); }
         auto& c = p.comp;
         c.on = on (pCpOn); c.type = jlimit (0, 2, (int) f (pCpType)); c.vintage = on (pCpColor); c.duck = on (pCpDuck);
@@ -361,6 +425,8 @@ public:
                 // registers saved by older versions were named, not numbered: drop those labels
                 for (auto& r : registerName) if (! r.containsOnly ("0123456789.")) r = {};
                 variation[0] = (int) apvts.state.getProperty ("varA", 1); variation[1] = (int) apvts.state.getProperty ("varB", 1);
+                setCurve (0, curveFromString (apvts.state.getProperty ("curveA").toString()), (bool) apvts.state.getProperty ("curveOnA", false));
+                setCurve (1, curveFromString (apvts.state.getProperty ("curveB").toString()), (bool) apvts.state.getProperty ("curveOnB", false));
                 for (int m = 0; m < 2; ++m) lastProg[m] = programOf (m);
                 programLoaded.store (true);
             }

@@ -32,8 +32,15 @@ struct FirstOrder {
 // side information for an algorithm: the plugin's dry input, and machine A's output when this is machine B in Cascade
 struct Ctx { float dryL = 0, dryR = 0, revL = 0, revR = 0; bool hasRev = false; };
 
+// Decay-time curve (the editor's RT graph): multipliers of the program's main reverb time at the DecayEq band centres.
+inline bool algoHasDecayCurve (int a) { return a == aRev6 || a == aRev2 || a == aRHall || a == aAmb || a == aCHall || a == aRPlate || a == aHD; }
+inline int algoMainRtSlot (int a) { return a == aCHall || a == aRPlate ? 1 : a == aHD ? 2 : 0; }
+
 struct AlgoBase {
     float fs = 48000;
+    const float* curveMul = nullptr;                 // set by the Machine before set(); nullptr = the program's own decay
+    float curveT[pv::DecayEq::N] = {};
+    const float* curveFor (float rt) { if (! curveMul) return nullptr; for (int b = 0; b < pv::DecayEq::N; ++b) curveT[b] = rt * curveMul[b]; return curveT; }
     virtual ~AlgoBase() = default;
     virtual void prepare (float sampleRate) { fs = sampleRate; }
     virtual void reset() {}
@@ -103,10 +110,13 @@ struct ReverbAlgo : AlgoBase {       // aRev6 / aRev2 / aRHall
         float spin = -1.0f; mod = 0.5f;
         if (random) { spin = std::max (0.05f, v[16] / 50.0f); mod = clampf (v[17] / 10.0f, 0.02f, 1.0f); }
         if (usePlate) {
-            dampA = 1.0f - std::exp (-2.0f * kPi * std::min (dampHz, 0.45f * fs) / fs);
+            dampA = curveMul ? 1.0f : 1.0f - std::exp (-2.0f * kPi * std::min (dampHz, 0.45f * fs) / fs);
+            plate.curveT = curveFor (std::min (rt, 70.0f));
             plate.update (rt, size, bas, 1.0f, build, dif, pv::plateEffect (0, 0, 0.0f), 0.0f);
-        } else
+        } else {
+            tank.curveT = curveFor (std::min (rt, 70.0f));
             tank.update (rt, dampHz, size, bas, 1.0f, build, dif, pv::surfaceEffect (0, 0, 0.0f, 3.0f * size), 0.0f, spin, xov);
+        }
         for (auto& h : hfc) h.setCut (fs, hfcHz >= 21000.0f ? 0.45f * fs : hfcHz);
         sinCos (v[11], mixD, mixW);
         float lv[6], dl[6]; int npe = 0;
@@ -155,6 +165,7 @@ struct AmbienceAlgo : AlgoBase {
         for (int i = 0; i < kN; ++i) len[i] = kMs[i] * sc * 0.001f * fs;
         gDif = 0.35f + 0.4f * v[4] / 99.0f;
         late = v[1] / 100.0f;
+        tank.curveT = curveFor (rt);
         tank.update (rt, 9000.0f, clampf (0.5f + siz / 40.0f * 0.8f, 0.5f, 1.3f), 1.0f, 1.0f, clampf (siz * 2.0f, 3.0f, 80.0f), v[4] / 99.0f,
                      pv::surfaceEffect (0, 0, 0.0f, 2.0f), 0.0f, std::max (0.05f, v[6] / 50.0f), 500.0f);
         for (auto& r : rol) r.setCut (fs, v[3] >= 21000.0f ? 0.45f * fs : v[3]);
@@ -193,7 +204,8 @@ struct ClassicAlgo : AlgoBase {
         const float dif = v[6] / 99.0f; mod = v[7] / 99.0f;
         const float size = clampf (0.6f + (v[8] - 8.0f) / 32.0f * 0.8f, 0.5f, 1.4f);
         const float lowMul = clampf (bas / std::max (0.05f, mid), 0.25f, 4.0f);
-        if (isPlate) { dampA = 1.0f - std::exp (-2.0f * kPi * std::min (tdc, 0.45f * fs) / fs); plate.update (mid, size, lowMul, 1.0f, 8.0f, dif, pv::plateEffect (0, 0, 0.0f), 0.0f); }
+        plate.curveT = tank.curveT = curveFor (mid);
+        if (isPlate) { dampA = curveMul ? 1.0f : 1.0f - std::exp (-2.0f * kPi * std::min (tdc, 0.45f * fs) / fs); plate.update (mid, size, lowMul, 1.0f, 8.0f, dif, pv::plateEffect (0, 0, 0.0f), 0.0f); }
         else tank.update (mid, tdc, size, lowMul, 1.0f, 15.0f + 40.0f * v[4] / 99.0f, dif, pv::surfaceEffect (0, 0, 0.0f, 3.0f * size), 0.0f, -1.0f, xov);
         for (auto& h : hfc) h.setCut (fs, v[9] >= 21000.0f ? 0.45f * fs : v[9]);
         sinCos (v[11], mixD, mixW);
@@ -900,6 +912,7 @@ struct HDAlgo : AlgoBase {
         for (auto& h : hfc) h.setCut (fs, v[4] >= 21000.0f ? 0.45f * fs : v[4]);
         lfbG = dbToGain (6.0f * v[5] / 512.0f) - 1.0f;
         const float size = clampf (0.5f + siz / 31.0f * 0.45f, 0.5f, 1.4f);
+        tank.curveT = curveFor (rt);
         tank.update (rt, v[8] >= 21000.0f ? 20000.0f : v[8], size, v[6], 1.0f, clampf (3.0f + spr / 255.0f * 200.0f, 3, 230), v[14] / 99.0f,
                      pv::surfaceEffect (0, 0, 0.0f, 3.0f * size), 0.0f, std::max (0.05f, v[9] / 50.0f), v[7]);
         rpdS = msToS (v[11], fs);
@@ -976,14 +989,18 @@ struct Machine {
     }
     AlgoBase* current() const { return cur >= 0 ? algos[cur].get() : nullptr; }
     // values: the LARC values of the current program (kMaxParams)
-    void update (int algo, int bnk, const float* v) {
+    float trimG = 1, trimS = 1;                                     // program output trim (target, smoothed)
+    void update (int algo, int bnk, const float* v, float trimDb = 0.0f, const float* curve = nullptr) {
+        trimG = dbToGain (trimDb);
+        if (cur >= 0) algos[cur]->curveMul = algoHasDecayCurve (cur) ? curve : nullptr;
         if (algo != cur || bnk != bank) {
-            if (cur < 0) { cur = algo; bank = bnk; algos[cur]->reset(); fadeState = 0; fadeG = 1; }
+            if (cur < 0) { cur = algo; bank = bnk; algos[cur]->reset(); fadeState = 0; fadeG = 1; trimS = trimG; }
             else if (fadeState == 0 || nextAlgo != algo || nextBank != bnk) { nextAlgo = algo; nextBank = bnk; fadeState = 1; }
         }
         if (fadeState == 1 && fadeG <= 0.0f) {                  // faded out: switch and fade back in
             cur = nextAlgo; bank = nextBank;
             algos[cur]->reset();
+            algos[cur]->curveMul = algoHasDecayCurve (cur) ? curve : nullptr;
             fadeState = 2;
         }
         if (cur >= 0 && fadeState != 1) algos[cur]->set (v, bank);   // while fading out, the values belong to the next program
@@ -991,6 +1008,7 @@ struct Machine {
     inline void process (float& L, float& R, const Ctx& c) {
         if (cur < 0) return;
         algos[cur]->process (L, R, c);
+        trimS += (trimG - trimS) * 0.0005f; L *= trimS; R *= trimS;
         if (fadeState != 0) {
             const float step = 1.0f / (0.01f * fs);
             if (fadeState == 1) fadeG = std::max (0.0f, fadeG - step);

@@ -11,6 +11,7 @@ struct EngineParams {
     int prog[2] = { 0, 0 };                 // program index per machine
     float val[2][kMaxParams] = {};          // LARC values per machine (units)
     int config = kSingle;
+    bool curveOn[2] = { false, false }; float curveMul[2][pv::DecayEq::N] = {};   // RT graph per machine
     bool mute = false;
     // drawer: EQ
     bool eqOn = false; float eqF[4] = { 100, 400, 2500, 8000 }, eqG[4] = {};
@@ -41,7 +42,7 @@ public:
     Machine& machine (int i) { return mach[i]; }
 
     void process (float* L, float* R, int n, const EngineParams& p) {
-        for (int m = 0; m < 2; ++m) { const auto& pr = programs()[(size_t) p.prog[m]]; mach[m].update (pr.algo, pr.bank, p.val[m]); }
+        for (int m = 0; m < 2; ++m) { const auto& pr = programs()[(size_t) p.prog[m]]; mach[m].update (pr.algo, pr.bank, p.val[m], pr.trimDb, p.curveOn[m] ? p.curveMul[m] : nullptr); }
         for (int c = 0; c < 2; ++c) {
             eq[c][0].lowShelf (fs, p.eqF[0], p.eqG[0]); eq[c][1].peak (fs, p.eqF[1], 0.9f, p.eqG[1]);
             eq[c][2].peak (fs, p.eqF[2], 0.9f, p.eqG[2]); eq[c][3].highShelf (fs, p.eqF[3], p.eqG[3]);

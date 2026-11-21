@@ -199,8 +199,75 @@ struct Resampler {
 // ---------------------------------------------------------------- frequency-dependent decay
 // Splits the loop signal at 300 Hz and 4 kHz and gives each band its own loop gain, so the
 // lows can ring longer (Low Decay) and the highs die faster (High Decay) than the mids.
+// Decay-time curve inside a feedback loop: a 10-band graphic EQ (octaves, 31.25 Hz - 16 kHz).
+// For a loop of loopSec and wanted decay times T[] at the band centres, one pass must lose 60*loopSec/T dB.
+// The band gains are solved through the EQ's interaction matrix (and refined twice, since peaking filters are not
+// linear in dB); the result is then checked on a dense grid and the broadband gain lowered if any frequency would
+// lose less than the longest wanted decay allows - so the loop can never gain energy.
+struct DecayEq {
+    static constexpr int N = 10;
+    static constexpr float Q = 1.5f;
+    Biquad pk[N]; float g0 = 1; bool on = false; int nb = N;
+    static float centre (int i) { return 31.25f * std::pow (2.0f, (float) i); }
+    static float respDb (const Biquad& b, float fs, float f) {
+        const double w = 2.0 * 3.141592653589793 * f / fs, c1 = std::cos (w), s1 = std::sin (w), c2 = std::cos (2 * w), s2 = std::sin (2 * w);
+        const double nr = b.b0 + b.b1 * c1 + b.b2 * c2, ni = -(b.b1 * s1 + b.b2 * s2);
+        const double dr = 1.0 + b.a1 * c1 + b.a2 * c2, di = -(b.a1 * s1 + b.a2 * s2);
+        return (float) (10.0 * std::log10 ((nr * nr + ni * ni) / (dr * dr + di * di) + 1e-30));
+    }
+    static bool solve (std::vector<double> A, std::vector<double> b, int n, std::vector<double>& x) {   // Gauss-Jordan
+        for (int c = 0; c < n; ++c) {
+            int p = c; for (int r = c + 1; r < n; ++r) if (std::fabs (A[(size_t) (r * n + c)]) > std::fabs (A[(size_t) (p * n + c)])) p = r;
+            if (std::fabs (A[(size_t) (p * n + c)]) < 1e-12) return false;
+            for (int k = 0; k < n; ++k) std::swap (A[(size_t) (c * n + k)], A[(size_t) (p * n + k)]); std::swap (b[(size_t) c], b[(size_t) p]);
+            for (int r = 0; r < n; ++r) {
+                if (r == c) continue;
+                const double f = A[(size_t) (r * n + c)] / A[(size_t) (c * n + c)];
+                for (int k = 0; k < n; ++k) A[(size_t) (r * n + k)] -= f * A[(size_t) (c * n + k)];
+                b[(size_t) r] -= f * b[(size_t) c];
+            }
+        }
+        x.resize ((size_t) n); for (int i = 0; i < n; ++i) x[(size_t) i] = b[(size_t) i] / A[(size_t) (i * n + i)];
+        return true;
+    }
+    float lastFs = -1, lastLoop = -1, lastT[N] = {};
+    void design (float fs, float loopSec, const float* T) {
+        // the engine calls this every block: redesign only when something changed
+        if (on && fs == lastFs && loopSec == lastLoop && std::equal (T, T + N, lastT)) return;
+        lastFs = fs; lastLoop = loopSec; std::copy (T, T + N, lastT);
+        for (auto& b : pk) { b.b0 = 1; b.b1 = b.b2 = b.a1 = b.a2 = 0; }
+        nb = 0; while (nb < N && centre (nb) < 0.45f * fs) ++nb;
+        std::vector<double> t ((size_t) nb), d ((size_t) nb), M ((size_t) (nb * nb)), gains ((size_t) nb, 0.0), sol;
+        float tMax = -1e9f;
+        for (int i = 0; i < nb; ++i) { t[(size_t) i] = -60.0 * loopSec / std::max (0.05f, T[i]); tMax = std::max (tMax, (float) t[(size_t) i]); }
+        const double base = t[5 < nb ? 5 : (size_t) nb - 1];
+        for (int i = 0; i < nb; ++i) d[(size_t) i] = t[(size_t) i] - base;
+        for (int i = 0; i < nb; ++i) { Biquad u; u.peak (fs, centre (i), Q, 1.0f); for (int j = 0; j < nb; ++j) M[(size_t) (j * nb + i)] = respDb (u, fs, centre (j)); }
+        for (int it = 0; it < 3; ++it) {
+            std::vector<double> err ((size_t) nb);
+            for (int j = 0; j < nb; ++j) { double r = 0; for (int i = 0; i < nb; ++i) r += respDb (pk[i], fs, centre (j)); err[(size_t) j] = it == 0 ? d[(size_t) j] : d[(size_t) j] - r; }
+            if (! solve (M, err, nb, sol)) break;
+            for (int i = 0; i < nb; ++i) { gains[(size_t) i] = clampf ((float) (gains[(size_t) i] + sol[(size_t) i]), -48.0f, 24.0f); pk[i].peak (fs, centre (i), Q, (float) gains[(size_t) i]); }
+        }
+        for (int i = nb; i < N; ++i) pk[i] = Biquad();
+        // stability: nowhere may one pass lose less than the least-damped band wants (and never less than 0.01 dB)
+        float worst = -1e9f;
+        for (int k = 0; k <= 160; ++k) {
+            const float f = 20.0f * std::pow (0.45f * fs / 20.0f, k / 160.0f);
+            float r = (float) base; for (int i = 0; i < nb; ++i) r += respDb (pk[i], fs, f);
+            worst = std::max (worst, r - std::min (tMax, -0.01f));
+        }
+        g0 = (float) std::pow (10.0, (base - std::max (0.0f, worst)) / 20.0);
+        on = true;
+    }
+    void reset() { for (auto& b : pk) b.reset(); }
+    inline float process (float x) { x *= g0; for (int i = 0; i < nb; ++i) x = pk[i].process (x); return x; }
+};
+
 struct BandDecay {
-    OnePole lo, hi; float gL = 1, gM = 1, gH = 1;
+    OnePole lo, hi; float gL = 1, gM = 1, gH = 1; DecayEq eq;
+    void setCurve (float fs, float loopSec, const float* T) { eq.design (fs, loopSec, T); }
+    void curveOff() { eq.on = false; }
     void setX (float fs, float loHz = 300.0f) { lo.setCut (fs, loHz); hi.setCut (fs, 4000.0f); }
     void setGains (float loopSec, float rtMid, float lowMul, float highMul) {
         auto g = [loopSec] (float rt) { return std::min (0.9995f, std::pow (10.0f, -3.0f * loopSec / std::max (0.05f, rt))); };
@@ -210,8 +277,11 @@ struct BandDecay {
         auto g = [loopSec] (float rt) { return std::min (0.9995f, std::pow (10.0f, -3.0f * loopSec / std::max (0.05f, rt))); };
         gL = g (rtL); gM = g (rtM); gH = g (rtH);
     }
-    void reset() { lo.reset(); hi.reset(); }
-    inline float process (float x) { const float l = lo.lp (x), h = x - hi.lp (x); return l * gL + (x - l - h) * gM + h * gH; }
+    void reset() { lo.reset(); hi.reset(); eq.reset(); }
+    inline float process (float x) {
+        if (eq.on) return eq.process (x);
+        const float l = lo.lp (x), h = x - hi.lp (x); return l * gL + (x - l - h) * gM + h * gH;
+    }
 };
 
 struct RandLfo {
@@ -261,6 +331,7 @@ struct PlateAlgo {
     }
     float gOut = 0.5f, gIn1 = 0.75f, gIn2 = 0.625f, gT1 = 0.7f, gT2 = 0.5f, gT3 = 0.4f;
     float cubicW = 0;
+    const float* curveT = nullptr;   // decay-time curve (seconds at the 10 DecayEq bands); set before update(), nullptr = off
     void update (float rt, float size, float lowMul, float highMul, float buildMs, float diffusion, const MaterialEffect& me, float cubic) {
         cubicW = cubic;
         s = fs / 29761.0f * std::min (kMaxSize, size * me.sizeMul);
@@ -275,6 +346,8 @@ struct PlateAlgo {
         float r[3];
         for (int k = 0; k < 3; ++k) r[k] = 1.0f / std::max (0.02f, 1.0f / std::max (0.05f, rtB[k]) + me.extraLoss[k]);
         bdL.setRT (halfLoop, r[0], r[1], r[2]); bdR.setRT (halfLoop, r[0], r[1], r[2]);
+        if (curveT) { bdL.setCurve (fs, halfLoop, curveT); bdR.setCurve (fs, halfLoop, curveT); }
+        else { bdL.curveOff(); bdR.curveOff(); }
         lfo[0].setRate (fs, 0.83f); lfo[1].setRate (fs, 1.07f);
     }
     inline void process (float inL, float inR, float dampA, float mod, float early, float& oL, float& oR) {
@@ -395,6 +468,7 @@ struct TankAlgo {
     float len1[S] = {}, len2[S] = {}, lenA1[S] = {}, lenA2[S] = {}, lenA3[S] = {}, lateS = 1;
     float cubicW = 0; bool erEq = false; Biquad erLo[2], erHi[2];
     float spinHz = -1.0f;      // >0: modulation rate override (480 'spin'); otherwise the config's rate
+    const float* curveT = nullptr;   // decay-time curve (seconds at the 10 DecayEq bands); set before update(), nullptr = off
     void update (float rt, float dampHz, float size, float lowMul, float highMul, float buildMs, float diffusion, const MaterialEffect& me, float cubic,
                  float spin = -1.0f, float xoverHz = 300.0f) {
         const TankConfig& c = tankConfig (algo);
@@ -416,6 +490,8 @@ struct TankAlgo {
             dampOn = dampHz < 17500.0f;
             band[i].setX (fs, xoverHz);
             band[i].setGains (secLen, rtA, lowMul, highMul);
+            if (curveT) { float T[DecayEq::N]; for (int b = 0; b < DecayEq::N; ++b) T[b] = curveT[b] * c.rtMul; band[i].setCurve (fs, secLen, T); dampOn = false; }
+            else band[i].curveOff();
             lfo[i].setRate (fs, (spinHz > 0.0f ? spinHz : c.modHz) * (0.8f + 0.13f * (float) i));
         }
         lateS = std::max (1.0f, c.lateOnsetMs * size * fs * 0.001f);
