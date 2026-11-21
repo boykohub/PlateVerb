@@ -95,15 +95,15 @@ struct Preechoes {      // up to six diffused echo clusters taken from the input
 struct EnvCal {
     float tMaxMs   = 256.0f;   // build-up length at SPREAD 255, SIZE 40
     float sprPow   = 0.2f;     // how SPREAD maps to length
-    float sizeMin  = 0.0f;     // share of the length that does not depend on SIZE
-    float shapeA   = 2.9f;     // how strongly SHAPE tilts the contour (front-loaded <-> swell)
-    float shapeMid = 0.225f;   // SHAPE (0..1) at which the contour is flat
-    float directW  = 0.175f;   // weight of the immediate part at SHAPE 0
+    float sizeMin  = 0.075f;     // share of the length that does not depend on SIZE
+    float shapeA   = 2.2f;     // how strongly SHAPE tilts the contour (front-loaded <-> swell)
+    float shapeMid = 0.25f;   // SHAPE (0..1) at which the contour is flat
+    float directW  = 0.4f;   // weight of the immediate part at SHAPE 0
     float basQ     = 1.0f;     // effective bass multiplier = BAS ^ basQ (1: the manual's value)
     float erScale  = 0.4375f;  // early reflections level
     // echo density at the start: 1 = fills in at once (plates), lower = separate echoes for longer (big halls).
     // density = densBase + densDif * (DIF/99 - 0.8) - densSize * SIZE/40 - densSpr * SPREAD/255 (0.05 .. 1)
-    float densBase = 1.0f, densDif = 0.0f, densSize = 0.0f, densSpr = 0.0f;
+    float densBase = 0.61f, densDif = -0.4f, densSize = 0.225f, densSpr = 0.0f;
 };
 inline EnvCal& envCal() { static EnvCal c; return c; }
 
