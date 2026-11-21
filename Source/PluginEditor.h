@@ -42,8 +42,8 @@ struct Theme
            keyLight { 0xffffa63a }, display { 0xff140707 }, displayText { 0xffff3a1e }, fader { 0xff2b2c2f },
            eqKnob { 0xff5a6470 }, eqInner { 0xff8a2a22 }, compKnob { 0xff3a3c40 }, analogKnob { 0xff6b4a2c },
            lowCol { 0xffff3b24 }, midCol { 0xffffb22e }, highCol { 0xff5cc8ff };
-    float gradient = 0.45f, keyPt = 12.5f, knobPt = 11.5f, displayPt = 15.0f, faderPt = 13.5f;
-    int depth = 1;                                         // 3D: 0 flat, 1 soft, 2 deep
+    float gradient = 0.45f, keyPt = 12.5f, knobPt = 11.5f, displayPt = 15.0f, faderPt = 13.5f, keyHeight = 38.0f, keyPad = 0.0f;
+    int depth = 2;                                         // 3D: 0 flat, 1 soft, 2 deep
 
     struct Item { const char* name; Colour Theme::* c; };
     static const std::vector<Item>& items()
@@ -62,20 +62,21 @@ struct Theme
         XmlElement x ("LOOK");
         int i = 0; for (auto& it : items()) x.setAttribute ("c" + String (i++), (this->*it.c).toString());
         x.setAttribute ("grad", gradient); x.setAttribute ("keyPt", keyPt); x.setAttribute ("knobPt", knobPt); x.setAttribute ("dispPt", displayPt);
-        x.setAttribute ("faderPt", faderPt); x.setAttribute ("depth", depth); x.setAttribute ("v", 4);
+        x.setAttribute ("faderPt", faderPt); x.setAttribute ("depth", depth); x.setAttribute ("keyH", keyHeight); x.setAttribute ("keyPad", keyPad); x.setAttribute ("v", 5);
         return x.toString (XmlElement::TextFormat().singleLine().withoutHeader());
     }
     bool fromString (const String& s)
     {
-        auto x = parseXML (s); if (x == nullptr || ! x->hasTagName ("LOOK") || x->getIntAttribute ("v") < 4) return false;   // older looks: start fresh
+        auto x = parseXML (s); if (x == nullptr || ! x->hasTagName ("LOOK") || x->getIntAttribute ("v") < 5) return false;   // older looks: start fresh
         int i = 0; for (auto& it : items()) { const auto a = x->getStringAttribute ("c" + String (i++)); if (a.isNotEmpty()) this->*it.c = Colour::fromString (a); }
         gradient = (float) x->getDoubleAttribute ("grad", gradient); keyPt = (float) x->getDoubleAttribute ("keyPt", keyPt);
         knobPt = (float) x->getDoubleAttribute ("knobPt", knobPt); displayPt = (float) x->getDoubleAttribute ("dispPt", displayPt);
-        faderPt = (float) x->getDoubleAttribute ("faderPt", faderPt); depth = jlimit (0, 2, x->getIntAttribute ("depth", depth));
+        faderPt = (float) x->getDoubleAttribute ("faderPt", faderPt); depth = jlimit (0, 3, x->getIntAttribute ("depth", depth));
+        keyHeight = (float) x->getDoubleAttribute ("keyH", keyHeight); keyPad = (float) x->getDoubleAttribute ("keyPad", keyPad);
         return true;
     }
     float sz (float base) const { return base * displayPt / 12.0f; }   // screen text grows with the screen text size
-    float d3() const { return depth == 0 ? 0.15f : depth == 1 ? 0.6f : 1.0f; }     // 3D amount
+    float d3() const { return depth == 0 ? 0.15f : depth == 1 ? 0.6f : depth == 2 ? 1.1f : 1.7f; }     // 3D amount
     Colour hi (Colour c, float k = 1.0f) const { return c.brighter (0.35f * gradient * k * (0.4f + 0.6f * d3())); }
     Colour lo (Colour c, float k = 1.0f) const { return c.darker (0.55f * gradient * k * (0.4f + 0.6f * d3())); }
     float shadow() const { return 0.15f + 0.45f * d3(); }
@@ -98,7 +99,8 @@ public:
     void setLit (bool b) { if (b != lit) { lit = b; repaint(); } }
     void setText (const String& s) { if (s != text) { text = s; repaint(); } }
     const String& getText() const { return text; }
-    float preferredWidth() const { return textW (ui (th.keyPt, W::Bold, 0.06f), text) + th.keyPt * 1.6f + 8.0f; }
+    float preferredWidth() const { return textW (ui (th.keyPt, W::Bold, 0.06f), text) + th.keyPt * 1.6f + 8.0f + th.keyPad; }
+    std::function<void()> onRightClick;
     void paint (Graphics& g) override
     {
         auto r = getLocalBounds().toFloat().reduced (0.5f);
@@ -133,6 +135,7 @@ public:
     void mouseUp (const MouseEvent& e) override
     {
         pressed = false; flash = true; startTimer (130); repaint();
+        if (e.mods.isPopupMenu()) { if (onRightClick) onRightClick(); return; }
         if (getLocalBounds().contains (e.getPosition()) && onClick) onClick();
     }
 private:
@@ -412,7 +415,7 @@ public:
     std::function<void (const String&, const String&)> onShow;
     void paint (Graphics& g) override
     {
-        plot = getLocalBounds().toFloat().reduced (th.sz (40.0f), 6).withTrimmedRight (-th.sz (28.0f)).withTrimmedBottom (th.sz (11.0f)).withTrimmedTop (th.sz (8.0f));
+        plot = getLocalBounds().toFloat().reduced (th.sz (40.0f), 6).withTrimmedRight (th.sz (30.0f)).withTrimmedBottom (th.sz (11.0f)).withTrimmedTop (th.sz (8.0f));
         const int m = machine ? machine() : 0;
         const Colour col = th.displayText;
         if (! proc.hasDecayCurve (m)) return;
@@ -450,44 +453,63 @@ public:
                 g.setColour ((int) i == drag || (int) i == hover ? Colours::white : col); g.drawEllipse (Rectangle<float> (9, 9).withCentre (pt), 2.0f);
             }
         }
+        // the big point: moves every point up or down together
+        {
+            float gm = 0; int n = 0;
+            if (proc.curveOn[m]) for (auto& q : pts) { gm += std::log (q.m); ++n; }
+            master = { plot.getRight() + th.sz (16.0f), yOf (rtMain * (n > 0 ? std::exp (gm / (float) n) : 1.0f)) };
+            g.setColour (col.withAlpha (0.25f)); g.drawLine (plot.getRight() + 2, master.y, master.x, master.y, 1.0f);
+            g.setColour (Colours::black); g.fillEllipse (Rectangle<float> (20, 20).withCentre (master));
+            g.setColour (masterDrag || masterHover ? Colours::white : col); g.drawEllipse (Rectangle<float> (17, 17).withCentre (master), 2.6f);
+            g.fillEllipse (Rectangle<float> (6, 6).withCentre (master));
+        }
         g.setColour (col.withAlpha (0.6f)); g.setFont (ui (th.sz (9.0f), W::Bold, 0.05f));
-        g.drawText (proc.curveOn[m] ? "Decay time: your curve  (double-click a point to remove it)" : "Decay time: click to add a point", getLocalBounds().toFloat().reduced (th.sz (36.0f), 0).withHeight (th.sz (12.0f) + 2), Justification::topLeft, false);
+        g.drawText ("Decay time by frequency:  double-click to add or remove a point,  drag a point,  drag the big point to move them all", getLocalBounds().toFloat().reduced (th.sz (36.0f), 0).withHeight (th.sz (12.0f) + 2), Justification::topLeft, false);
     }
-    void mouseMove (const MouseEvent& e) override { const int h = hit (e.position); if (h != hover) { hover = h; repaint(); } }
+    void mouseMove (const MouseEvent& e) override { const int h = hit (e.position); const bool mh = e.position.getDistanceFrom (master) < 12.0f; if (h != hover || mh != masterHover) { hover = h; masterHover = mh; repaint(); } }
     void mouseExit (const MouseEvent&) override { hover = -1; repaint(); }
     void mouseDown (const MouseEvent& e) override
     {
         const int m = machine ? machine() : 0;
         if (e.mods.isPopupMenu() || ! proc.hasDecayCurve (m)) return;
-        auto pts = proc.curvePts[m];
-        if (! proc.curveOn[m]) pts = proc.programCurve (m);
-        drag = hit (e.position);
-        if (drag < 0 || ! proc.curveOn[m])
+        if (e.position.getDistanceFrom (master) < 12.0f)
         {
-            pts.push_back ({ fOf (e.position.x), jlimit (0.02f, 20.0f, tOf (e.position.y) / rtMain) });
-            std::sort (pts.begin(), pts.end(), [] (const auto& a, const auto& b) { return a.f < b.f; });
-            proc.setCurve (m, pts, true);
-            drag = hit (e.position);
+            masterPts = proc.curveOn[m] ? proc.curvePts[m] : proc.programCurve (m);
+            masterDrag = true; masterY = e.position.y; proc.setCurve (m, masterPts, true); repaint(); return;
         }
-        else proc.setCurve (m, pts, true);
-        show(); repaint();
+        drag = hit (e.position);
+        if (drag >= 0) show();
+        repaint();
     }
     void mouseDrag (const MouseEvent& e) override
     {
         const int m = machine ? machine() : 0;
+        if (masterDrag)
+        {
+            const float k = tOf (e.position.y) / tOf (masterY);
+            auto pts = masterPts; for (auto& q : pts) q.m = jlimit (0.02f, 20.0f, q.m * k);
+            proc.setCurve (m, pts, true);
+            if (onShow) onShow ("All points", (k >= 1 ? "x " + String (k, 2) : "x " + String (k, 2)));
+            repaint(); return;
+        }
         if (drag < 0 || drag >= (int) proc.curvePts[m].size()) return;
         auto pts = proc.curvePts[m];
         const float lo = drag > 0 ? pts[(size_t) drag - 1].f * 1.05f : 20.0f, hi = drag + 1 < (int) pts.size() ? pts[(size_t) drag + 1].f / 1.05f : 20000.0f;
         pts[(size_t) drag] = { jlimit (lo, hi, fOf (e.position.x)), jlimit (0.02f, 20.0f, tOf (jlimit (plot.getY(), plot.getBottom(), e.position.y)) / rtMain) };
         proc.setCurve (m, pts, true); show(); repaint();
     }
-    void mouseUp (const MouseEvent&) override { drag = -1; repaint(); }
+    void mouseUp (const MouseEvent&) override { drag = -1; masterDrag = false; repaint(); }
     void mouseDoubleClick (const MouseEvent& e) override
     {
-        const int m = machine ? machine() : 0; const int h = hit (e.position);
-        if (h < 0 || ! proc.curveOn[m]) return;
-        auto pts = proc.curvePts[m]; pts.erase (pts.begin() + h);
-        proc.setCurve (m, pts, ! pts.empty()); drag = hover = -1; repaint();
+        const int m = machine ? machine() : 0;
+        if (! proc.hasDecayCurve (m) || e.position.getDistanceFrom (master) < 12.0f) return;
+        const int h = hit (e.position);
+        auto pts = proc.curveOn[m] ? proc.curvePts[m] : proc.programCurve (m);
+        if (h >= 0) { pts.erase (pts.begin() + h); proc.setCurve (m, pts, ! pts.empty()); drag = hover = -1; repaint(); return; }
+        if (! plot.expanded (4).contains (e.position)) return;
+        pts.push_back ({ fOf (e.position.x), jlimit (0.02f, 20.0f, tOf (e.position.y) / rtMain) });
+        std::sort (pts.begin(), pts.end(), [] (const auto& a, const auto& b) { return a.f < b.f; });
+        proc.setCurve (m, pts, true); repaint();
     }
 private:
     float xOf (float f) const { return plot.getX() + plot.getWidth() * std::log (f / 20.0f) / std::log (1000.0f); }
@@ -511,6 +533,7 @@ private:
         }
     }
     const Theme& th; Flexiverb480Processor& proc; Rectangle<float> plot; float rtMain = 1, yLo = 0.1f, yHi = 10; int drag = -1, hover = -1;
+    Point<float> master { -100, -100 }; bool masterDrag = false, masterHover = false; float masterY = 0; std::vector<Flexiverb480Processor::CurvePt> masterPts;
 public:
     bool ready() const { return ! plot.isEmpty(); }
     Point<float> at (float f, float t) const { return { xOf (jlimit (20.0f, 20000.0f, f)), yOf (t) }; }
@@ -713,16 +736,25 @@ public:
     std::function<void (int program)> onFactory; std::function<void (const String&)> onUser; std::function<void()> onClose;
     std::function<int()> machine;
     void refresh() { list.build (*this); resized(); repaint(); }
-    void resized() override { auto r = getLocalBounds().reduced (16); r.removeFromTop (34); view.setBounds (r); list.setSize (r.getWidth() - 12, list.heightFor (r.getWidth() - 12)); list.layout(); }
+    void resized() override { auto r = getLocalBounds().reduced (16); r.removeFromTop (44); view.setBounds (r); list.setSize (r.getWidth() - 12, list.heightFor (r.getWidth() - 12)); list.layout(); }
     void paint (Graphics& g) override
     {
         g.fillAll (Colours::black.withAlpha (0.82f));
         auto r = getLocalBounds().reduced (16).removeFromTop (30).toFloat();
         drawLegend (g, "PRESETS  -  machine " + String (machine && machine() == 1 ? "B" : "A"), r, ui (16.0f, W::Bold, 0.1f), th.panelText, Justification::centredLeft);
-        drawLegend (g, "click a preset to load it  -  click here to close", r, ui (11.0f, W::Medium), th.panelText.withAlpha (0.6f), Justification::centredRight);
+        drawLegend (g, "click a preset to load it", r.withTrimmedRight (60), ui (11.0f, W::Medium), th.panelText.withAlpha (0.6f), Justification::centredRight);
+        // the close cross
+        const auto x = closeArea().toFloat(); const bool ov = closeHover;
+        g.setColour (ov ? th.keyLight.withAlpha (0.25f) : Colours::white.withAlpha (0.08f)); g.fillRoundedRectangle (x, 6);
+        g.setColour (ov ? th.keyLight : th.panelText); g.drawRoundedRectangle (x, 6, 1.5f);
+        const auto c = x.reduced (12); g.drawLine (c.getX(), c.getY(), c.getRight(), c.getBottom(), 3.5f); g.drawLine (c.getRight(), c.getY(), c.getX(), c.getBottom(), 3.5f);
     }
     void mouseDown (const MouseEvent&) override { if (onClose) onClose(); }
+    void mouseMove (const MouseEvent& e) override { const bool h = closeArea().contains (e.getPosition()); if (h != closeHover) { closeHover = h; repaint (closeArea().expanded (2)); } }
+    void mouseExit (const MouseEvent&) override { if (closeHover) { closeHover = false; repaint (closeArea().expanded (2)); } }
 private:
+    Rectangle<int> closeArea() const { return { getWidth() - 16 - 44, 8, 44, 44 }; }
+    bool closeHover = false;
     struct Entry { String name; int program = -1; String user; Rectangle<int> r; };
     struct Box { String title; std::vector<Entry> items; Rectangle<int> r; };
     struct Section { String title; std::vector<Box> boxes; int y = 0; };
@@ -743,7 +775,7 @@ private:
                 }
                 sections.push_back (s);
             };
-            sec ("480L", 1, 21); sec ("Surround / HD Cart", 22, 26); sec ("Matched to the 480L impulse responses", 27, 32); sec ("480L II  (the earlier Flexiverb's IR-matched presets)", 33, 37); sec ("480L 96k  (measured from 96 kHz sweeps)", 38, 38);
+            sec ("480L", 1, 21); sec ("Surround (HD Card)", 22, 26); sec ("Matched to the 480L impulse responses", 27, 32); sec ("480L II  (the earlier Flexiverb's IR-matched presets)", 33, 37); sec ("480L 96k  (measured from 96 kHz sweeps)", 38, 38);
             Section u; u.title = "Your presets  (" + Flexiverb480Processor::presetFolder().getFullPathName() + ")";
             Box ub; ub.title = "Saved with SAVE";
             for (auto& n : b.proc.userPresets()) ub.items.push_back ({ n, -1, n, {} });
@@ -917,6 +949,8 @@ public:
     std::function<void (const String&, const String&)> onShow;
     float live[3] = {};
     Point<float> pdAnchor { -1, -1 }, rtAnchor { -1, -1 };   // where the predelay and decay-time numbers go
+    Rectangle<float> graphArea() const { return decArea; }
+    Point<float> floorAt (float f) const { return decArea.isEmpty() ? Point<float> (-1, -1) : P (wfIndex (f), tMax(), -60.0f); }
     void setResult (const ResponseRenderer::Result& r) { target = r; if (shown.er.empty()) shown = r; }
     bool animate()
     {
@@ -1090,7 +1124,7 @@ private:
     int dragging = 0; float startRt = 1, startX = 0;
 };
 
-// ============================================================================ a number on the screen: right-click + drag up/down, or click and type
+// ============================================================================ a number on the screen: click and drag up/down, or double-click and type
 class NumberCell : public Component, private TextEditor::Listener
 {
 public:
@@ -1106,18 +1140,22 @@ public:
         const auto nf = ui (nameH(), W::Medium); const String nm = name ? name() : String();
         g.setColour (th.displayText.withAlpha (0.6f)); g.setFont (nf);
         g.drawText (nm, r.reduced (4, 0), Justification::centredLeft, true);
-        if (! ed.isVisible()) { g.setColour (th.displayText); g.setFont (ui (valueH(), W::Bold)); g.drawText (value ? value() : String(), r.reduced (4, 0).withTrimmedLeft (textW (nf, nm) + 6), Justification::centredRight, true); }
+        if (! ed.isVisible()) { g.setColour (th.displayText); g.setFont (ui (valueH(), W::Bold)); g.drawText (value ? value() : String(), r.reduced (4, 0).withTrimmedLeft (textW (nf, nm) + 7), Justification::centredLeft, true); }
     }
     void resized() override { ed.setBounds (getLocalBounds().reduced (1).withTrimmedLeft (getWidth() / 2)); }
     float nameH() const { return jmax (8.0f, th.displayPt * 0.72f); }
     float valueH() const { return jmax (8.5f, th.displayPt * 0.85f); }
-    int preferredWidth() const { return (int) (textW (ui (nameH(), W::Medium), name ? name() : String()) + textW (ui (valueH(), W::Bold), "00.000 kHz") + 16); }
+    int preferredWidth() const { return (int) (textW (ui (nameH(), W::Medium), name ? name() : String()) + textW (ui (valueH(), W::Bold), value ? value() + "0" : String ("000 ms"))) + 18; }
     int preferredHeight() const { return (int) (valueH() + 7); }
     void mouseEnter (const MouseEvent&) override { repaint(); }
     void mouseExit (const MouseEvent&) override { repaint(); }
     void mouseDown (const MouseEvent& e) override
     {
-        if (e.mods.isPopupMenu()) { dragging = true; start = getNorm ? getNorm() : 0.0f; if (gesture) gesture (true); setMouseCursor (MouseCursor::UpDownResizeCursor); return; }
+        if (ed.isVisible()) return;
+        dragging = true; start = getNorm ? getNorm() : 0.0f; if (gesture) gesture (true); setMouseCursor (MouseCursor::UpDownResizeCursor);
+    }
+    void mouseDoubleClick (const MouseEvent&) override
+    {
         ed.setFont (ui (th.displayPt, W::Bold)); ed.setColour (TextEditor::backgroundColourId, th.display.brighter (0.15f)); ed.setColour (TextEditor::textColourId, th.displayText);
         ed.setColour (TextEditor::outlineColourId, th.displayText.withAlpha (0.5f));
         ed.setText (value ? value() : String(), false); ed.setVisible (true); ed.grabKeyboardFocus(); ed.selectAll(); repaint();
@@ -1158,22 +1196,23 @@ public:
     {
         auto addSl = [this] (Slider& s, double lo, double hi, double step)
         { s.setSliderStyle (Slider::LinearHorizontal); s.setTextBoxStyle (Slider::TextBoxRight, false, 44, 20); s.setRange (lo, hi, step); addAndMakeVisible (s); s.onValueChange = [this] { fromSliders(); }; };
-        addSl (grad, 0, 1, 0.01); addSl (keyPt, 9, 20, 0.5); addSl (knobPt, 8, 18, 0.5); addSl (dispPt, 9, 22, 0.5); addSl (faderPt, 8, 18, 0.5);
+        addSl (grad, 0, 1, 0.01); addSl (keyPt, 9, 20, 0.5); addSl (keyHt, 22, 70, 1); addSl (keyWd, 0, 80, 1); addSl (knobPt, 8, 18, 0.5); addSl (dispPt, 9, 22, 0.5); addSl (faderPt, 8, 18, 0.5);
         for (auto* c : { &osBox, &precBox, &depthBox }) addAndMakeVisible (*c);
-        osBox.addItemList ({ "Off", "2x", "4x", "6x", "8x" }, 1); precBox.addItemList ({ "32-bit", "64-bit" }, 1); depthBox.addItemList ({ "Flat", "Soft", "Deep" }, 1);
+        osBox.addItemList ({ "Off", "2x", "4x", "6x", "8x" }, 1); precBox.addItemList ({ "32-bit", "64-bit" }, 1); depthBox.addItemList ({ "Flat", "Soft", "Deep", "Extra deep" }, 1);
         depthBox.onChange = [this] { th.depth = depthBox.getSelectedItemIndex(); if (onChange) onChange(); };
         osAtt = std::make_unique<AudioProcessorValueTreeState::ComboBoxAttachment> (proc.apvts, "os", osBox);
         precAtt = std::make_unique<AudioProcessorValueTreeState::ComboBoxAttachment> (proc.apvts, "prec", precBox);
-        for (auto* b : { &resetBtn, &saveBtn, &closeBtn }) addAndMakeVisible (*b);
+        for (auto* b : { &resetBtn, &saveBtn, &closeBtn, &addKeyBtn }) addAndMakeVisible (*b);
+        addKeyBtn.onClick = [this] { if (onAddKey) onAddKey(); };
         resetBtn.onClick = [this] { th = Theme(); sync(); if (onChange) onChange(); };
         saveBtn.onClick = [this] { Theme::defaultFile().getParentDirectory().createDirectory(); Theme::defaultFile().replaceWithText (th.toString()); saveBtn.setButtonText ("SAVED AS DEFAULT"); };
         closeBtn.onClick = [this] { if (onClose) onClose(); };
         sync();
     }
-    std::function<void()> onChange, onClose;
+    std::function<void()> onChange, onClose, onAddKey;
     void sync()
     {
-        grad.setValue (th.gradient, dontSendNotification); keyPt.setValue (th.keyPt, dontSendNotification); knobPt.setValue (th.knobPt, dontSendNotification);
+        grad.setValue (th.gradient, dontSendNotification); keyPt.setValue (th.keyPt, dontSendNotification); keyHt.setValue (th.keyHeight, dontSendNotification); keyWd.setValue (th.keyPad, dontSendNotification); knobPt.setValue (th.knobPt, dontSendNotification);
         dispPt.setValue (th.displayPt, dontSendNotification); faderPt.setValue (th.faderPt, dontSendNotification);
         depthBox.setSelectedItemIndex (th.depth, dontSendNotification); saveBtn.setButtonText ("SAVE AS DEFAULT FOR NEW WINDOWS"); repaint();
     }
@@ -1184,8 +1223,9 @@ public:
         for (int i = 0; i < (int) Theme::items().size(); ++i) swatches.push_back (Rectangle<int> (r.getX(), r.getY() + 22 + i * 32, r.getWidth(), 27));
         int y = r.getY() + 22 + (int) Theme::items().size() * 32 + 30;
         lookTop = y - 22;
-        for (auto* s : { &grad, &keyPt, &knobPt, &dispPt, &faderPt }) { s->setBounds (r.getX() + 110, y, r.getWidth() - 110, 22); y += 30; }
-        depthBox.setBounds (r.getX() + 110, y, 120, 24); y += 52;
+        for (auto* s : { &grad, &keyPt, &keyHt, &keyWd, &knobPt, &dispPt, &faderPt }) { s->setBounds (r.getX() + 110, y, r.getWidth() - 110, 22); y += 30; }
+        depthBox.setBounds (r.getX() + 110, y, 120, 24); y += 34;
+        addKeyBtn.setBounds (r.getX(), y, r.getWidth(), 28); y += 52;
         qualTop = y - 22;
         osBox.setBounds (r.getX() + 110, y, 120, 24); y += 30;
         precBox.setBounds (r.getX() + 110, y, 120, 24); y += 44;
@@ -1209,8 +1249,8 @@ public:
         }
         const float x = (float) r.getX();
         drawLegend (g, "Look", Rectangle<float> (x, (float) lookTop, 200, 16), ui (11.5f, W::Bold), th.keyLight, Justification::centredLeft);
-        const char* lab[] = { "Gradient", "Button text", "Knob text", "Screen text", "Fader text", "3D" };
-        for (int k = 0; k < 6; ++k) drawLegend (g, lab[k], Rectangle<float> (x, (float) lookTop + 22 + k * 30, 105, 22), ui (12.0f, W::Medium), th.panelText, Justification::centredLeft);
+        const char* lab[] = { "Gradient", "Button text", "Button height", "Button width", "Knob text", "Screen text", "Fader text", "3D" };
+        for (int k = 0; k < 8; ++k) drawLegend (g, lab[k], Rectangle<float> (x, (float) lookTop + 22 + k * 30, 105, 22), ui (12.0f, W::Medium), th.panelText, Justification::centredLeft);
         drawLegend (g, "Quality  (analog, EQ, compressor)", Rectangle<float> (x, (float) qualTop, 300, 16), ui (11.5f, W::Bold), th.keyLight, Justification::centredLeft);
         drawLegend (g, "Oversampling", Rectangle<float> (x, (float) qualTop + 22, 105, 24), ui (12.0f, W::Medium), th.panelText, Justification::centredLeft);
         drawLegend (g, "Precision", Rectangle<float> (x, (float) qualTop + 52, 105, 24), ui (12.0f, W::Medium), th.panelText, Justification::centredLeft);
@@ -1231,11 +1271,11 @@ public:
     }
     Theme& th;
 private:
-    void fromSliders() { th.gradient = (float) grad.getValue(); th.keyPt = (float) keyPt.getValue(); th.knobPt = (float) knobPt.getValue(); th.displayPt = (float) dispPt.getValue(); th.faderPt = (float) faderPt.getValue(); repaint(); if (onChange) onChange(); }
+    void fromSliders() { th.gradient = (float) grad.getValue(); th.keyPt = (float) keyPt.getValue(); th.keyHeight = (float) keyHt.getValue(); th.keyPad = (float) keyWd.getValue(); th.knobPt = (float) knobPt.getValue(); th.displayPt = (float) dispPt.getValue(); th.faderPt = (float) faderPt.getValue(); repaint(); if (onChange) onChange(); }
     Flexiverb480Processor& proc;
-    Slider grad, keyPt, knobPt, dispPt, faderPt; ComboBox osBox, precBox, depthBox;
+    Slider grad, keyPt, keyHt, keyWd, knobPt, dispPt, faderPt; ComboBox osBox, precBox, depthBox;
     std::unique_ptr<AudioProcessorValueTreeState::ComboBoxAttachment> osAtt, precAtt;
-    TextButton resetBtn { "RESET THE LOOK" }, saveBtn { "SAVE AS DEFAULT FOR NEW WINDOWS" }, closeBtn { "CLOSE" };
+    TextButton resetBtn { "RESET THE LOOK" }, saveBtn { "SAVE AS DEFAULT FOR NEW WINDOWS" }, closeBtn { "CLOSE" }, addKeyBtn { "MAKE A BUTTON FOR THE CURRENT PRESET" };
     std::vector<Rectangle<int>> swatches; int lookTop = 0, qualTop = 0;
     std::unique_ptr<ChangeListener> listener;
 };
@@ -1284,7 +1324,10 @@ public:
         struct Alg { const char* name; int bank, num; };
         static const Alg algs[] = { { "HALL", 1, 1 }, { "RANDOM HALL", 11, 1 }, { "ROOM", 2, 2 }, { "CHAMBER", 2, 8 }, { "PLATE", 4, 1 }, { "AMBIENCE", 13, 2 },
                                     { "INVERSE", 3, 8 }, { "DELAY", 6, 2 }, { "CHORUS", 20, 2 }, { "PITCH", 8, 2 } };
-        for (auto& a : algs) { auto k = mk (a.name); const int pi = l480::findProgram (a.bank, a.num); k->onClick = [this, pi] { proc.loadProgram (machine, pi); page = 0; refreshPage (true); }; algKeys.push_back (std::move (k)); }
+        for (auto& a : algs) { auto k = mk (a.name); const int pi = l480::findProgram (a.bank, a.num); k->onClick = [this, pi] { proc.loadProgram (machine, pi); page = 0; refreshPage (true); };
+                                k->onRightClick = [this] { keyMenu (-1); }; algKeys.push_back (std::move (k)); }
+        pageKey->onRightClick = [this] { keyMenu (-1); };
+        loadMyKeys();
 
         for (int i = 0; i < kMaxFaders; ++i)
         {
@@ -1336,7 +1379,7 @@ public:
         cpKnob[5] = knob ("cpMakeup", "MAKEUP", { { 0, "0" }, { 12, "12" }, { 24, "24" } }, &Theme::compKnob);
         cpKnob[6] = knob ("cpMix", "MIX", { { 0, "0" }, { 0.5f, "50" }, { 1, "100" } }, &Theme::compKnob);
 
-        content.addAndMakeVisible (setup); setup.onClose = [this] { setupOpen = false; applySize(); }; setup.onChange = [this] { lookChanged(); };
+        content.addAndMakeVisible (setup); setup.onAddKey = [this] { addMyKey(); }; setup.onClose = [this] { setupOpen = false; applySize(); }; setup.onChange = [this] { lookChanged(); };
         content.addChildComponent (browser);
         browser.machine = [this] { return machine; };
         browser.onClose = [this] { browser.setVisible (false); };
@@ -1460,7 +1503,7 @@ private:
     // ---------------------------------------------------------------- layout
     struct Sec { String title; Rectangle<int> area; };
     std::vector<Sec> sections; Rectangle<int> faderArea; float labelH = 40;
-    int keyH() const { return roundToInt (theme.keyPt * 2.0f + 12.0f); }
+    int keyH() const { return roundToInt (theme.keyHeight); }
     void layout()
     {
         const int x0 = 24, wAll = kL - 48, gap = 6, kh = keyH();
@@ -1472,7 +1515,7 @@ private:
         presetName.setBounds (x0, y, prevKey->getX() - gap - x0, kh);
         y += kh + 10;
         screen.setBounds (x0, y, wAll, 360); layoutScreen(); y += 370;
-        std::vector<LarcKey*> keys { pageKey.get() }; for (auto& k : algKeys) keys.push_back (k.get());
+        std::vector<LarcKey*> keys { pageKey.get() }; for (auto& k : algKeys) keys.push_back (k.get()); for (auto& k : myKeys) keys.push_back (k.get());
         y = flowKeys (keys, x0, wAll, y, kh, gap) + 4;
         labelH = theme.faderPt * 3.6f + 14;
         faderArea = Rectangle<int> (x0, y + (int) labelH, wAll, kH - 46 - (y + (int) labelH));
@@ -1483,8 +1526,8 @@ private:
     {
         auto r = screen.getLocalBounds().reduced (8);
         r.removeFromTop ((int) theme.displayPt + 8);                      // the status line
-        reverbView.setBounds (r.withHeight (r.getHeight() * 64 / 100));
-        decay.setBounds (r.withTrimmedTop (r.getHeight() * 64 / 100 + 4));
+        reverbView.setBounds (r.withHeight (r.getHeight() * 2 / 3 - 3));
+        decay.setBounds (r.withTrimmedTop (r.getHeight() * 2 / 3 + 3));
         delayView.setBounds (r);
         placeCells();
     }
@@ -1505,12 +1548,10 @@ private:
             if (rev && tg.param == nullptr)
             {
                 if (tg.slot == pd) return in (reverbView, reverbView.pdAnchor);
-                if (! decay.isVisible() || ! decay.ready() || algo == l480::aLegacy) return { -1, -1 };
-                const float bm = bas >= 0 ? proc.slotValue (machine, bas) : 1.0f, xf = xov >= 0 ? proc.slotValue (machine, xov) : 500.0f;
-                if (tg.slot == rtSlot) return in (decay, decay.at (1000.0f, rt), 6, -20);
-                if (tg.slot == xov) return in (decay, decay.at (xf, rt * bm), 6, 4);
-                if (tg.slot == bas) return in (decay, decay.at (40.0f, rt * bm), 0, -20);
-                if (tg.slot == rtc) { const float f = proc.slotValue (machine, rtc); return in (decay, decay.at (f, rt * proc.programDecayMul (machine, f)), -40, 6); }
+                if (tg.slot == rtSlot) return in (reverbView, reverbView.rtAnchor);
+                if (tg.slot == xov) return in (reverbView, reverbView.floorAt (proc.slotValue (machine, xov)), -20, -22);
+                if (tg.slot == bas) return in (reverbView, reverbView.floorAt (60.0f), 0, -22);
+                if (tg.slot == rtc) return in (reverbView, reverbView.floorAt (jmin (12000.0f, proc.slotValue (machine, rtc))), -60, -22);
             }
             if (! rev && delayView.isVisible())
             {
@@ -1521,7 +1562,8 @@ private:
             }
             return { -1, -1 };
         };
-        auto area = (rev ? decay.getBounds() : delayView.getBounds()).reduced ((int) theme.sz (40.0f), 0).withTrimmedTop ((int) theme.sz (16.0f));
+        auto area = rev ? (reverbView.graphArea() + reverbView.getPosition().toFloat()).toNearestInt().withTrimmedTop (2)
+                        : delayView.getBounds().reduced ((int) theme.sz (40.0f), 0).withTrimmedTop ((int) theme.sz (16.0f));
         std::vector<Rectangle<int>> used;
         int x = area.getX(), y = area.getY();
         if (! rev)      // delay picture: the taps rise from the bottom up to their level, so the list goes under them, at the bottom
@@ -1545,7 +1587,7 @@ private:
             if (anchor (tg).x >= 0) { anchored.push_back (i); continue; }
             const int w = c.preferredWidth(), h = c.preferredHeight();
             if (x + w > area.getRight() && x > area.getX()) { x = area.getX(); y += h + 2; }
-            c.setBounds (x, y, w, h); c.setVisible (true); used.push_back (c.getBounds()); x += w + 4;
+            c.setBounds (x, y, w, h); c.setVisible (true); used.push_back (c.getBounds()); x += w + 10;
         }
         const auto sb = screen.getLocalBounds().reduced (6);
         for (int i : anchored)
@@ -1553,11 +1595,12 @@ private:
             auto& c = *cells[(size_t) i]; const auto a = anchor (pageTargets[(size_t) i]);
             const int w = c.preferredWidth(), h = c.preferredHeight();
             Rectangle<int> rc (jlimit (sb.getX(), sb.getRight() - w, (int) a.x), jlimit (sb.getY(), sb.getBottom() - h, (int) a.y), w, h);
-            for (int k = 0; k < 8; ++k)                       // step clear of numbers already placed
+            const int dir = rc.getCentreY() > area.getCentreY() ? -1 : 1;
+            for (int k = 0; k < 10; ++k)                      // step clear of numbers already placed
             {
                 bool hitAny = false; for (auto& u : used) if (u.intersects (rc)) { hitAny = true; break; }
                 if (! hitAny) break;
-                rc.setY (jlimit (sb.getY(), sb.getBottom() - h, rc.getY() + h + 2));
+                rc.setY (jlimit (sb.getY(), sb.getBottom() - h, rc.getY() + dir * (h + 2)));
             }
             c.setBounds (rc); c.setVisible (true); used.push_back (rc);
         }
@@ -1862,6 +1905,11 @@ private:
             algKeys[k]->setLit (lit);
         }
         pageKey->setLit (page == 1);
+        for (size_t k = 0; k < myKeys.size() && k < myDefs.size(); ++k)
+        {
+            const auto& d = myDefs[k];
+            myKeys[k]->setLit (d.user.isNotEmpty() ? proc.userPresetName == d.user : (proc.userPresetName.isEmpty() && proc.programOf (machine) == d.program));
+        }
         machAKey->setLit (config() != 0 && machine == 0); machBKey->setLit (config() != 0 && machine == 1);
         muteKey->setLit (proc.mute.load()); setupKey->setLit (setupOpen); panelKey->setLit (drawerOpen);
         if (drawerOpen)
@@ -1882,6 +1930,61 @@ private:
     std::vector<std::unique_ptr<NumberCell>> cells;
     std::unique_ptr<LarcKey> prevKey, nextKey, saveKey, panelKey, pageKey, machAKey, machBKey, muteKey, setupKey;
     std::vector<std::unique_ptr<LarcKey>> algKeys;
+    // ---- your own buttons: each loads a preset; made from SETUP or by right-clicking a button
+    struct MyDef { String label; int program = 0; String user; };
+    std::vector<MyDef> myDefs; std::vector<std::unique_ptr<LarcKey>> myKeys;
+    void loadMyKeys()
+    {
+        myDefs.clear();
+        StringArray lines; lines.addLines (proc.getUiProperty ("myKeys", String()).toString());
+        for (auto& l : lines) { StringArray t; t.addTokens (l, "\t", ""); if (t.size() >= 2 && t[0].isNotEmpty()) myDefs.push_back ({ t[0], t[1].getIntValue(), t[2] }); }
+        rebuildMyKeys();
+    }
+    void saveMyKeys()
+    {
+        StringArray lines; for (auto& d : myDefs) lines.add (d.label + "\t" + String (d.program) + "\t" + d.user);
+        proc.setUiProperty ("myKeys", lines.joinIntoString ("\n"));
+    }
+    void rebuildMyKeys()
+    {
+        for (auto& k : myKeys) content.removeChildComponent (k.get());
+        myKeys.clear();
+        for (size_t i = 0; i < myDefs.size(); ++i)
+        {
+            auto k = std::make_unique<LarcKey> (theme, myDefs[i].label.toUpperCase()); content.addAndMakeVisible (*k);
+            k->onClick = [this, i] { if (i >= myDefs.size()) return; const auto d = myDefs[i];
+                                     if (d.user.isNotEmpty()) proc.loadUserPreset (d.user); else proc.loadProgram (machine, d.program); page = 0; refreshPage (true); };
+            k->onRightClick = [this, i] { keyMenu ((int) i); };
+            myKeys.push_back (std::move (k));
+        }
+    }
+    void addMyKey()
+    {
+        MyDef d; d.program = proc.programOf (machine); d.user = proc.userPresetName;
+        d.label = d.user.isNotEmpty() ? d.user : String (proc.prog (machine).name);
+        myDefs.push_back (d); saveMyKeys(); rebuildMyKeys(); layout(); content.repaint();
+    }
+    void keyMenu (int mine)
+    {
+        PopupMenu m;
+        const String cur = proc.userPresetName.isNotEmpty() ? proc.userPresetName : String (proc.prog (machine).name);
+        m.addItem (1, "Make a button for the current preset  (" + cur + ")");
+        if (mine >= 0) { m.addSeparator(); m.addItem (2, "Rename this button..."); m.addItem (3, "Remove this button"); }
+        m.showMenuAsync (PopupMenu::Options(), [this, mine] (int r)
+        {
+            if (r == 1) addMyKey();
+            else if (r == 3 && mine >= 0 && mine < (int) myDefs.size()) { myDefs.erase (myDefs.begin() + mine); saveMyKeys(); rebuildMyKeys(); layout(); content.repaint(); }
+            else if (r == 2 && mine >= 0 && mine < (int) myDefs.size())
+            {
+                auto w = std::make_shared<AlertWindow> ("Button name", "", MessageBoxIconType::NoIcon);
+                w->addTextEditor ("n", myDefs[(size_t) mine].label); w->addButton ("OK", 1, KeyPress (KeyPress::returnKey)); w->addButton ("Cancel", 0, KeyPress (KeyPress::escapeKey));
+                w->enterModalState (true, ModalCallbackFunction::create ([this, w, mine] (int res)
+                {
+                    if (res == 1 && mine < (int) myDefs.size()) { const auto n = w->getTextEditorContents ("n").trim(); if (n.isNotEmpty()) { myDefs[(size_t) mine].label = n; saveMyKeys(); rebuildMyKeys(); layout(); content.repaint(); } }
+                }), false);
+            }
+        });
+    }
     std::vector<std::unique_ptr<LarcFader>> faders;
     Viewport drawerView; Drawer drawer;
     ComboBox engineBox; int engineLabelY = 0;
