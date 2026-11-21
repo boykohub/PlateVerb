@@ -10,6 +10,7 @@
 //  Drawer       engine (single / dual), mute, SETUP, output, iron, ANALOG, EQ (with analog models), COMPRESSOR.
 //  SETUP        opens beside the plugin: colours, gradient, 3D depth, text sizes, oversampling, 64-bit.
 #include "FlexFonts.h"
+#include <set>
 
 // ============================================================================ fonts
 struct FlexFonts
@@ -786,6 +787,32 @@ static String plainName (const String& in)
     return out.joinIntoString (" ").replace ("Auto Offset Cut", "Auto Offset Removal").replace ("Offset Left Offset", "Left Offset").replace ("Offset Right Offset", "Right Offset");
 }
 
+// ============================================================================ the order presets are offered in
+// Extracted (from the 480L IRs) first, then Surround (HD Card), then Matched Presets (the 480L programs matched to the
+// extracted ones), then the remaining 480L programs. An original that has a matched version is not offered twice.
+static String presetKey (String n)
+{
+    n = n.toLowerCase().removeCharacters (" +&-'.#").replace ("no2", "2").replace ("sillica", "silica");
+    return n.replace ("mediumhallstage", "mediumstage");
+}
+static bool isMatchedOriginal (int i)
+{
+    static const std::set<String> matched = [] { std::set<String> m; for (auto& p : l480::programs()) if (p.bank >= 27 && p.bank <= 31) m.insert (presetKey (p.name)); return m; }();
+    const auto& p = l480::programs()[(size_t) i];
+    return p.bank >= 1 && p.bank <= 21 && matched.count (presetKey (p.name)) > 0;
+}
+static const std::vector<int>& browseOrder()
+{
+    static const std::vector<int> order = []
+    {
+        std::vector<int> o;
+        auto banks = [&o] (int b0, int b1) { for (int b = b0; b <= b1; ++b) for (int i = 0; i < l480::numPrograms(); ++i) if (l480::programs()[(size_t) i].bank == b && ! isMatchedOriginal (i)) o.push_back (i); };
+        banks (33, 37); banks (22, 26); banks (27, 31); banks (1, 21);
+        return o;
+    }();
+    return order;
+}
+
 // ============================================================================ preset browser: every preset at once, by category
 class PresetBrowser : public Component
 {
@@ -828,12 +855,13 @@ private:
                 for (int bank = b0; bank <= b1; ++bank)
                 {
                     Box bx; bx.title = l480::bankName (bank);
-                    for (int i = 0; i < l480::numPrograms(); ++i) if (l480::programs()[(size_t) i].bank == bank) bx.items.push_back ({ l480::programs()[(size_t) i].name, i, {}, {} });
+                    for (int i = 0; i < l480::numPrograms(); ++i) if (l480::programs()[(size_t) i].bank == bank && ! isMatchedOriginal (i)) bx.items.push_back ({ l480::programs()[(size_t) i].name, i, {}, {} });
                     if (! bx.items.empty()) s.boxes.push_back (bx);
                 }
                 sections.push_back (s);
             };
-            sec ("480L", 1, 21); sec ("Surround (HD Card)", 22, 26); sec ("Matched to the 480L impulse responses", 27, 32); sec ("480L II  (the earlier Flexiverb's IR-matched presets)", 33, 37); sec ("480L 96k  (measured from 96 kHz sweeps)", 38, 38);
+            sec ("Extracted  (from the 480L impulse responses, 96 kHz)", 33, 37); sec ("Surround (HD Card)", 22, 26);
+            sec ("Matched Presets  (480L programs matched to the extracted ones)", 27, 31); sec ("480L", 1, 21);
             Section u; u.title = "Your presets  (" + Flexiverb480Processor::presetFolder().getFullPathName() + ")";
             Box ub; ub.title = "Saved with SAVE";
             for (auto& n : b.proc.userPresets()) ub.items.push_back ({ n, -1, n, {} });
@@ -1488,7 +1516,9 @@ public:
         struct Alg { const char* name; int bank, num; };
         static const Alg algs[] = { { "HALL", 1, 1 }, { "RANDOM HALL", 11, 1 }, { "ROOM", 2, 2 }, { "CHAMBER", 2, 8 }, { "PLATE", 4, 1 }, { "AMBIENCE", 13, 2 },
                                     { "INVERSE", 3, 8 }, { "DELAY", 6, 2 }, { "CHORUS", 20, 2 }, { "PITCH", 8, 2 } };
-        for (auto& a : algs) { auto k = mk (a.name); const int pi = l480::findProgram (a.bank, a.num); k->onClick = [this, pi] { proc.loadProgram (machine, pi); page = 0; refreshPage (true); };
+        for (auto& a : algs) { auto k = mk (a.name); int pi = l480::findProgram (a.bank, a.num);
+                                if (isMatchedOriginal (pi)) for (int i = 0; i < l480::numPrograms(); ++i)   // the matched version of it
+                                { const auto& q = l480::programs()[(size_t) i]; if (q.bank >= 27 && q.bank <= 31 && presetKey (q.name) == presetKey (l480::programs()[(size_t) pi].name)) { pi = i; break; } } k->onClick = [this, pi] { proc.loadProgram (machine, pi); page = 0; refreshPage (true); };
                                 k->onRightClick = [this] { keyMenu (-1); }; algKeys.push_back (std::move (k)); }
         pageKey->onRightClick = [this] { keyMenu (-1); };
         loadMyKeys();
@@ -2021,11 +2051,12 @@ private:
     void stepPreset (int dir)
     {
         const auto user = proc.userPresets();
-        const int nf = l480::numPrograms(), total = nf + user.size();
-        int cur = proc.userPresetName.isNotEmpty() ? nf + user.indexOf (proc.userPresetName) : proc.programOf (machine);
-        if (cur < 0) cur = 0;
+        const auto& order = browseOrder();
+        const int nf = (int) order.size(), total = nf + user.size();
+        int cur = proc.userPresetName.isNotEmpty() ? nf + user.indexOf (proc.userPresetName) : (int) (std::find (order.begin(), order.end(), proc.programOf (machine)) - order.begin());
+        if (cur < 0 || cur >= total) cur = 0;
         const int next = ((cur + dir) % total + total) % total;
-        if (next < nf) proc.loadProgram (machine, next); else proc.loadUserPreset (user[next - nf]);
+        if (next < nf) proc.loadProgram (machine, order[(size_t) next]); else proc.loadUserPreset (user[next - nf]);
         page = 0; refreshPage (true);
     }
     void savePreset()
