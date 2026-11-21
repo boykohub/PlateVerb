@@ -1503,7 +1503,7 @@ public:
 
         // drawer (scrolls when longer than the window)
         drawer.addAndMakeVisible (vu);
-        content.addAndMakeVisible (drawerView); drawerView.setViewedComponent (&drawer, false); drawerView.setScrollBarsShown (true, false);
+        content.addAndMakeVisible (drawerView); drawerView.setViewedComponent (&drawer, false); drawerView.setScrollBarsShown (false, false);
         drawer.ed = this;
         auto dk = [this] (const String& t) { auto k = std::make_unique<LarcKey> (theme, t); k->kc = &Theme::keyPanel; drawer.addAndMakeVisible (*k); return k; };
         auto pk = [this] (const String& id, const String& t) { auto k = std::make_unique<ParamKey> (theme, proc.apvts, id, t); k->kc = &Theme::keyPanel; drawer.addAndMakeVisible (*k); return k; };
@@ -1657,10 +1657,10 @@ private:
         auto r = drawer.getLocalBounds().toFloat();
         g.setGradientFill (theme.grad (&Theme::drawerPanel, r.withHeight ((float) kH), 0.45f));
         g.fillRect (r);
-        drawLegend (g, "ENGINE", Rectangle<float> (18, (float) engineLabelY, 64, (float) keyH()), ui (jmax (9.0f, theme.keyPt * 0.9f), W::Bold, 0.08f), theme.panelText, Justification::centredLeft);
+        drawLegend (g, "ENGINE", Rectangle<float> ((float) engineLabelX, (float) engineLabelY, 90, (float) keyH()), ui (jmax (9.0f, theme.keyPt * 0.9f), W::Bold, 0.08f), theme.panelText, Justification::centredLeft);
         for (auto& s : sections)
         {
-            auto b = s.area.toFloat().expanded (8, 6).withTrimmedTop (-10);
+            auto b = s.area.toFloat();
             if (s.title != "SYSTEM")
             {   // the channel strip: a blue-grey console panel with screws
                 const auto sp = theme.stripPanel;
@@ -1677,14 +1677,12 @@ private:
                     g.setColour (Colours::black.withAlpha (0.55f)); g.drawLine (sr.getX() + 2, sr.getCentreY(), sr.getRight() - 2, sr.getCentreY(), 1.2f);
                 }
                 const auto f = ui (jmax (10.0f, theme.knobPt * 1.0f), W::Bold, 0.18f);
-                drawLegend (g, s.title, Rectangle<float> (b.getX() + 20, b.getY() + 3, b.getWidth() - 40, 16), f, Colours::white.withAlpha (0.92f), Justification::centredLeft);
+                drawLegend (g, s.title, Rectangle<float> (b.getX() + 20, b.getY() + 4, b.getWidth() - 40, (float) keyH()), f, Colours::white.withAlpha (0.92f), Justification::centredLeft);
                 continue;
             }
             g.setColour (theme.panelText.withAlpha (0.25f)); g.drawRoundedRectangle (b, 4, 1.0f);
-            const auto f = ui (jmax (9.0f, theme.knobPt * 0.85f), W::Bold, 0.14f); const float tw = textW (f, s.title) + 12;
-            auto tr = Rectangle<float> (b.getX() + 10, b.getY() - 7, tw, 14);
-            g.setColour (theme.panel); g.fillRect (tr);
-            drawLegend (g, s.title, tr, f, theme.panelText.withAlpha (0.85f));
+            const auto f = ui (jmax (10.0f, theme.knobPt * 1.0f), W::Bold, 0.18f);
+            drawLegend (g, s.title, Rectangle<float> (b.getX() + 10, b.getY() + 6, b.getWidth() - 20, (float) keyH()), f, theme.panelText.withAlpha (0.85f), Justification::centredLeft);
         }
     }
 
@@ -1810,40 +1808,64 @@ private:
     }
     void layoutDrawer()
     {
+        // No scrolling: every box edge sits on a line of the main window.
+        //   SYSTEM      preset bar top        -> waterfall / decay line
+        //   ANALOG      waterfall / decay line -> screen bottom
+        //   EQUALISER   buttons top           -> a fader scale line
+        //   COMPRESSOR  that fader line       -> faders bottom
         sections.clear();
-        const int x0 = 18, wAll = kDrawer - 18 - 26, gap = 5, kh = keyH(), kTxt = roundToInt (theme.knobPt) + 5;
-        // each frame's top line is level with a line of the main window: the preset bar, the screen, the keys, the faders
-        const int lines[] = { 14, screen.getY(), screen.getBottom(), screen.getBottom() + 10, faderArea.getY() - (int) labelH, faderArea.getBottom() };
-        auto level = [&] (int yy) { for (int L : lines) if (L + 16 >= yy && L + 16 - yy <= 90) return L + 16; return yy; };
-        int y = level (22);
-        auto sec = [&] (const String& t, int top) { sections.push_back ({ t, { x0, top, wAll, y - top } }); y += 30; };
-        int top = y;
-        machAKey->setVisible (config() != 0); machBKey->setVisible (config() != 0);
-        engineLabelY = y; engineBox.setBounds (x0 + 70, y, 120, kh); y += kh + gap;
-        y = flowKeys ({ machAKey.get(), machBKey.get(), muteKey.get(), setupKey.get() }, x0, wAll, y, kh, gap);
-        y = flowKeys ({ ironKey.get() }, x0, wAll, y, kh, gap);
-        const int qw = wAll / 4;
-        for (int i = 0; i < 4; ++i) sysKnob[i]->setBounds (x0 + i * qw - 4, y, qw + 8, 70 + kTxt);
-        y += 72 + kTxt; y = jmax (y, screen.getBottom() - 6);   // its bottom line level with the screen's
-        sec ("SYSTEM", top);
-        top = y = level (y);
-        anOnKey->setBounds (x0 + wAll - (int) anOnKey->preferredWidth(), y, (int) anOnKey->preferredWidth(), kh); y += kh + 6;
-        const int aw = wAll / 3;
-        anKnob[0]->setBounds (x0, y, aw, 80 + kTxt); anKnob[1]->setBounds (x0 + aw, y, aw, 80 + kTxt); anKnob[4]->setBounds (x0 + 2 * aw, y, aw, 80 + kTxt); y += 82 + kTxt;
-        anKnob[2]->setBounds (x0 + aw / 2, y, aw, 80 + kTxt); anKnob[3]->setBounds (x0 + aw / 2 + aw, y, aw, 80 + kTxt); y += 80 + kTxt;
-        sec ("ANALOG", top);
-        top = y = level (y);
-        eqOnKey->setBounds (x0 + wAll - (int) eqOnKey->preferredWidth(), y, (int) eqOnKey->preferredWidth(), kh);
-        eqKnob2[0]->setBounds (x0, y - 4, wAll / 3, 80 + kTxt); eqKnob2[1]->setBounds (x0 + wAll / 3, y - 4, wAll / 3, 80 + kTxt); y += 82 + kTxt;
-        const int ew = wAll / 2;
-        for (int b = 0; b < 4; ++b) eqKnob[b]->setBounds (x0 + (b % 2) * ew, y + (b / 2) * (116 + kTxt), ew, 114 + kTxt);
-        y += 2 * (116 + kTxt); sec ("EQUALISER", top);
-        top = y = level (y);
-        y = flowKeys ({ cpOnKey.get(), satKey.get(), duckKey.get() }, x0, wAll, y, kh, gap);
-        vu.setBounds (x0 + (wAll - 240) / 2, y + 4, 240, 128); y += 140;
-        for (int i = 0; i < 7; ++i) cpKnob[i]->setBounds (x0 + (i % 3) * aw, y + (i / 3) * (80 + kTxt), aw, 78 + kTxt);
-        y += 3 * (80 + kTxt); sec ("COMPRESSOR", top);
-        drawer.setSize (kDrawer - 10, y + 10);
+        const int fx = 10, fw = kDrawer - 20, pad = 10, x0 = fx + pad, wAll = fw - 2 * pad, gap = 5, kh = keyH(), kTxt = roundToInt (theme.knobPt) + 5;
+        const int A = presetName.getY(), S = screen.getY() + decay.getY() - 3, D = screen.getBottom();
+        const int E = screen.getBottom() + 10;
+        const int fTop = faderArea.getY() + 12, fBot = faderArea.getBottom() - 12, H = fBot + 6;
+        int T = fBot; { int best = 1 << 30; for (int k = 0; k <= 10; ++k) { const int t = fBot - (fBot - fTop) * k / 10; if (std::abs (t - (E + 215)) < best) { best = std::abs (t - (E + 215)); T = t; } } }
+        auto frame = [&] (const String& t, int top, int bot) { sections.push_back ({ t, { fx, top, fw, bot - top } }); };
+        const int titleH = jmax (kh, roundToInt (theme.knobPt) + 10);
+        // SYSTEM
+        frame ("SYSTEM", A, S - 4);
+        {
+            int y = A + 6;
+            machAKey->setVisible (config() != 0); machBKey->setVisible (config() != 0);
+            const int lw = (int) textW (ui (jmax (9.0f, theme.keyPt * 0.9f), W::Bold, 0.08f), "ENGINE") + 14;
+            engineLabelY = y; engineLabelX = x0 + (int) textW (ui (jmax (10.0f, theme.knobPt), W::Bold, 0.18f), "SYSTEM") + 24;
+            engineBox.setBounds (engineLabelX + lw, y, 120, kh); y += kh + gap;
+            y = flowKeys ({ machAKey.get(), machBKey.get(), muteKey.get(), setupKey.get(), ironKey.get() }, x0, wAll, y, kh, gap);
+            const int qw = wAll / 4, kb = S - 4 - 6 - y;
+            for (int i = 0; i < 4; ++i) sysKnob[i]->setBounds (x0 + i * qw, y, qw, jmax (40, kb));
+        }
+        // ANALOG
+        frame ("ANALOG", S + 4, D);
+        {
+            const int y = S + 4 + 4;
+            anOnKey->setBounds (x0 + wAll - (int) anOnKey->preferredWidth(), y, (int) anOnKey->preferredWidth(), kh);
+            const int ky = y + titleH, kb = D - 4 - ky, w5 = wAll / 5;
+            const int order[5] = { 0, 1, 4, 2, 3 };
+            for (int i = 0; i < 5; ++i) anKnob[order[i]]->setBounds (x0 + i * w5, ky, w5, jmax (40, kb));
+        }
+        // EQUALISER
+        frame ("EQUALISER", E, T - 4);
+        {
+            const int y = E + 4;
+            eqOnKey->setBounds (x0 + wAll - (int) eqOnKey->preferredWidth(), y, (int) eqOnKey->preferredWidth(), kh);
+            const int ky = y + titleH, avail = T - 4 - 4 - ky, r1 = avail * 38 / 100, w4 = wAll / 4;
+            eqKnob2[0]->setBounds (x0 + wAll / 6, ky, wAll / 3, r1); eqKnob2[1]->setBounds (x0 + wAll / 2, ky, wAll / 3, r1);
+            for (int b = 0; b < 4; ++b) eqKnob[b]->setBounds (x0 + b * w4, ky + r1, w4, avail - r1);
+        }
+        // COMPRESSOR, with the VU meter
+        frame ("COMPRESSOR", T + 4, H);
+        {
+            const int y = T + 4 + 4;
+            int kx = x0 + wAll;
+            for (auto* k : { duckKey.get(), satKey.get(), cpOnKey.get() }) { const int w = (int) k->preferredWidth(); kx -= w; k->setBounds (kx, y, w, kh); kx -= gap; }
+            const int ky = y + titleH, avail = H - 4 - ky, r1 = avail * 52 / 100, w5 = wAll / 5;
+            const int vw = jmin (wAll * 52 / 100, (int) (r1 * 1.9f));
+            vu.setBounds (x0, ky + 2, vw, r1 - 4);
+            const int rw = (wAll - vw) / 2;
+            cpKnob[1]->setBounds (x0 + vw, ky, rw, r1); cpKnob[2]->setBounds (x0 + vw + rw, ky, rw, r1);
+            const int order[5] = { 0, 3, 4, 5, 6 };
+            for (int i = 0; i < 5; ++i) cpKnob[order[i]]->setBounds (x0 + i * w5, ky + r1, w5, avail - r1);
+        }
+        drawer.setSize (kDrawer, kH);
     }
     int baseWidth() const { return kL + (drawerOpen ? kDrawer : 0) + (setupOpen ? kSetup : 0); }
     bool applying = false;
@@ -2181,7 +2203,7 @@ private:
     }
     std::vector<std::unique_ptr<LarcFader>> faders;
     Viewport drawerView; Drawer drawer;
-    ComboBox engineBox; int engineLabelY = 0;
+    ComboBox engineBox; int engineLabelY = 0, engineLabelX = 18;
     VuMeter vu { theme };
     std::unique_ptr<ParamKey> ironKey, anOnKey, eqOnKey, cpOnKey, satKey, duckKey;
     std::unique_ptr<ScaleKnob> sysKnob[4], anKnob[5], eqKnob2[2], cpKnob[7];
