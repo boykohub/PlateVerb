@@ -49,6 +49,11 @@ struct AlgoBase {
     virtual void process (float& L, float& R, const Ctx& c) = 0;
     virtual void key (int slot) { (void) slot; }                             // a slider-display key that is a trigger (PLAY, REC ...)
     virtual std::string status() const { return {}; }                        // shown in the LARC's main display
+    // early-reflection taps you edit on the screen: time offset (ms) and level change (dB) per tap; -80 dB = off
+    static constexpr int kMaxTaps = 32;
+    float tapEdMs[kMaxTaps] = {}, tapEdDb[kMaxTaps] = {}; int tapEdVer = 0;
+    // the algorithm's own early taps before your edits: time from the input (ms) and level re the input (dB)
+    virtual int baseTaps (float* ms, float* db, int max) const { (void) ms; (void) db; (void) max; return 0; }
 };
 
 // ============================================================================ reverb (banks 1-4, Random Hall, Ambience, Classic Cart halls/plates)
@@ -111,6 +116,8 @@ struct EnvBuilder {
     static constexpr int K = 20;
     Line dl[2]; float tapL[K] = {}, tapR[K] = {}, g[K] = {}, gD = 1, jitL[K] = {}, jitR[K] = {}; bool on = false; float fs = 48000;
     float last[4] = { -1, -1, -1, -1 }; int n = K;
+    const float* edMs = nullptr; const float* edDb = nullptr; int edVer = 0, lastVer = -1;
+    float bL[K] = {}, bR[K] = {}, bG[K] = {};                             // the taps before your edits
     void prepare (float sr) {
         fs = sr; for (auto& d : dl) d.init ((int) (0.8f * fs) + 16);
         uint32_t seed = 480u;
@@ -120,7 +127,8 @@ struct EnvBuilder {
     }
     void reset() { for (auto& d : dl) d.clear(); }
     void set (float shp, float spr, float siz, float dens = 1.0f) {
-        if (shp == last[0] && spr == last[1] && siz == last[2] && dens == last[3]) return;
+        if (shp == last[0] && spr == last[1] && siz == last[2] && dens == last[3] && edVer == lastVer) return;
+        lastVer = edVer;
         last[0] = shp; last[1] = spr; last[2] = siz; last[3] = dens;
         n = std::max (3, std::min (K, (int) std::lround (K * dens)));      // fewer, wider-spaced taps = a grainier start
         const auto& c = envCal();
@@ -140,6 +148,23 @@ struct EnvBuilder {
         }
         const float nrm = 1.0f / std::sqrt (std::max (1e-6f, sum));     // the same energy goes in, only spread in time
         gD *= nrm; for (int k = 0; k < n; ++k) g[k] *= nrm;
+        for (int k = 0; k < n; ++k)
+        {
+            bL[k] = tapL[k]; bR[k] = tapR[k]; bG[k] = g[k];
+            if (edMs && edDb)
+            {
+                const float d = edMs[k] * 0.001f * fs;
+                tapL[k] = std::max (1.0f, std::min (0.79f * fs, tapL[k] + d)); tapR[k] = std::max (1.0f, std::min (0.79f * fs, tapR[k] + d));
+                g[k] *= edDb[k] <= -79.0f ? 0.0f : std::pow (10.0f, edDb[k] / 20.0f);
+            }
+        }
+    }
+    int baseTaps (float* ms, float* db, int max, float offsetMs) const
+    {
+        if (! on) return 0;
+        const int c = std::min (n, max);
+        for (int k = 0; k < c; ++k) { ms[k] = offsetMs + 0.5f * (bL[k] + bR[k]) / fs * 1000.0f; db[k] = 20.0f * std::log10 (std::max (1e-6f, bG[k])); }
+        return c;
     }
     inline void process (float& L, float& R) {
         if (! on) return;
@@ -152,6 +177,7 @@ struct EnvBuilder {
 
 struct ReverbAlgo : AlgoBase {       // aRev6 / aRev2 / aRHall
     pv::TankAlgo tank; pv::PlateAlgo plate; Preechoes pe; Line pdL, pdR; OnePole hfc[2]; Biquad shelf[2]; EnvBuilder env;
+    int baseTaps (float* ms, float* db, int max) const override { return env.baseTaps (ms, db, max, pdS / fs * 1000.0f); }
     bool usePlate = false, random = false, shelfOn = false; float pdS = 1, mixD = 0, mixW = 1, mod = 0.5f, early = 0.7f, dampA = 1, wetG = 1;
     int algo;
     explicit ReverbAlgo (int a) : algo (a) {}
@@ -174,6 +200,7 @@ struct ReverbAlgo : AlgoBase {       // aRev6 / aRev2 / aRHall
         const float build = clampf (3.0f + spr / 255.0f * 60.0f, 3, 230);
         early = clampf ((1.0f - shp / 255.0f * 0.8f) * cal.erScale, 0.0f, 1.5f);
         const float dens = clampf (cal.densBase + cal.densDif * (dif - 0.8f) - cal.densSize * siz / 40.0f - cal.densSpr * spr / 255.0f, 0.05f, 1.0f);
+        env.edMs = tapEdMs; env.edDb = tapEdDb; env.edVer = tapEdVer;
         env.set (shp, spr, siz, dens);
         const float dampHz = rtc >= 21000.0f ? 20000.0f : rtc;
         float spin = -1.0f; mod = 0.5f;
@@ -972,7 +999,7 @@ struct HDAlgo : AlgoBase {
     static constexpr int   kSide[kT] = { 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1 };
     static constexpr bool  kRear[kT] = { false, false, true, false, true, true, false, true, false, true, true, false };
     pv::TankAlgo tank; Line pdL, pdR, erIn[2], lbL, lbR; OnePole hfc[2], elr[2], lbf[2]; RandLfo lfo[kT];
-    float tapS[kT] = {}, atk[kT] = {}, wanS = 0, rpdS = 1, lbdS = 1, elv = 1, rlv = 1, lfbG = 0, rearG = 0.5f, fold = 0.707f, trim = 1;
+    float tapB[kT] = {}, edG[kT] = {}, tapS[kT] = {}, atk[kT] = {}, wanS = 0, rpdS = 1, lbdS = 1, elv = 1, rlv = 1, lfbG = 0, rearG = 0.5f, fold = 0.707f, trim = 1;
     void prepare (float sr) override {
         fs = sr; tank.init (4, fs); tank.fs = fs;
         pdL.init ((int) (0.21f * fs)); pdR.init ((int) (0.21f * fs)); lbL.init ((int) (0.21f * fs)); lbR.init ((int) (0.21f * fs));
@@ -996,7 +1023,12 @@ struct HDAlgo : AlgoBase {
         lbdS = msToS (v[12], fs);
         for (auto& f : lbf) f.setCut (fs, v[13]);
         const float sc = clampf (siz / 31.0f, 0.3f, 2.0f), eld = v[18] * 0.001f * fs, rdl = v[22] * 0.001f * fs;
-        for (int i = 0; i < kT; ++i) tapS[i] = std::max (1.0f, kMs[i] * sc * 0.001f * fs + eld + (kRear[i] ? rdl : 0.0f));
+        for (int i = 0; i < kT; ++i)
+        {
+            tapB[i] = std::max (1.0f, kMs[i] * sc * 0.001f * fs + eld + (kRear[i] ? rdl : 0.0f));
+            tapS[i] = std::max (1.0f, std::min (0.39f * fs, tapB[i] + tapEdMs[i] * 0.001f * fs));
+            edG[i] = tapEdDb[i] <= -79.0f ? 0.0f : std::pow (10.0f, tapEdDb[i] / 20.0f);
+        }
         for (int i = 0; i < kT; ++i) atk[i] = erAttackMs > 0.1f ? 1.0f - std::exp (-(kMs[i] * sc) / erAttackMs) : 1.0f;
         wanS = 0.0004f * fs * v[19] / 50.0f;                              // early spin: up to about +-0.8 ms of movement
         for (int i = 0; i < kT; ++i) lfo[i].setRate (fs, std::max (0.05f, v[19] / 40.0f) * (0.8f + 0.04f * (float) i));
@@ -1005,13 +1037,19 @@ struct HDAlgo : AlgoBase {
         rearG = dbToGain (v[21]); fold = hd ? 1.0f : 0.707f;
         trim = dbToGain (tankTrimDb (rt));
     }
+    int baseTaps (float* ms, float* db, int max) const override
+    {
+        const int c = std::min (kT, max);
+        for (int i = 0; i < c; ++i) { ms[i] = tapB[i] / fs * 1000.0f; db[i] = 20.0f * std::log10 (std::max (1e-6f, kG[i] * elv * 0.42f * (kRear[i] ? rearG * fold : 1.0f))); }
+        return c;
+    }
     void process (float& L, float& R, const Ctx&) override {
         const float xL = L, xR = R;
         erIn[0].push (0.8f * xL + 0.2f * xR); erIn[1].push (0.8f * xR + 0.2f * xL);
         float f[2] = {}, r[2] = {};
         for (int i = 0; i < kT; ++i) {
             const int c = kSide[i];
-            const float t = erIn[c].read (tapS[i] + wanS * (1.0f + lfo[i].next())) * kG[i] * atk[i];
+            const float t = erIn[c].read (tapS[i] + wanS * (1.0f + lfo[i].next())) * kG[i] * atk[i] * edG[i];
             if (kRear[i]) r[c] += t; else f[c] += t;
         }
         const float eg = elv * 0.42f;
@@ -1150,6 +1188,14 @@ struct Machine {
         }
     }
     float erAtk = 0.0f;
+    float edMs[AlgoBase::kMaxTaps] = {}, edDb[AlgoBase::kMaxTaps] = {}; int edVer = 0;
+    void setTapEdits (int n, const float* ms, const float* db)
+    {
+        bool same = true;
+        for (int k = 0; k < AlgoBase::kMaxTaps; ++k) { const float m = k < n ? ms[k] : 0.0f, d = k < n ? db[k] : 0.0f; same = same && m == edMs[k] && d == edDb[k]; edMs[k] = m; edDb[k] = d; }
+        if (! same) ++edVer;
+    }
+    int baseTaps (float* ms, float* db, int max) const { return cur >= 0 ? algos[cur]->baseTaps (ms, db, max) : 0; }
     void update (int algo, int bnk, const float* v, float trimDb = 0.0f, const float* curve = nullptr, const float* shape = nullptr) {
         if (cur >= 0) algos[cur]->erAttackMs = erAtk;
         trimG = dbToGain (trimDb);
@@ -1165,7 +1211,12 @@ struct Machine {
             algos[cur]->curveMul = algoHasDecayCurve (cur) ? curve : nullptr; algos[cur]->erAttackMs = erAtk;
             fadeState = 2;
         }
-        if (cur >= 0 && fadeState != 1) algos[cur]->set (v, bank);   // while fading out, the values belong to the next program
+        if (cur >= 0 && fadeState != 1)
+        {
+            auto* a = algos[cur].get();
+            if (a->tapEdVer != edVer) { std::copy (edMs, edMs + AlgoBase::kMaxTaps, a->tapEdMs); std::copy (edDb, edDb + AlgoBase::kMaxTaps, a->tapEdDb); a->tapEdVer = edVer; }
+            a->set (v, bank);
+        }   // while fading out, the values belong to the next program
     }
     inline void process (float& L, float& R, const Ctx& c) {
         if (cur < 0) return;

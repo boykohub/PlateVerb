@@ -1020,7 +1020,7 @@ private:
             // early reflections: peak level in 0.5 ms bins over 150 ms, dB re the loudest point of the whole response
             float mx = 1e-9f; for (int i = 0; i < len; ++i) mx = std::max (mx, 0.5f * (std::abs (L[(size_t) i]) + std::abs (R[(size_t) i])));
             const int eb = std::max (1, (int) (0.0005 * rate));
-            for (int k = 0; k < 300; ++k) { float m = 0; for (int i = k * eb; i < (k + 1) * eb && i < len; ++i) m = std::max (m, 0.5f * (std::abs (L[(size_t) i]) + std::abs (R[(size_t) i]))); r.er.push_back (Decibels::gainToDecibels (m / mx, -80.0f)); }
+            for (int k = 0; k < 600; ++k) { float m = 0; for (int i = k * eb; i < (k + 1) * eb && i < len; ++i) m = std::max (m, 0.5f * (std::abs (L[(size_t) i]) + std::abs (R[(size_t) i]))); r.er.push_back (Decibels::gainToDecibels (m / mx, -80.0f)); }
             // bands: low < 250 Hz, mid 250 Hz - 2.5 kHz, high > 2.5 kHz; energy in 10 ms frames, dB re the loudest band frame
             Bq f[3][4];
             for (int c = 0; c < 2; ++c) { f[0][c].lp (rate, 250, false); f[0][c + 2].lp (rate, 250, false); f[1][c].lp (rate, 250, true); f[1][c + 2].lp (rate, 2500, false); f[2][c].lp (rate, 2500, true); f[2][c + 2].lp (rate, 2500, true); }
@@ -1077,6 +1077,15 @@ public:
     std::function<void (const String&, const String&)> onShow;
     float live[3] = {};
     Point<float> pdAnchor { -1, -1 }, rtAnchor { -1, -1 };   // where the predelay and decay-time numbers go
+    // ---- early reflections you can edit: the algorithm's own taps (real) and your own ones
+    struct Bar { float ms, db; bool own; int idx; bool off; };
+    std::function<std::vector<Bar>()> getBars;
+    std::function<void (float ms, float db)> onAdd;
+    std::function<void (const Bar&)> onToggle;                         // double-click: yours go, the algorithm's go off / on
+    std::function<void (const std::vector<Bar>&)> onDragBegin; std::function<void (float dMs, float dDb)> onDrag; std::function<void()> onDragEnd;
+    float erRange = 150.0f;                                              // ms shown in the early-reflection picture
+    std::vector<std::pair<bool, int>> sel;                               // selected bars: (yours?, number)
+    bool isSel (const Bar& b) const { for (auto& q : sel) if (q.first == b.own && q.second == b.idx) return true; return false; }
     Rectangle<float> graphArea() const { return decArea; }
     Point<float> floorAt (float f) const { return decArea.isEmpty() ? Point<float> (-1, -1) : P (wfIndex (f), tMax(), -60.0f); }
     void setResult (const ResponseRenderer::Result& r) { target = r; if (shown.er.empty()) shown = r; }
@@ -1094,14 +1103,14 @@ public:
     {
         const Colour col = th.displayText;
         auto r = getLocalBounds().toFloat().reduced (6, 4);
-        auto erA = r.removeFromLeft (r.getWidth() * 0.26f).reduced (0, 2); r.removeFromLeft (10);
+        auto erA = r.removeFromLeft (r.getWidth() * 0.36f).reduced (0, 2); r.removeFromLeft (10);
         auto meters = r.removeFromRight (26); r.removeFromRight (6);
         const float lh = th.sz (12.0f);
         erArea = erA.withTrimmedTop (lh + 4).withTrimmedBottom (lh + 2).withTrimmedLeft (lh * 2.2f); decArea = r.withTrimmedTop (lh + 4).withTrimmedBottom (lh + 2).withTrimmedLeft (lh * 2.4f).withTrimmedRight (lh * 3.2f);
         g.setFont (ui (th.sz (9.0f), W::Bold, 0.05f)); g.setColour (col.withAlpha (0.7f));
         g.drawText ("EARLY REFLECTIONS", erA.withHeight (th.sz (12.0f) + 2), Justification::left, false);
         g.drawText ("DECAY  -  LOW / MID / HIGH,  TIME COMING FORWARD", r.withHeight (th.sz (12.0f) + 2), Justification::left, false);
-        grid (g, erArea, 150.0f, 50.0f, "ms");
+        grid (g, erArea, erRange, erRange > 200 ? 100.0f : 50.0f, "ms");
         if (shown.er.empty()) return;
         // early reflections as stems
         for (size_t k = 0; k < shown.er.size(); ++k)
@@ -1109,19 +1118,35 @@ public:
             const float db = shown.er[k]; if (db < -60) continue;
             const float prev = k > 1 ? std::max (shown.er[k - 1], shown.er[k - 2]) : -99.0f, next = k + 2 < shown.er.size() ? std::max (shown.er[k + 1], shown.er[k + 2]) : -99.0f;
             if (db < prev || db < next) continue;                     // a distinct reflection: louder than its neighbours
-            const float x = erArea.getX() + erArea.getWidth() * (float) k / (float) shown.er.size(), y = yOf (erArea, db);
-            g.setColour (col.withAlpha (0.85f)); g.drawLine (x, erArea.getBottom(), x, y, 1.2f);
+            const float ms = (float) k * 0.5f; if (ms > erRange) break;
+            const float x = erX (ms), y = yOf (erArea, db);
+            g.setColour (col.withAlpha (0.3f)); g.drawLine (x, erArea.getBottom(), x, y, 1.0f);   // what comes out (a picture)
         }
         const float pd = getPredelayMs ? getPredelayMs() : -1.0f;
         if (pd >= 0)
         {
-            const float x = erArea.getX() + erArea.getWidth() * jlimit (0.0f, 1.0f, pd / 150.0f);
+            const float x = erX (pd);
             Path pth; pth.startNewSubPath (x, erArea.getY()); pth.lineTo (x, erArea.getBottom());
             Path dsh; const float dl[] = { 3.0f, 3.0f }; PathStrokeType (1.2f).createDashedStroke (dsh, pth, dl, 2);
             g.setColour (Colours::white.withAlpha (dragging == 1 ? 0.9f : 0.55f)); g.fillPath (dsh);
             pdAnchor = { x + 3, erArea.getY() };
         }
         else pdAnchor = { -1, -1 };
+        // the reflections you can edit, like velocities: a stem with a head; yours in the button-light colour
+        if (getBars)
+        {
+            for (auto& b : getBars())
+            {
+                if (b.ms > erRange) continue;
+                const float x = erX (b.ms), y = b.off ? erArea.getBottom() - 3 : yOf (erArea, b.db);
+                const bool s = isSel (b); const Colour c = b.own ? th.keyLight : col;
+                g.setColour (c.withAlpha (b.off ? 0.35f : 1.0f)); g.drawLine (x, erArea.getBottom(), x, y, s ? 2.2f : 1.6f);
+                const auto head = Rectangle<float> (8, 5).withCentre ({ x, y });
+                g.setColour (s ? Colours::white : c.withAlpha (b.off ? 0.35f : 1.0f)); g.fillRect (head);
+                if (b.off) { g.setColour (c.withAlpha (0.6f)); g.drawLine (x - 3, y - 6, x + 3, y - 12, 1.0f); g.drawLine (x - 3, y - 12, x + 3, y - 6, 1.0f); }
+            }
+            if (! band.isEmpty()) { g.setColour (Colours::white.withAlpha (0.12f)); g.fillRect (band); g.setColour (Colours::white.withAlpha (0.5f)); g.drawRect (band, 1.0f); }
+        }
         waterfall (g);
         const Colour bc[3] = { th.lowCol, th.midCol, th.highCol };
         // decay handle: on the 1 kHz line where it has fallen 30 dB (drag sideways for decay time)
@@ -1148,20 +1173,90 @@ public:
     }
     void mouseDown (const MouseEvent& e) override
     {
-        dragging = 0;
+        dragging = 0; band = {};
+        if (e.mods.isPopupMenu()) return;
         const float pd = getPredelayMs ? getPredelayMs() : -1.0f;
-        if (pd >= 0 && erArea.expanded (4).contains (e.position) && std::abs (e.position.x - (erArea.getX() + erArea.getWidth() * pd / 150.0f)) < 8) dragging = 1;
+        const auto hb = hitBar (e.position);
+        const bool more = e.mods.isShiftDown() || e.mods.isCommandDown();
+        if (hb.idx >= 0)
+        {
+            grabKeyboardFocus();
+            if (more) { if (isSel (hb)) sel.erase (std::remove (sel.begin(), sel.end(), std::make_pair (hb.own, hb.idx)), sel.end()); else sel.push_back ({ hb.own, hb.idx }); }
+            else if (! isSel (hb)) sel = { { hb.own, hb.idx } };
+            dragging = 3; startPos = e.position;
+            if (onDragBegin && getBars) { std::vector<Bar> v; for (auto& b : getBars()) if (isSel (b)) v.push_back (b); onDragBegin (v); }
+            repaint(); return;
+        }
+        if (pd >= 0 && erArea.expanded (4).contains (e.position) && std::abs (e.position.x - erX (pd)) < 6) dragging = 1;
         else if (e.position.getDistanceFrom (handle) < 10 && getRt) { dragging = 2; startRt = getRt(); startX = e.position.x; }
+        else if (getBars && erArea.expanded (4).contains (e.position)) { grabKeyboardFocus(); if (! more) sel.clear(); dragging = 4; startPos = e.position; repaint(); return; }
         if (dragging && gesture) gesture (true);
+    }
+    void mouseMove (const MouseEvent& e) override
+    {
+        const bool in = erArea.contains (e.position);
+        if (in && ! hinted && onShow) onShow ("Reflections:", "drag to move (sideways = time, up/down = level),  shift-click or drag a box to select more,  double-click to add or remove");
+        hinted = in;
+    }
+    void mouseDoubleClick (const MouseEvent& e) override
+    {
+        if (! getBars || ! erArea.expanded (4).contains (e.position)) return;
+        const auto hb = hitBar (e.position);
+        if (hb.idx >= 0) { sel.clear(); if (onToggle) onToggle (hb); }
+        else if (onAdd) onAdd (jlimit (0.1f, erRange, (e.position.x - erArea.getX()) / erArea.getWidth() * erRange), jlimit (-60.0f, 0.0f, (erArea.getBottom() - e.position.y) / erArea.getHeight() * 60.0f - 60.0f));
+        dragging = 0; repaint();
+    }
+    bool keyPressed (const KeyPress& k) override
+    {
+        if ((k == KeyPress::deleteKey || k == KeyPress::backspaceKey) && ! sel.empty() && getBars && onToggle)
+        {
+            std::vector<Bar> v; for (auto& b : getBars()) if (isSel (b)) v.push_back (b);
+            std::sort (v.begin(), v.end(), [] (const Bar& a, const Bar& b) { return a.idx > b.idx; });   // yours from the last, so numbers stay right
+            sel.clear(); for (auto& b : v) onToggle (b); repaint(); return true;
+        }
+        if (k.isKeyCode ('A') && k.getModifiers().isCommandDown() && getBars) { sel.clear(); for (auto& b : getBars()) sel.push_back ({ b.own, b.idx }); repaint(); return true; }
+        return false;
     }
     void mouseDrag (const MouseEvent& e) override
     {
-        if (dragging == 1 && setPredelayMs) { const float ms = jlimit (0.0f, 150.0f, (e.position.x - erArea.getX()) / erArea.getWidth() * 150.0f); setPredelayMs (ms); if (onShow) onShow ("Predelay", String (ms, 1) + " ms"); }
+        if (dragging == 3 && onDrag)
+        {
+            const float dMs = (e.position.x - startPos.x) / erArea.getWidth() * erRange, dDb = -(e.position.y - startPos.y) / erArea.getHeight() * 60.0f;
+            onDrag (dMs, dDb); repaint(); return;
+        }
+        if (dragging == 4 && getBars)
+        {
+            band = Rectangle<float> (startPos, e.position);
+            if (! e.mods.isShiftDown() && ! e.mods.isCommandDown()) sel.clear();
+            for (auto& b : getBars()) if (band.contains (Point<float> (erX (b.ms), b.off ? erArea.getBottom() - 3 : yOf (erArea, b.db))) && ! isSel (b)) sel.push_back ({ b.own, b.idx });
+            repaint(); return;
+        }
+        if (dragging == 1 && setPredelayMs) { const float ms = jlimit (0.0f, erRange, (e.position.x - erArea.getX()) / erArea.getWidth() * erRange); setPredelayMs (ms); if (onShow) onShow ("Predelay", String (ms, 1) + " ms"); }
         if (dragging == 2 && setRt) { const float k = std::pow (2.0f, (e.position.x - startX) / 120.0f), rt = jlimit (0.05f, 70.0f, startRt * k); setRt (rt); if (onShow) onShow ("Decay", String (rt, 2) + " s"); }
         repaint();
     }
-    void mouseUp (const MouseEvent&) override { if (dragging && gesture) gesture (false); dragging = 0; repaint(); }
+    void mouseUp (const MouseEvent&) override
+    {
+        if (dragging == 3 && onDragEnd) onDragEnd();
+        if ((dragging == 1 || dragging == 2) && gesture) gesture (false);
+        dragging = 0; band = {}; repaint();
+    }
 private:
+    float erX (float ms) const { return erArea.getX() + erArea.getWidth() * jlimit (0.0f, 1.0f, ms / erRange); }
+    Bar hitBar (Point<float> p) const
+    {
+        if (! getBars) return { 0, 0, false, -1, false };
+        Bar best { 0, 0, false, -1, false }; float bd = 7.0f;
+        for (auto& b : getBars())
+        {
+            if (b.ms > erRange) continue;
+            const float x = erX (b.ms), y = b.off ? erArea.getBottom() - 3 : yOf (erArea, b.db);
+            const float d = std::abs (p.x - x) + (p.y < y - 6 ? (y - 6 - p.y) : 0.0f);      // on the stem or its head
+            if (d < bd && p.y <= erArea.getBottom() + 4) { bd = d; best = b; }
+        }
+        return best;
+    }
+    Rectangle<float> band; Point<float> startPos; bool hinted = false;
     // ---- the 3D waterfall: frequency across (log), time going back (up and to the right), level up
     static constexpr float kDepthX = 0.30f, kDepthY = 0.42f;
     static float wfIndex (float f) { return (float) (ResponseRenderer::kWfBands - 1) * std::log (jlimit (40.0f, 16000.0f, f) / 40.0f) / std::log (400.0f); }
@@ -1616,6 +1711,52 @@ public:
             ed->changed = [sp] { if (sp != nullptr) sp->lookChanged(); };
             CallOutBox::launchAsynchronously (std::move (ed), at->localAreaToGlobal (area), nullptr);
         };
+        reverbView.getBars = [this]
+        {
+            std::vector<ReverbView::Bar> v;
+            float ms[32], db[32]; const int n = proc.baseTaps (machine, ms, db, 32);
+            const auto& ed = proc.tapEd[machine];
+            for (int k = 0; k < n; ++k)
+            {
+                const auto e = k < (int) ed.size() ? ed[(size_t) k] : Flexiverb480Processor::TapEd {};
+                v.push_back ({ ms[k] + e.ms, db[k] + (e.db <= -79.0f ? 0.0f : e.db), false, k, e.db <= -79.0f });
+            }
+            const auto& r = proc.refl[machine];
+            for (size_t j = 0; j < r.size(); ++j) v.push_back ({ r[j].ms, r[j].db, true, (int) j, false });
+            return v;
+        };
+        reverbView.onAdd = [this] (float ms, float db)
+        {
+            auto r = proc.refl[machine]; if (r.size() >= 32) return;
+            r.push_back ({ ms, db, (r.size() % 2 == 0) ? -0.7f : 0.7f }); proc.setRefl (machine, r);
+            showMessage ("Your reflection", String (ms, 1) + " ms   " + String (db, 1) + " dB");
+        };
+        reverbView.onToggle = [this] (const ReverbView::Bar& b)
+        {
+            if (b.own) { auto r = proc.refl[machine]; if (b.idx < (int) r.size()) { r.erase (r.begin() + b.idx); proc.setRefl (machine, r); } return; }
+            auto e = proc.tapEd[machine]; if ((int) e.size() <= b.idx) e.resize ((size_t) b.idx + 1);
+            e[(size_t) b.idx].db = e[(size_t) b.idx].db <= -79.0f ? 0.0f : -80.0f; proc.setTapEdits (machine, e);
+            showMessage ("Reflection " + String (b.idx + 1), e[(size_t) b.idx].db <= -79.0f ? "off" : "on");
+        };
+        reverbView.onDragBegin = [this] (const std::vector<ReverbView::Bar>& v) { dragBars = v; dragTaps = proc.tapEd[machine]; dragRefl = proc.refl[machine]; };
+        reverbView.onDrag = [this] (float dMs, float dDb)
+        {
+            auto e = dragTaps; auto r = dragRefl;
+            for (auto& b : dragBars)
+            {
+                if (b.own) { if (b.idx < (int) r.size()) { r[(size_t) b.idx].ms = jlimit (0.1f, 300.0f, dragRefl[(size_t) b.idx].ms + dMs); r[(size_t) b.idx].db = jlimit (-60.0f, 6.0f, dragRefl[(size_t) b.idx].db + dDb); } continue; }
+                if ((int) e.size() <= b.idx) e.resize ((size_t) b.idx + 1);
+                const auto o = b.idx < (int) dragTaps.size() ? dragTaps[(size_t) b.idx] : Flexiverb480Processor::TapEd {};
+                e[(size_t) b.idx].ms = jlimit (-100.0f, 200.0f, o.ms + dMs);
+                if (o.db > -79.0f) e[(size_t) b.idx].db = jlimit (-40.0f, 24.0f, o.db + dDb);
+            }
+            proc.setTapEdits (machine, e); proc.setRefl (machine, r);
+            if (dragBars.size() == 1) showMessage (dragBars[0].own ? "Your reflection" : "Reflection " + String (dragBars[0].idx + 1),
+                                                   String (dragBars[0].ms + dMs, 1) + " ms   " + String (dragBars[0].db + dDb, 1) + " dB");
+            else showMessage (String ((int) dragBars.size()) + " reflections", (dMs >= 0 ? "+" : "") + String (dMs, 1) + " ms   " + (dDb >= 0 ? "+" : "") + String (dDb, 1) + " dB");
+        };
+        reverbView.onDragEnd = [this] { dragBars.clear(); };
+        reverbView.setWantsKeyboardFocus (true);
         holdRev.ed = this; holdRev.busy = [this] { return reverbView.busy(); }; reverbView.addMouseListener (&holdRev, false);
         holdDelay.ed = this; holdDelay.busy = [this] { return delayView.busy(); }; delayView.addMouseListener (&holdDelay, false);
 
@@ -2005,6 +2146,7 @@ private:
         void timerCallback() override { stopTimer(); if (armed && ! (busy && busy())) { armed = false; ed->addControlMenu (down); } }
     };
     HoldWatch holdRev, holdDelay;
+    std::vector<ReverbView::Bar> dragBars; std::vector<Flexiverb480Processor::TapEd> dragTaps; std::vector<Flexiverb480Processor::Refl> dragRefl;
     // faders in groups (a heading over each, a gap between); one row, or two when there are many - a group never splits
     struct GroupBox { String group; Rectangle<int> head; };
     std::vector<GroupBox> groupBoxes;
@@ -2316,6 +2458,8 @@ private:
         p.curveOn[0] = proc.curveOn[machine];
         for (int b = 0; b < pv::DecayEq::N; ++b) p.curveMul[0][b] = proc.aCurveMul[machine][b].load();
         p.erAtkMs = proc.apvts.getRawParameterValue ("erAtk")->load();
+        { const auto& r = proc.refl[machine]; p.reflN[0] = (int) jmin ((size_t) 32, r.size()); for (int k = 0; k < p.reflN[0]; ++k) { p.reflMs[0][k] = r[(size_t) k].ms; p.reflDb[0][k] = r[(size_t) k].db; p.reflPan[0][k] = r[(size_t) k].pan; } }
+        { const auto& e = proc.tapEd[machine]; p.tapN[0] = (int) jmin ((size_t) 32, e.size()); for (int k = 0; k < p.tapN[0]; ++k) { p.tapMs[0][k] = e[(size_t) k].ms; p.tapDb[0][k] = e[(size_t) k].db; } }
         renderer.request (p, proc.sampleRateUi.load());
     }
     void liveBands()
@@ -2349,8 +2493,16 @@ private:
             int sig = proc.programOf (machine) * 7919 + machine * 31 + (proc.curveOn[machine] ? 1 : 0) + (int) (proc.apvts.getRawParameterValue ("erAtk")->load() * 10);
             for (int s = 0; s < l480::kMaxParams; ++s) sig = sig * 31 + (int) (proc.slotNorm (machine, s) * 1000.0f);
             for (int b = 0; b < pv::DecayEq::N; ++b) sig = sig * 31 + (int) (proc.aCurveMul[machine][b].load() * 1000.0f);
+            for (auto& r : proc.refl[machine]) sig = sig * 31 + (int) (r.ms * 10.0f) * 7 + (int) (r.db * 10.0f);
+            for (auto& e : proc.tapEd[machine]) sig = sig * 31 + (int) (e.ms * 10.0f) * 7 + (int) (e.db * 10.0f);
             if (sig != lastSig) { lastSig = sig; requestResponse(); }
             const int v = renderer.version.load(); if (v != lastRv) { lastRv = v; reverbView.setResult (renderer.get()); }
+        }
+        {
+            float mx = 100.0f; const float pd = reverbView.getPredelayMs ? reverbView.getPredelayMs() : 0.0f; mx = jmax (mx, pd);
+            for (auto& b : reverbView.getBars()) mx = jmax (mx, b.ms);
+            const float rng = jlimit (100.0f, 300.0f, std::ceil (mx * 1.15f / 50.0f) * 50.0f);
+            if (rng != reverbView.erRange && ! reverbView.busy()) { reverbView.erRange = rng; reverbView.repaint(); }
         }
         liveBands();
         if (reverbView.isVisible() && (reverbView.animate() || true)) reverbView.repaint();

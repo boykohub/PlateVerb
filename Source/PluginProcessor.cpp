@@ -188,6 +188,7 @@ public:
         registerName[m] = {}; variation[m] = 1;
         setCurve (m, {}, false);                    // a curve is an edit of the loaded program
         setRefl (m, {});                            // so are your own reflections
+        setTapEdits (m, {});
         userPresetName = {};
         lastProg[m] = index;
         programLoaded.store (true);
@@ -228,6 +229,7 @@ public:
         for (int i = 0; i < l480::kMaxParams; ++i) x.setAttribute ("s" + String (i), (double) pSlot[m][i]->load());
         x.setAttribute ("curve", curveToString (curvePts[m])); x.setAttribute ("curveOn", curveOn[m]);
         x.setAttribute ("refl", reflToString (refl[m]));
+        { String t; for (auto& e : tapEd[m]) t << String (e.ms, 2) << ":" << String (e.db, 2) << ";"; x.setAttribute ("taps", t); }
         return x.writeTo (f);
     }
     bool readSnapshot (int m, const File& f)
@@ -239,6 +241,7 @@ public:
             if (auto* sp = apvts.getParameter (slotId (m, i))) sp->setValueNotifyingHost ((float) x->getDoubleAttribute ("s" + String (i), sp->getValue()));
         setCurve (m, curveFromString (x->getStringAttribute ("curve")), x->getBoolAttribute ("curveOn"));
         setRefl (m, reflFromString (x->getStringAttribute ("refl")));
+        setTapEdits (m, tapsFromString (x->getStringAttribute ("taps")));
         return true;
     }
     static String snapshotName (const File& f) { if (auto x = parseXML (f)) return x->getStringAttribute ("name"); return {}; }
@@ -326,6 +329,22 @@ public:
         aReflN[m].store ((int) r.size());
         apvts.state.setProperty (m == 0 ? "reflA" : "reflB", reflToString (r), nullptr);
     }
+    // ---- your edits of the algorithm's own early taps (time offset ms, level change dB; -80 = off), by tap number
+    struct TapEd { float ms = 0, db = 0; };
+    std::vector<TapEd> tapEd[2];
+    std::atomic<int> aTapN[2] {}; std::atomic<float> aTapMs[2][32] {}, aTapDb[2][32] {};
+    void setTapEdits (int m, std::vector<TapEd> e)
+    {
+        if (e.size() > 32) e.resize (32);
+        tapEd[m] = e;
+        for (size_t k = 0; k < e.size(); ++k) { aTapMs[m][k].store (e[k].ms); aTapDb[m][k].store (e[k].db); }
+        aTapN[m].store ((int) e.size());
+        String s; for (auto& t : e) s << String (t.ms, 2) << ":" << String (t.db, 2) << ";";
+        apvts.state.setProperty (m == 0 ? "tapsA" : "tapsB", s, nullptr);
+    }
+    static std::vector<TapEd> tapsFromString (const String& s)
+    { std::vector<TapEd> r; StringArray t; t.addTokens (s, ";", ""); for (auto& x : t) { StringArray v; v.addTokens (x, ":", ""); if (v.size() == 2) r.push_back ({ v[0].getFloatValue(), v[1].getFloatValue() }); } return r; }
+    int baseTaps (int m, float* ms, float* db, int max) const { return engine.baseTaps (m, ms, db, max); }
     float mainRt (int m) const { return slotValue (m, l480::algoMainRtSlot (algoOf (m))); }
     // the program's own decay shape (BAS/XOV and the RT high cut), as a multiplier of the main reverb time
     float programDecayMul (int m, float f) const
@@ -455,6 +474,7 @@ public:
         p.config = jlimit (0, 3, (int) f (pCfg)); p.mute = mute.load();
         { static const int osF[] = { 1, 2, 4, 6, 8 }; p.oversampling = osF[jlimit (0, 4, (int) f (pOs))]; p.precision64 = f (pPrec) > 0.5f; }
         for (int m = 0; m < 2; ++m) { p.curveOn[m] = aCurveOn[m].load(); for (int b = 0; b < pv::DecayEq::N; ++b) p.curveMul[m][b] = aCurveMul[m][b].load(); }
+        for (int m = 0; m < 2; ++m) { p.tapN[m] = aTapN[m].load(); for (int k = 0; k < p.tapN[m]; ++k) { p.tapMs[m][k] = aTapMs[m][k].load(); p.tapDb[m][k] = aTapDb[m][k].load(); } }
         for (int m = 0; m < 2; ++m) { p.reflN[m] = aReflN[m].load(); for (int k = 0; k < p.reflN[m]; ++k) { p.reflMs[m][k] = aReflMs[m][k].load(); p.reflDb[m][k] = aReflDb[m][k].load(); p.reflPan[m][k] = aReflPan[m][k].load(); } }
         p.anOn = on (pAnOn); p.anTarget = jlimit (0, 2, (int) f (pAnTarget)); p.anModel = jlimit (0, 4, (int) f (pAnModel));
         p.anColour = jlimit (0, 3, (int) f (pAnColour)); p.anDrive = f (pAnDrive); p.anOut = f (pAnOut);
@@ -525,6 +545,7 @@ public:
         setCurve (0, curveFromString (apvts.state.getProperty ("curveA").toString()), (bool) apvts.state.getProperty ("curveOnA", false));
         setCurve (1, curveFromString (apvts.state.getProperty ("curveB").toString()), (bool) apvts.state.getProperty ("curveOnB", false));
         setRefl (0, reflFromString (apvts.state.getProperty ("reflA").toString())); setRefl (1, reflFromString (apvts.state.getProperty ("reflB").toString()));
+        setTapEdits (0, tapsFromString (apvts.state.getProperty ("tapsA").toString())); setTapEdits (1, tapsFromString (apvts.state.getProperty ("tapsB").toString()));
         for (int m = 0; m < 2; ++m) lastProg[m] = programOf (m);
         programLoaded.store (true);
     }
