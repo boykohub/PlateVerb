@@ -14,14 +14,24 @@ ChannelStrip compressor use it. To build one plugin by hand: Actions → "Build 
 
 ## Flexiverb
 
-- **Presets:** use < and > to step through presets. Click the name to open the browser, which shows every preset by category (480L, Surround / HD Cart, Matched to the 480L impulse responses, 480L II, Your presets). **SAVE** stores the whole plugin as one of your presets.
-- **Display:** shows the program(s), a status line and a graph. Right-click it to change the text size.
-  - **Reverbs:** the graph shows decay time against frequency. Click to add a point, drag it to move it, double-click to remove it.
-  - **Delay programs and the delay CONTROL pages:** the graph shows the delay taps. Drag a tap sideways to change its time, or up and down to change its level. The faders follow, and moving a fader moves the tap.
-- **Keys:** MACHINE A / B, MACHINES (one, series, parallel, left/right), PAGE, CONTROL (setup, iron, utility delay), MUTE and SETUP. Keys light up while they are on or pressed.
-- **Drawer** (tab on the right): ANALOG (the ChannelStrip preamp: drive, output, model, character, and whether it affects the reverb, the EQ or both), EQ (concentric knobs: frequency outside, gain inside) and COMPRESSOR.
-- **SETUP:** colours and gradient, text sizes, oversampling (off, 2x, 4x, 6x, 8x for the analog, EQ and compressor chain) and precision (64-bit EQ). Plugins take 64-bit audio from the host.
-- **Window:** drag the lower-right corner to scale it.
+- **Presets:** click the preset menu to see every preset by category. Use < > beside it to step through them, and SAVE to store your own. PANEL opens the drawer.
+- **Screen, REVERB page:**
+  - the early reflections and the low, mid and high decay of the program as it is set right now, rendered in the background from the engine itself, with live output bars;
+  - the decay-time curve (click to add a point, drag it to move it, double-click to remove it);
+  - every reverb value as a number.
+
+  Drag the predelay line and the decay handle on the graph.
+- **Screen, DELAY page:** the delay taps (drag them sideways for time, up and down for level) and every delay value.
+- **Numbers on the screen:** right-click and drag up or down, or click and type a value.
+- **Keys:** REVERB / DELAY (the page), HALL, RANDOM HALL, ROOM, CHAMBER, PLATE, AMBIENCE, INVERSE, DELAY, CHORUS, PITCH.
+- **Faders:** one per parameter of the page, with names and values above them. A page with more than 16 parameters uses two rows.
+- **Drawer** (a third of the plugin's width):
+  - SYSTEM: machines, mute, SETUP, 480L hardware, input, output, transformers, iron and output level;
+  - ANALOG;
+  - EQ (analog models from ChannelStrip, plus colour);
+  - COMPRESSOR.
+- **SETUP:** opens beside the plugin. It holds colours, gradient, 3D (flat, soft, deep), text sizes for buttons, knobs, screen and faders, oversampling and precision.
+- **Shape and Spread:** in the 480-style reverbs they shape the reverb's build-up, its swell, the way the 480L does. The constants are fitted to impulse responses of a real 480L across 28 factory programs at once.
 
 The 480L factory programs use the values from its manual. The Classic Cart and Surround/HD Cart programs are Flexiverb's own settings, because the manuals give none. "Matched" presets are fitted to impulse responses of a real 480L and carry a little tone shaping. "480L II" presets are the earlier Flexiverb's IR-matched presets, unchanged, level-matched to the "Matched" ones so you can compare them. The IRs themselves are not included.
 With the 480L hardware switched on (CONTROL, Setup), the model follows the 480L schematics:

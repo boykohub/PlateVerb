@@ -108,6 +108,10 @@ public:
         l.add (cp ("prec", "Precision", StringArray { "32-bit", "64-bit" }, 0));
         // drawer: EQ
         l.add (bp ("eqOn", "EQ On", false));
+        { StringArray m; for (int i = 0; i < cs::kNumEqModels; ++i) m.add (cs::eqModelName (i)); l.add (cp ("eqModel", "EQ Model", m, 1)); }
+        l.add (fp ("eqDrive", "EQ Colour", 0.0f, 1.0f, 0.5f, false, "%"));
+        l.add (fp ("erAtk", "Reflection Attack", 0.0f, 100.0f, 0.0f, false, "ms", 1));
+        l.add (fp ("dlAtk", "Delay Attack", 0.0f, 500.0f, 0.0f, false, "ms", 0));
         const char* bn[] = { "Low", "Low Mid", "High Mid", "High" };
         const float fLo[] = { 20, 100, 800, 2000 }, fHi[] = { 500, 2000, 8000, 20000 }, fDef[] = { 100, 400, 2500, 8000 };
         for (int b = 0; b < 4; ++b)
@@ -431,7 +435,9 @@ public:
         for (int m = 0; m < 2; ++m) { p.curveOn[m] = aCurveOn[m].load(); for (int b = 0; b < pv::DecayEq::N; ++b) p.curveMul[m][b] = aCurveMul[m][b].load(); }
         p.anOn = on (pAnOn); p.anTarget = jlimit (0, 2, (int) f (pAnTarget)); p.anModel = jlimit (0, 4, (int) f (pAnModel));
         p.anColour = jlimit (0, 3, (int) f (pAnColour)); p.anDrive = f (pAnDrive); p.anOut = f (pAnOut);
-        p.eqOn = on (pEqOn); for (int b = 0; b < 4; ++b) { p.eqF[b] = f (pEqF[b]); p.eqG[b] = f (pEqG[b]); }
+        p.eqOn = on (pEqOn);
+        p.eqModel = jlimit (0, cs::kNumEqModels - 1, (int) apvts.getRawParameterValue ("eqModel")->load()); p.eqDrive = apvts.getRawParameterValue ("eqDrive")->load();
+        p.erAtkMs = apvts.getRawParameterValue ("erAtk")->load(); p.dlAtkMs = apvts.getRawParameterValue ("dlAtk")->load(); for (int b = 0; b < 4; ++b) { p.eqF[b] = f (pEqF[b]); p.eqG[b] = f (pEqG[b]); }
         auto& c = p.comp;
         c.on = on (pCpOn); c.type = jlimit (0, 2, (int) f (pCpType)); c.vintage = on (pCpColor); c.duck = on (pCpDuck);
         c.thr = f (pCpThr); c.ratio = f (pCpRatio); c.atkMs = f (pCpAtk); c.relMs = f (pCpRel); c.makeup = f (pCpMakeup); c.mix = f (pCpMix);

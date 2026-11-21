@@ -62,6 +62,8 @@ struct EngineParams {
     float val[2][kMaxParams] = {};          // LARC values per machine (units)
     int config = kSingle;
     int oversampling = 1; bool precision64 = false;      // ANALOG / EQ / compressor chain
+    int eqModel = 1; float eqDrive = 0.5f;               // EQ character: the ChannelStrip models (0 = clean)
+    float erAtkMs = 0.0f, dlAtkMs = 0.0f;                // reflection attack, delay attack
     // ANALOG: the ChannelStrip preamp on the reverb, on the EQ, or both
     bool anOn = false; int anTarget = 0, anModel = 1, anColour = 1; float anDrive = 6.0f, anOut = 0.0f;   // anTarget 0 reverb, 1 EQ, 2 both
     bool curveOn[2] = { false, false }; float curveMul[2][pv::DecayEq::N] = {};   // RT graph per machine
@@ -96,10 +98,16 @@ public:
         anVerb.prepare (fsOs); anEq.prepare (fsOs); anM = -1;
         for (auto& c : eq) for (auto& b : c) b.reset();
         for (auto& c : eqD) for (auto& b : c) b.reset();
+        eqBank.prepare (fsOs);
         for (auto& u : up) u.design (os);
         for (auto& d : dn) d.design (os);
     }
     int latency() const { return os > 1 ? up[0].f.latencyBase() : 0; }
+    // silence everything (the editor's response renderer reuses one engine for many short renders)
+    void resetState() {
+        for (auto& m : mach) { for (auto& a : m.algos) if (a) a->reset(); m.cur = -1; m.fadeState = 0; m.fadeG = 1; }
+        hwIn.reset(); hwA.reset(); hwB.reset(); comp.reset(); firstBlock = true;
+    }
     float meterIn() const { return mIn; }
     float meterOut() const { return mOut; }
     float compGr() const { return comp.reductionDb(); }
@@ -108,6 +116,7 @@ public:
 
     void process (float* L, float* R, int n, const EngineParams& p) {
         setOversampling (p.oversampling);
+        for (auto& m : mach) m.erAtk = p.erAtkMs;
         for (int m = 0; m < 2; ++m) { const auto& pr = programs()[(size_t) p.prog[m]]; mach[m].update (pr.algo, pr.bank, p.val[m], pr.trimDb, p.curveOn[m] ? p.curveMul[m] : nullptr, pr.shape); }
         if (p.anModel != anM || p.anColour != anC || p.anDrive != anD || p.anOut != anO)
         { anVerb.set (p.anModel, p.anColour, p.anDrive, p.anOut, false, 70.0); anEq.set (p.anModel, p.anColour, p.anDrive, p.anOut, false, 70.0);
@@ -119,7 +128,12 @@ public:
             for (int b = 0; b < 4; ++b) eqD[c][b].from (eq[c][b]);
         }
         comp.setTimes (p.comp.atkMs, p.comp.relMs);
-        delay.setEq (p.dlLow, 0.0f, 1000.0f, p.dlHigh); delay.setAttack (0.0f);
+        delay.setEq (p.dlLow, 0.0f, 1000.0f, p.dlHigh); delay.setAttack (p.dlAtkMs);
+        {   // EQ with the analog character of the chosen model
+            std::array<cs::BandSettings, 4> bs {};
+            for (int b = 0; b < 4; ++b) { bs[(size_t) b].on = true; bs[(size_t) b].shelf = (b == 0 || b == 3); bs[(size_t) b].freq = p.eqF[b]; bs[(size_t) b].gain = p.eqG[b]; bs[(size_t) b].qScale = 1.0f; }
+            eqBank.set (p.eqModel, bs, p.eqDrive);
+        }
         tr.set (p.trModel, p.trFreq, p.trAmt);
         const float tL = pv::clampf (p.dlMsL * 0.001f * fs, 1.0f, pv::kMaxDelaySec * fs - 4), tR = pv::clampf (p.dlMsR * 0.001f * fs, 1.0f, pv::kMaxDelaySec * fs - 4);
         if (firstBlock) { delay.curL = tL; delay.curR = tR; firstBlock = false; }
@@ -203,13 +217,14 @@ private:
     inline void post (float& yL, float& yR, float kL, float kR, const EngineParams& p, bool anV, bool anE) {
         if (anV) { yL = anVerb.process (0, yL); yR = anVerb.process (1, yR); }
         if (p.eqOn) {
-            if (p.precision64) { double a = yL, b = yR; for (int k = 0; k < 4; ++k) { a = eqD[0][k].process (a); b = eqD[1][k].process (b); } yL = (float) a; yR = (float) b; }
-            else for (int k = 0; k < 4; ++k) { yL = eq[0][k].process (yL); yR = eq[1][k].process (yR); }
+            if (++eqStep >= 16) { eqStep = 0; eqBank.step(); }
+            yL = eqBank.process (0, yL); yR = eqBank.process (1, yR);         // 64-bit filters with the model's analog colour
         }
         if (anE) { yL = anEq.process (0, yL); yR = anEq.process (1, yR); }
         if (p.comp.on) comp.process (yL, yR, p.comp.duck ? kL : yL, p.comp.duck ? kR : yR, p.comp);
         else comp.meter (yL, yR);
     }
+    cs::EqBank eqBank; int eqStep = 0;
     int os = 1; float fsOs = 48000; Upsampler up[4]; Downsampler dn[2]; BiquadD eqD[2][4];
     float wL[512] = {}, wR[512] = {};
     float fs = 48000, sOut = 1, sDl = 0, sMute = 0, mIn = 0, mOut = 0; bool firstBlock = true;

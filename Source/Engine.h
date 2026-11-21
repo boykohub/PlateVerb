@@ -520,22 +520,26 @@ struct TankAlgo {
         tapS.resize (tapMs.size());
         const int maxS = (int) (maxTap * kMaxSize * fs * 0.001f) + 8;
         for (size_t t = 0; t < tapMs.size(); ++t) tapS[t] = std::min (maxS, std::max (1, (int) std::lround (tapMs[t] * (c.denseER ? 1.0f : buildScale) * kEr)));
+        // reflection attack: the early reflections fade in over erAttackMs instead of starting at full level
+        tapAtk.resize (tapS.size());
+        for (size_t t = 0; t < tapS.size(); ++t) tapAtk[t] = erAttackMs > 0.1f ? 1.0f - std::exp (-(tapS[t] / fs * 1000.0f) / erAttackMs) : 1.0f;
     }
-    std::vector<int> tapS;
+    std::vector<int> tapS; std::vector<float> tapAtk;
     float buildScale = 1; bool dampOn = false;
+    float erAttackMs = 0.0f;         // set before update(): softer attack of the early reflections
     inline void process (float inL, float inR, float mod, float erAmt, float& oL, float& oR) {
         const TankConfig& c = tankConfig (algo);
         erL.push (inL); erR.push (inR);
         float eL = 0, eR = 0;
         if (c.denseER) {
-            for (size_t t = 0; t < tapS.size(); ++t) { const int d = tapS[t]; eL += erL.readI (d) * tapGL[t]; eR += erR.readI (d) * tapGR[t]; }
+            for (size_t t = 0; t < tapS.size(); ++t) { const int d = tapS[t]; eL += erL.readI (d) * tapGL[t] * tapAtk[t]; eR += erR.readI (d) * tapGR[t] * tapAtk[t]; }
             eL *= erNormDense * 1.6f; eR *= erNormDense * 1.6f;
         } else if (! tapS.empty()) {
             for (size_t t = 0; t < tapS.size(); ++t) {
                 const int d = tapS[t];
                 const float a = erL.readI (d), b = erR.readI (d);
                 const float m = (t & 1) ? 0.6f * b + 0.4f * a : 0.6f * a + 0.4f * b;
-                eL += m * tapGL[t]; eR += m * tapGR[t];
+                eL += m * tapGL[t] * tapAtk[t]; eR += m * tapGR[t] * tapAtk[t];
             }
             const float nrm = 1.8f / std::sqrt ((float) tapS.size()); eL *= nrm; eR *= nrm;
         }
