@@ -38,8 +38,8 @@ static float textW (const Font& f, const String& s) { return GlyphArrangement::g
 // ============================================================================ the look (SETUP): colours, gradient, text sizes
 struct Theme
 {
-    Colour panel { 0xff3a3d42 }, panelText { 0xffe4e6ea }, cheek { 0xff1d1f22 }, key { 0xff55595f }, keyText { 0xffeef0f3 },
-           keyLight { 0xff5fc8ff }, display { 0xff0c141b }, displayText { 0xff8fdcff }, fader { 0xff2e3136 },
+    Colour panel { 0xff2c2d30 }, panelText { 0xffe9e5da }, cheek { 0xff141415 }, key { 0xffbdbab2 }, keyText { 0xff1c1d1f },
+           keyLight { 0xffffa63a }, display { 0xff140707 }, displayText { 0xffff3a1e }, fader { 0xff2b2c2f },
            eqKnob { 0xff5a6470 }, eqInner { 0xff8a2a22 }, compKnob { 0xff3a3c40 }, analogKnob { 0xff6b4a2c };
     float gradient = 0.45f, keyPt = 12.5f, knobPt = 11.5f, displayPt = 12.0f, faderPt = 10.5f;
     int depth = 1;                                         // 3D: 0 flat, 1 soft, 2 deep
@@ -60,12 +60,12 @@ struct Theme
         XmlElement x ("LOOK");
         int i = 0; for (auto& it : items()) x.setAttribute ("c" + String (i++), (this->*it.c).toString());
         x.setAttribute ("grad", gradient); x.setAttribute ("keyPt", keyPt); x.setAttribute ("knobPt", knobPt); x.setAttribute ("dispPt", displayPt);
-        x.setAttribute ("faderPt", faderPt); x.setAttribute ("depth", depth); x.setAttribute ("v", 2);
+        x.setAttribute ("faderPt", faderPt); x.setAttribute ("depth", depth); x.setAttribute ("v", 3);
         return x.toString (XmlElement::TextFormat().singleLine().withoutHeader());
     }
     bool fromString (const String& s)
     {
-        auto x = parseXML (s); if (x == nullptr || ! x->hasTagName ("LOOK") || x->getIntAttribute ("v") < 2) return false;   // older looks: start fresh
+        auto x = parseXML (s); if (x == nullptr || ! x->hasTagName ("LOOK") || x->getIntAttribute ("v") < 3) return false;   // older looks: start fresh
         int i = 0; for (auto& it : items()) { const auto a = x->getStringAttribute ("c" + String (i++)); if (a.isNotEmpty()) this->*it.c = Colour::fromString (a); }
         gradient = (float) x->getDoubleAttribute ("grad", gradient); keyPt = (float) x->getDoubleAttribute ("keyPt", keyPt);
         knobPt = (float) x->getDoubleAttribute ("knobPt", knobPt); displayPt = (float) x->getDoubleAttribute ("dispPt", displayPt);
@@ -508,6 +508,10 @@ private:
         }
     }
     const Theme& th; Flexiverb480Processor& proc; Rectangle<float> plot; float rtMain = 1, yLo = 0.1f, yHi = 10; int drag = -1, hover = -1;
+public:
+    bool ready() const { return ! plot.isEmpty(); }
+    Point<float> at (float f, float t) const { return { xOf (jlimit (20.0f, 20000.0f, f)), yOf (t) }; }
+    float mainRtShown() const { return rtMain; }
 };
 
 // delay taps (delay programs, and the utility delay on its CONTROL pages): a line per tap at its time, as tall as its
@@ -587,6 +591,14 @@ public:
         set (taps[(size_t) drag], ms, db); tMax = saveMax; show(); repaint();
     }
     void mouseUp (const MouseEvent&) override { if (drag >= 0 && drag < (int) taps.size()) end (taps[(size_t) drag]); drag = -1; repaint(); }
+private:
+public:
+    // where a tap is drawn (for its numbers): by its time or level slot, or the utility delay's side
+    Point<float> tapAt (int slot, int utilSide) const
+    {
+        for (auto& t : taps) if ((slot >= 0 && (t.timeSlot == slot || t.levelSlot == slot)) || (slot < 0 && t.util && t.side == utilSide)) return { xOf (t.ms), yOf (t.db) };
+        return { -1, -1 };
+    }
 private:
     struct Tap { float ms, db, fb; String label; int timeSlot, levelSlot; bool util; int side; };
     std::vector<Tap> taps; float tMax = 500, dragTMax = 500;
@@ -883,6 +895,7 @@ public:
     std::function<float()> getPredelayMs, getRt; std::function<void (float)> setPredelayMs, setRt; std::function<void (bool)> gesture;
     std::function<void (const String&, const String&)> onShow;
     float live[3] = {};
+    Point<float> pdAnchor { -1, -1 }, rtAnchor { -1, -1 };   // where the predelay and decay-time numbers go
     void setResult (const ResponseRenderer::Result& r) { target = r; if (shown.er.empty()) shown = r; }
     bool animate()
     {
@@ -921,8 +934,9 @@ public:
             Path pth; pth.startNewSubPath (x, erArea.getY()); pth.lineTo (x, erArea.getBottom());
             Path dsh; const float dl[] = { 3.0f, 3.0f }; PathStrokeType (1.2f).createDashedStroke (dsh, pth, dl, 2);
             g.setColour (Colours::white.withAlpha (dragging == 1 ? 0.9f : 0.55f)); g.fillPath (dsh);
-            g.setFont (ui (8.5f, W::Bold)); g.drawText ("PREDELAY", Rectangle<float> (x + 3, erArea.getY(), 60, 10), Justification::left, false);
+            pdAnchor = { x + 3, erArea.getY() };
         }
+        else pdAnchor = { -1, -1 };
         // band decay curves
         const Colour bc[3] = { col.withMultipliedSaturation (0.6f).darker (0.15f), col, col.interpolatedWith (Colours::white, 0.55f) };
         for (int b = 0; b < 3; ++b)
@@ -947,7 +961,9 @@ public:
             handle = { decArea.getX() + decArea.getWidth() * th30 / tMax(), yOf (decArea, -30.0f) };
             g.setColour (Colours::black); g.fillEllipse (Rectangle<float> (12, 12).withCentre (handle));
             g.setColour (dragging == 2 ? Colours::white : col); g.drawEllipse (Rectangle<float> (10, 10).withCentre (handle), 2.0f);
+            rtAnchor = handle.translated (8, -22);
         }
+        else rtAnchor = { -1, -1 };
         g.setFont (ui (8.5f, W::Bold));
         const char* bn[3] = { "LOW", "MID", "HIGH" };
         for (int b = 0; b < 3; ++b) { g.setColour (bc[b]); g.drawText (bn[b], Rectangle<float> (decArea.getRight() - 120 + b * 40, decArea.getY() - 13, 40, 11), Justification::right, false); }
@@ -1008,13 +1024,19 @@ public:
     bool hot = false;
     void paint (Graphics& g) override
     {
-        auto r = getLocalBounds().toFloat().reduced (2, 1);
-        g.setColour (th.displayText.withAlpha (hot ? 0.16f : isMouseOver() ? 0.10f : 0.05f)); g.fillRoundedRectangle (r, 3);
-        g.setColour (th.displayText.withAlpha (0.65f)); g.setFont (ui (jmax (8.0f, th.displayPt * 0.78f), W::Medium));
-        g.drawText (name ? name() : String(), r.reduced (5, 0), Justification::centredLeft, true);
-        if (! ed.isVisible()) { g.setColour (th.displayText); g.setFont (ui (th.displayPt, W::Bold)); g.drawText (value ? value() : String(), r.reduced (5, 0), Justification::centredRight, true); }
+        auto r = getLocalBounds().toFloat().reduced (1, 1);
+        g.setColour (th.display.withAlpha (0.72f)); g.fillRoundedRectangle (r, 3);                 // keeps the number readable over the curves
+        if (hot || isMouseOver()) { g.setColour (th.displayText.withAlpha (0.14f)); g.fillRoundedRectangle (r, 3); }
+        const auto nf = ui (nameH(), W::Medium); const String nm = name ? name() : String();
+        g.setColour (th.displayText.withAlpha (0.6f)); g.setFont (nf);
+        g.drawText (nm, r.reduced (4, 0), Justification::centredLeft, true);
+        if (! ed.isVisible()) { g.setColour (th.displayText); g.setFont (ui (valueH(), W::Bold)); g.drawText (value ? value() : String(), r.reduced (4, 0).withTrimmedLeft (textW (nf, nm) + 6), Justification::centredRight, true); }
     }
-    void resized() override { ed.setBounds (getLocalBounds().reduced (2).withTrimmedLeft (getWidth() / 2)); }
+    void resized() override { ed.setBounds (getLocalBounds().reduced (1).withTrimmedLeft (getWidth() / 2)); }
+    float nameH() const { return jmax (8.0f, th.displayPt * 0.72f); }
+    float valueH() const { return jmax (8.5f, th.displayPt * 0.85f); }
+    int preferredWidth() const { return (int) (textW (ui (nameH(), W::Medium), name ? name() : String()) + textW (ui (valueH(), W::Bold), "00.000 kHz") + 16); }
+    int preferredHeight() const { return (int) (valueH() + 7); }
     void mouseEnter (const MouseEvent&) override { repaint(); }
     void mouseExit (const MouseEvent&) override { repaint(); }
     void mouseDown (const MouseEvent& e) override
@@ -1289,7 +1311,6 @@ public:
             auto in = r.reduced (3.0f);
             g.setGradientFill (ColourGradient (th.hi (th.display, 0.4f), in.getX(), in.getY(), th.lo (th.display, 0.6f), in.getX(), in.getBottom(), false));
             g.fillRoundedRectangle (in, 4);
-            g.setColour (th.displayText.withAlpha (0.10f)); g.drawVerticalLine ((int) ed->cellsX - 6, in.getY() + 8, in.getBottom() - 8);
             // the status line (what was just changed)
             if (Time::getMillisecondCounter() < ed->msgUntil)
             {
@@ -1362,7 +1383,7 @@ private:
 
     // ---------------------------------------------------------------- layout
     struct Sec { String title; Rectangle<int> area; };
-    std::vector<Sec> sections; Rectangle<int> faderArea; float labelH = 40, cellsX = 0;
+    std::vector<Sec> sections; Rectangle<int> faderArea; float labelH = 40;
     int keyH() const { return roundToInt (theme.keyPt * 2.0f + 12.0f); }
     void layout()
     {
@@ -1386,21 +1407,83 @@ private:
     {
         auto r = screen.getLocalBounds().reduced (8);
         r.removeFromTop ((int) theme.displayPt + 8);                      // the status line
-        const int cw = jmin (300, r.getWidth() / 3 + 40);
-        auto cellsA = r.removeFromRight (cw); r.removeFromRight (12);
-        cellsX = (float) cellsA.getX();
-        reverbView.setBounds (r.withHeight (r.getHeight() * 58 / 100));
-        decay.setBounds (r.withTrimmedTop (r.getHeight() * 58 / 100 + 6));
+        reverbView.setBounds (r.withHeight (r.getHeight() * 52 / 100));
+        decay.setBounds (r.withTrimmedTop (r.getHeight() * 52 / 100 + 4));
         delayView.setBounds (r);
-        // number cells: one per parameter of this page
-        const int n = (int) pageTargets.size(), cols = n > 16 ? 2 : 1, rows = jmax (1, (n + cols - 1) / cols);
-        const int ch = jmin ((int) (theme.displayPt * 1.9f + 6), cellsA.getHeight() / rows);
+        placeCells();
+    }
+    // the numbers sit on the picture: predelay at its line, decay time at the decay handle, the rest written across the
+    // top of the lower graph (decay page) or of the delay picture. Click to type, or right-click and drag up/down.
+    int slotPd() const { return findSlot ({ "PDL", "RPD" }); }
+    void placeCells()
+    {
+        const int n = (int) jmin (pageTargets.size(), cells.size());
+        const int algo = proc.algoOf (machine), rtSlot = l480::algoMainRtSlot (algo), pd = slotPd();
+        const int xov = findSlot ({ "XOV" }), bas = findSlot ({ "BAS" }), rtc = findSlot ({ "RTC" });
+        const bool rev = page == 0 && reverbView.isVisible();
+        const float rt = decay.mainRtShown();
+        // anchor of target i on the picture (screen coordinates), or -1 when it has no place of its own
+        auto anchor = [&] (const Target& tg) -> Point<float>
+        {
+            auto in = [] (const Component& v, Point<float> a, float dx = 0, float dy = 0) { return a.x < 0 ? a : a + v.getPosition().toFloat() + Point<float> (dx, dy); };
+            if (rev && tg.param == nullptr)
+            {
+                if (tg.slot == pd) return in (reverbView, reverbView.pdAnchor);
+                if (! decay.isVisible() || ! decay.ready() || algo == l480::aLegacy) return { -1, -1 };
+                const float bm = bas >= 0 ? proc.slotValue (machine, bas) : 1.0f, xf = xov >= 0 ? proc.slotValue (machine, xov) : 500.0f;
+                if (tg.slot == rtSlot) return in (decay, decay.at (1000.0f, rt), 6, -20);
+                if (tg.slot == xov) return in (decay, decay.at (xf, rt * bm), 6, 4);
+                if (tg.slot == bas) return in (decay, decay.at (40.0f, rt * bm), 0, -20);
+                if (tg.slot == rtc) { const float f = proc.slotValue (machine, rtc); return in (decay, decay.at (f, rt * proc.programDecayMul (machine, f)), -40, 6); }
+            }
+            if (! rev && delayView.isVisible())
+            {
+                if (tg.param == nullptr && tg.slot >= 0) { const auto a = delayView.tapAt (tg.slot, -1); const String nm (proc.spec (machine, tg.slot).name);
+                    const bool lvl = nm.contains ("Level"); return in (delayView, a, 6, lvl ? -18.0f : -36.0f); }
+                if (tg.param != nullptr && (tg.name == "Delay Left" || tg.name == "Delay Right"))
+                    return in (delayView, delayView.tapAt (-1, tg.name == "Delay Left" ? 0 : 1), 6, -36);
+            }
+            return { -1, -1 };
+        };
+        auto area = (rev ? decay.getBounds() : delayView.getBounds()).reduced (40, 0).withTrimmedTop (16);
+        std::vector<Rectangle<int>> used;
+        int x = area.getX(), y = area.getY();
+        if (! rev)      // delay picture: the taps rise from the bottom up to their level, so the list goes under them, at the bottom
+        {
+            int rows = 1, xx = area.getX(), hh = 16;
+            for (int i = 0; i < n; ++i)
+            {
+                if (anchor (pageTargets[(size_t) i]).x >= 0) continue;
+                const int w = cells[(size_t) i]->preferredWidth(); hh = cells[(size_t) i]->preferredHeight();
+                if (xx + w > area.getRight() && xx > area.getX()) { xx = area.getX(); ++rows; }
+                xx += w + 4;
+            }
+            y = jmax (area.getY(), area.getBottom() - 16 - rows * (hh + 2));
+        }
+        std::vector<int> anchored;
         for (int i = 0; i < (int) cells.size(); ++i)
         {
             auto& c = *cells[(size_t) i];
             if (i >= n) { c.setVisible (false); continue; }
-            const int col = i / rows, row = i % rows, w = cellsA.getWidth() / cols;
-            c.setBounds (cellsA.getX() + col * w, cellsA.getY() + row * ch, w, ch); c.setVisible (true);
+            const auto& tg = pageTargets[(size_t) i];
+            if (anchor (tg).x >= 0) { anchored.push_back (i); continue; }
+            const int w = c.preferredWidth(), h = c.preferredHeight();
+            if (x + w > area.getRight() && x > area.getX()) { x = area.getX(); y += h + 2; }
+            c.setBounds (x, y, w, h); c.setVisible (true); used.push_back (c.getBounds()); x += w + 4;
+        }
+        const auto sb = screen.getLocalBounds().reduced (6);
+        for (int i : anchored)
+        {
+            auto& c = *cells[(size_t) i]; const auto a = anchor (pageTargets[(size_t) i]);
+            const int w = c.preferredWidth(), h = c.preferredHeight();
+            Rectangle<int> rc (jlimit (sb.getX(), sb.getRight() - w, (int) a.x), jlimit (sb.getY(), sb.getBottom() - h, (int) a.y), w, h);
+            for (int k = 0; k < 8; ++k)                       // step clear of numbers already placed
+            {
+                bool hitAny = false; for (auto& u : used) if (u.intersects (rc)) { hitAny = true; break; }
+                if (! hitAny) break;
+                rc.setY (jlimit (sb.getY(), sb.getBottom() - h, rc.getY() + h + 2));
+            }
+            c.setBounds (rc); c.setVisible (true); used.push_back (rc);
         }
     }
     void layoutFaders()
@@ -1672,6 +1755,7 @@ private:
         if (decay.isVisible() && sigChanged()) decay.repaint();
         if (delayView.isVisible()) delayView.repaint();
         if (Time::getMillisecondCounter() < msgUntil + 100) screen.repaint (screen.getLocalBounds().withHeight ((int) theme.displayPt + 14));
+        placeCells();
         for (auto& c : cells) if (c->isVisible()) c->repaint();
         // faders follow their targets (and the screen's edits)
         bool labels = false;
