@@ -1426,6 +1426,7 @@ public:
         saveBtn.setBounds (r.getX(), y, r.getWidth(), 28); y += 34;
         closeBtn.setBounds (r.getX(), y, r.getWidth(), 28);
     }
+    int preferredHeight() const { return 18 + 40 + 22 + (int) Theme::items().size() * 26 + 30 + 8 * 30 + 34 + 52 + 74 + 34 * 2 + 28 + 30; }
     void paint (Graphics& g) override
     {
         g.fillAll (th.cheek.darker (0.3f));
@@ -1578,7 +1579,8 @@ public:
         cpKnob[6] = knob ("cpMix", "MIX", { { 0, "0" }, { 0.2f, "20" }, { 0.4f, "40" }, { 0.6f, "60" }, { 0.8f, "80" }, { 1, "100" } }, &Theme::compKnob);
 
         cpKnob[1]->step = 2.0f; cpKnob[5]->step = 2.0f;
-        content.addAndMakeVisible (setup); setup.onAddKey = [this] { addMyKey(); }; setup.onClose = [this] { setupOpen = false; applySize(); }; setup.onChange = [this] { lookChanged(); };
+        content.addAndMakeVisible (setupView); setupView.setViewedComponent (&setup, false); setupView.setScrollBarsShown (true, false);
+        setup.onAddKey = [this] { addMyKey(); }; setup.onClose = [this] { setupOpen = false; applySize(); }; setup.onChange = [this] { lookChanged(); };
         content.addChildComponent (browser);
         browser.machine = [this] { return machine; };
         browser.onClose = [this] { browser.setVisible (false); };
@@ -1905,7 +1907,8 @@ private:
         const int w = baseWidth();
         content.setBounds (0, 0, w, kH);
         drawerView.setBounds (kL, 0, kDrawer, kH); drawerView.setVisible (drawerOpen);
-        setup.setBounds (kL + (drawerOpen ? kDrawer : 0), 0, kSetup, kH); setup.setVisible (setupOpen);
+        setupView.setBounds (kL + (drawerOpen ? kDrawer : 0), 0, kSetup, kH); setupView.setVisible (setupOpen);
+        setup.setSize (kSetup - setupView.getScrollBarThickness(), jmax (kH, setup.preferredHeight()));
         browser.setBounds (0, 0, w, kH);
         panelKey->setText (drawerOpen ? "< PANEL" : "PANEL >");
         setResizeLimits (roundToInt (w * 0.3f), roundToInt (kH * 0.3f), roundToInt (w * 3.0f), roundToInt (kH * 3.0f));
@@ -1920,7 +1923,12 @@ private:
         const float sizes[] = { 0.5f, 0.6f, 0.7f, 0.8f, 1.0f, 1.25f, 1.5f };
         for (int i = 0; i < 7; ++i) m.addItem (i + 1, String (roundToInt (sizes[i] * 100)) + "%", true, std::abs (sizes[i] - scale) < 0.01f);
         m.addSeparator(); m.addItem (100, "Drag the lower right corner to scale freely", false);
-        m.showMenuAsync (PopupMenu::Options(), [this, sizes] (int r) { if (r > 0 && r < 100) { scale = sizes[r - 1]; proc.setUiProperty ("uiScale", scale); applySize(); } });
+        m.addSeparator(); m.addItem (200, setupOpen ? "Close SETUP (colours, look, quality)" : "Open SETUP (colours, look, quality)");
+        m.showMenuAsync (PopupMenu::Options(), [this, sizes] (int r)
+        {
+            if (r > 0 && r < 100) { scale = sizes[r - 1]; proc.setUiProperty ("uiScale", scale); applySize(); }
+            if (r == 200) { setupOpen = ! setupOpen; if (setupOpen) setup.sync(); applySize(); }
+        });
     }
     void lookChanged()
     {
@@ -2236,6 +2244,7 @@ private:
     Viewport drawerView; Drawer drawer;
     ComboBox engineBox; int engineLabelY = 0, engineLabelX = 18;
     VuMeter vu { theme };
+    Viewport setupView;
     std::unique_ptr<ParamKey> ironKey, anOnKey, eqOnKey, cpOnKey, satKey, duckKey;
     std::unique_ptr<ScaleKnob> sysKnob[4], anKnob[5], eqKnob2[2], cpKnob[7];
     std::unique_ptr<DualKnob> eqKnob[4];
