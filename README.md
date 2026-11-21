@@ -12,20 +12,19 @@ and only builds when its own files change (or the shared `Source/` code, which a
 `Source/Engine.h` (PlateVerb's engine and compressor) is shared: the 1081+ "Velvet" compressor and the
 ChannelStrip compressor use it. To build one plugin by hand: Actions → "Build …" → Run workflow.
 
-## Flexiverb (the LARC)
+## Flexiverb
 
-Flexiverb's window works like the 480L's LARC remote:
+- **Presets:** use < and > to step through presets. Click the name to open the browser, which shows every preset by category (480L, Surround / HD Cart, Matched to the 480L impulse responses, 480L II, Your presets). **SAVE** stores the whole plugin as one of your presets.
+- **Display:** shows the program(s), a status line and a graph. Right-click it to change the text size.
+  - **Reverbs:** the graph shows decay time against frequency. Click to add a point, drag it to move it, double-click to remove it.
+  - **Delay programs and the delay CONTROL pages:** the graph shows the delay taps. Drag a tap sideways to change its time, or up and down to change its level. The faders follow, and moving a fader moves the tap.
+- **Keys:** MACHINE A / B, MACHINES (one, series, parallel, left/right), PAGE, CONTROL (setup, iron, utility delay), MUTE and SETUP. Keys light up while they are on or pressed.
+- **Drawer** (tab on the right): ANALOG (the ChannelStrip preamp: drive, output, model, character, and whether it affects the reverb, the EQ or both), EQ (concentric knobs: frequency outside, gain inside) and COMPRESSOR.
+- **SETUP:** colours and gradient, text sizes, oversampling (off, 2x, 4x, 6x, 8x for the analog, EQ and compressor chain) and precision (64-bit EQ). Plugins take 64-bit audio from the host.
+- **Window:** drag the lower-right corner to scale it.
 
-- **BANK**, then 1-0, picks a bank (press BANK again for banks 11-20, again for 21-26). Then 1-0 loads a program.
-- **PROG**, then 1-0, loads a program from the current bank. **VAR**: 1 is the factory setting, 2-0 are your stored variations.
-- **REG**: press a bank (1-0), then a number (1-0), to recall a register. **STO**, bank, number stores one. In VAR mode, STO stores a variation.
-- **PAGE** steps through the six-slider pages. **MACH** switches between machines A and B. **MUTE** mutes the output.
-- **CTRL** puts the setup on the sliders: configuration, 480L hardware, EQ, compressor and delay. Use PAGE or 1-8 to pick a page.
-- Click the display for a program list. Right-click the panel to change the window size.
-
-Banks 1-17 use the factory values from the 480L manual. Banks 18-21 (Classic Cart) and 22-26 (Surround/HD Cart) use
-the cart program names, but the manuals print no values for them, so those settings are Flexiverb's own.
-With the 480L hardware switched on (CTRL page 1, HW), the model follows the 480L schematics:
+The 480L factory programs use the values from its manual. The Classic Cart and Surround/HD Cart programs are Flexiverb's own settings, because the manuals give none. "Matched" presets are fitted to impulse responses of a real 480L and carry a little tone shaping. "480L II" presets are the earlier Flexiverb's IR-matched presets, unchanged, level-matched to the "Matched" ones so you can compare them. The IRs themselves are not included.
+With the 480L hardware switched on (CONTROL, Setup), the model follows the 480L schematics:
 
 - 18-bit delay memory
 - 16-bit gain-ranging A/D and 18-bit D/A

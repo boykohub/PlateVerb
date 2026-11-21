@@ -5,6 +5,7 @@ on:
     branches: [main, flexiverb-larc]
     paths:
       - 'Source/**'
+      - 'ChannelStrip/Source/CSEngine.h'
       - 'CMakeLists.txt'
       - '.github/workflows/build-PlateVerb.yml'
 permissions:

@@ -33,7 +33,7 @@ struct FirstOrder {
 struct Ctx { float dryL = 0, dryR = 0, revL = 0, revR = 0; bool hasRev = false; };
 
 // Decay-time curve (the editor's RT graph): multipliers of the program's main reverb time at the DecayEq band centres.
-inline bool algoHasDecayCurve (int a) { return a == aRev6 || a == aRev2 || a == aRHall || a == aAmb || a == aCHall || a == aRPlate || a == aHD; }
+inline bool algoHasDecayCurve (int a) { return a == aRev6 || a == aRev2 || a == aRHall || a == aAmb || a == aCHall || a == aRPlate || a == aHD || a == aLegacy; }
 inline int algoMainRtSlot (int a) { return a == aCHall || a == aRPlate ? 1 : a == aHD ? 2 : 0; }
 
 struct AlgoBase {
@@ -947,11 +947,52 @@ struct HDAlgo : AlgoBase {
     }
 };
 
+// ---------------------------------------------------------------- the earlier Flexiverb's reverb ("Classic"), for the 480L II banks
+// The same signal path as its engine ran for one slot: predelay, input tone and width, converter, the plate or the
+// 480-style tank, converter, high cut and EQ - so the presets sound as they did there.
+struct LegacyAlgo : AlgoBase {
+    pv::PlateAlgo plate; pv::TankAlgo tank; pv::SlotChain ch; pv::SlotParams sp; bool isPlate = true; float preS = 1, inW = 1, dampA = 1;
+    void prepare (float sr) override { fs = sr; plate.init (fs); plate.fs = fs; tank.init (4, fs); tank.fs = fs; ch.init (fs); }
+    void reset() override { plate.clear(); tank.clear(); ch.clear (fs); }
+    void set (const float* v, int) override {
+        const bool wasPlate = isPlate; isPlate = v[22] < 0.5f;
+        if (wasPlate != isPlate) reset();
+        sp.decaySec = v[0]; sp.lowMult = v[1]; sp.highMult = v[2]; sp.size = v[3]; sp.predelayMs = v[4]; sp.buildMs = v[5];
+        sp.early = v[6]; sp.diffusion = v[7]; sp.damping = v[8]; sp.tone = v[9]; sp.mod = v[10]; sp.inWidth = v[11];
+        sp.spinHz = v[12]; sp.xoverHz = v[13]; sp.hiCutHz = v[14] >= 19990.0f ? 20000.0f : v[14]; sp.converter = (int) v[15];
+        static constexpr float eqF[4] = { 250.0f, 400.0f, 2500.0f, 8000.0f };
+        for (int b = 0; b < 4; ++b) { sp.eqF[b] = eqF[b]; sp.eqG[b] = v[18 + b]; }
+        ch.update (fs, sp);
+        preS = std::max (1.0f, sp.predelayMs * 0.001f * fs); inW = clampf (sp.inWidth, 0.0f, 1.0f);
+        const float dampHz = 20000.0f * std::pow (0.05f, sp.damping);
+        if (isPlate) {
+            dampA = curveMul ? 1.0f : 1.0f - std::exp (-2.0f * kPi * std::min (dampHz, 0.45f * fs) / fs);
+            plate.curveT = curveFor (sp.decaySec);
+            plate.update (sp.decaySec, sp.size, sp.lowMult, sp.highMult, sp.buildMs, sp.diffusion, pv::plateEffect (0, 0, 0.0f), 0.0f);
+        } else {
+            tank.curveT = curveFor (sp.decaySec);
+            tank.update (sp.decaySec, dampHz, sp.size, sp.lowMult, sp.highMult, sp.buildMs, sp.diffusion,
+                         pv::surfaceEffect (0, 0, 0.0f, 3.0f * sp.size), 0.0f, std::max (0.05f, sp.spinHz), sp.xoverHz);
+        }
+    }
+    void process (float& L, float& R, const Ctx&) override {
+        float pl, pr; ch.input (L, R, preS, inW, true, pl, pr);
+        if (sp.converter != pv::Conv24) { pl = pv::convert (pl, sp.converter); pr = pv::convert (pr, sp.converter); }
+        float oL, oR;
+        if (isPlate) plate.process (pl, pr, dampA, sp.mod, sp.early, oL, oR);
+        else tank.process (pl, pr, sp.mod, sp.early, oL, oR);
+        if (sp.converter != pv::Conv24) { oL = pv::convert (oL, sp.converter); oR = pv::convert (oR, sp.converter); }
+        ch.post (oL, oR, oL, oR, sp.comp);
+        L = oL; R = oR;
+    }
+};
+
 inline std::unique_ptr<AlgoBase> makeAlgo (int a) {
     switch (a) {
         case aRev6: case aRev2: case aRHall: return std::make_unique<ReverbAlgo> (a);
         case aAmb: return std::make_unique<AmbienceAlgo>();
         case aHD: return std::make_unique<HDAlgo>();
+        case aLegacy: return std::make_unique<LegacyAlgo>();
         case aFx: return std::make_unique<EffectsAlgo>();
         case aTwin: return std::make_unique<TwinAlgo>();
         case aSamp: return std::make_unique<SamplerAlgo>();
@@ -985,13 +1026,27 @@ struct Machine {
     float fadeG = 1; int fadeState = 0, nextAlgo = -1, nextBank = 1;   // 10 ms fade out/in on program change
     void prepare (float sr) {
         fs = sr;
+        for (auto& d : shapeDb) d = 999.0f;                      // redesign the shaping EQ at the new rate
+        for (auto& c : shapeEq) for (auto& b : c) b.reset();
         for (int a = 0; a < kNumAlgos; ++a) { if (! algos[a]) algos[a] = makeAlgo (a); algos[a]->prepare (fs); algos[a]->reset(); }
     }
     AlgoBase* current() const { return cur >= 0 ? algos[cur].get() : nullptr; }
     // values: the LARC values of the current program (kMaxParams)
     float trimG = 1, trimS = 1;                                     // program output trim (target, smoothed)
-    void update (int algo, int bnk, const float* v, float trimDb = 0.0f, const float* curve = nullptr) {
+    Biquad shapeEq[2][4]; float shapeDb[4] = { 0, 0, 0, 0 }; bool shapeOn = false;
+    void setShape (const float* db) {
+        bool same = true; for (int b = 0; b < 4; ++b) same = same && db[b] == shapeDb[b];
+        if (same) return;
+        shapeOn = false;
+        for (int b = 0; b < 4; ++b) { shapeDb[b] = db[b]; shapeOn = shapeOn || std::fabs (db[b]) > 0.01f; }
+        for (int c = 0; c < 2; ++c) {
+            shapeEq[c][0].lowShelf (fs, 100.0f, db[0]); shapeEq[c][1].peak (fs, 400.0f, 0.9f, db[1]);
+            shapeEq[c][2].peak (fs, 2500.0f, 0.9f, db[2]); shapeEq[c][3].highShelf (fs, 8000.0f, db[3]);
+        }
+    }
+    void update (int algo, int bnk, const float* v, float trimDb = 0.0f, const float* curve = nullptr, const float* shape = nullptr) {
         trimG = dbToGain (trimDb);
+        { static const float zero[4] = { 0, 0, 0, 0 }; setShape (shape ? shape : zero); }
         if (cur >= 0) algos[cur]->curveMul = algoHasDecayCurve (cur) ? curve : nullptr;
         if (algo != cur || bnk != bank) {
             if (cur < 0) { cur = algo; bank = bnk; algos[cur]->reset(); fadeState = 0; fadeG = 1; trimS = trimG; }
@@ -1009,6 +1064,7 @@ struct Machine {
         if (cur < 0) return;
         algos[cur]->process (L, R, c);
         trimS += (trimG - trimS) * 0.0005f; L *= trimS; R *= trimS;
+        if (shapeOn) for (int b = 0; b < 4; ++b) { L = shapeEq[0][b].process (L); R = shapeEq[1][b].process (R); }
         if (fadeState != 0) {
             const float step = 1.0f / (0.01f * fs);
             if (fadeState == 1) fadeG = std::max (0.0f, fadeG - step);

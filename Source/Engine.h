@@ -24,6 +24,10 @@ inline float dbToGain (float db) { return std::pow (10.0f, db * 0.05f); }
 inline float clampf (float x, float a, float b) { return std::min (b, std::max (a, x)); }
 
 // ---------------------------------------------------------------- building blocks
+// Fast round-to-nearest for quantising (exact for |x| < 2^22; the 18-bit memory and converters stay far inside that).
+// Adding and removing 1.5 * 2^23 makes the FPU round in its default mode - no library call per sample.
+inline float roundFast (float x) { const float big = 12582912.0f; const float t = x + big; return t - big; }
+
 // Word length of delay memory. 0 = float (the default, used by every plugin except where an engine sets it).
 // The 480L's audio memory (HSP boards, 4464 DRAMs) stores 18-bit words, so Flexiverb sets 18 bits around its
 // machines while the hardware model is on: every delay-line write is rounded to 1/131072 of full scale.
@@ -41,7 +45,7 @@ struct Line {
     void clear() { std::fill (b.begin(), b.end(), 0.0f); w = 0; }
     inline void push (float x) {
         const auto& q = lineQuant();
-        if (q.step > 0.0f) x = std::nearbyint (x * q.inv) * q.step;
+        if (q.step > 0.0f && std::fabs (x) < 16.0f) x = roundFast (x * q.inv) * q.step;
         b[(size_t) w] = x; w = (w + 1) & mask;
     }
     // zero only the n most recent samples (what can still be read at the current rate), not the whole buffer
@@ -851,15 +855,19 @@ struct LowPass9 {
 };
 
 // op-amp / line-driver headroom: clean up to about +6 dBFS, then a hard-ish knee (rails)
-inline float railClip (float x) { const float r = x * 0.5f, r2 = r * r, r4 = r2 * r2; return x / std::sqrt (std::sqrt (std::sqrt (1.0f + r4 * r4))); }
+// below half scale the curve differs from a straight line by less than 2e-6 (-114 dB): skip the three square roots there
+inline float railClip (float x) {
+    if (std::fabs (x) < 0.5f) return x;
+    const float r = x * 0.5f, r2 = r * r, r4 = r2 * r2; return x / std::sqrt (std::sqrt (std::sqrt (1.0f + r4 * r4)));
+}
 
 // 16-bit converter with gain ranging: below half scale the signal is switched up 6 dB (twice at most)
 inline float adc18 (float x) {
     float step = 1.0f / 32768.0f; const float a = std::fabs (x);
     if (a < 0.5f) { step *= 0.5f; if (a < 0.25f) step *= 0.5f; }
-    return std::round (x / step) * step;                      // no dither: silence stays silent
+    return std::fabs (x) < 16.0f ? roundFast (x / step) * step : x;      // no dither: silence stays silent
 }
-inline float dac18 (float x) { const float step = 1.0f / 131072.0f; return std::round (x / step) * step; }
+inline float dac18 (float x) { return std::fabs (x) < 16.0f ? roundFast (x * 131072.0f) * (1.0f / 131072.0f) : x; }
 
 struct HwParams {
     bool on = true;                 // ANALOG master: off = no hardware model at all

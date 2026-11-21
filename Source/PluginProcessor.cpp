@@ -32,13 +32,14 @@ public:
             for (int i = 0; i < l480::kMaxParams; ++i) pSlot[m][i] = apvts.getRawParameterValue (slotId (m, i));
         }
         auto P = [this] (const char* id) { return apvts.getRawParameterValue (id); };
-        pCfg = P ("config"); pOut = P ("out");
+        pCfg = P ("config"); pOut = P ("out"); pOs = P ("os"); pPrec = P ("prec");
         pEqOn = P ("eqOn"); for (int b = 0; b < 4; ++b) { pEqF[b] = P (("eqF" + String (b)).toRawUTF8()); pEqG[b] = P (("eqG" + String (b)).toRawUTF8()); }
         pCpOn = P ("cpOn"); pCpType = P ("cpType"); pCpColor = P ("cpColor"); pCpDuck = P ("cpDuck"); pCpThr = P ("cpThr"); pCpRatio = P ("cpRatio");
         pCpAtk = P ("cpAtk"); pCpRel = P ("cpRel"); pCpMakeup = P ("cpMakeup"); pCpMix = P ("cpMix");
         pDlOn = P ("dlOn"); pDlSync = P ("dlSync"); pDlPing = P ("dlPing"); pDlTimeL = P ("dlTimeL"); pDlTimeR = P ("dlTimeR");
         pDlDivL = P ("dlDivL"); pDlDivR = P ("dlDivR"); pDlFb = P ("dlFb"); pDlMix = P ("dlMix"); pDlLow = P ("dlLow"); pDlHigh = P ("dlHigh");
         pHwOn = P ("hwOn"); pHwIn = P ("hwIn"); pHwOut = P ("hwOut"); pHwXfIn = P ("hwXfIn"); pHwXfOut = P ("hwXfOut"); pHwNoise = P ("hwNoise");
+        pAnOn = P ("anOn"); pAnTarget = P ("anTarget"); pAnModel = P ("anModel"); pAnColour = P ("anColour"); pAnDrive = P ("anDrive"); pAnOut = P ("anOut");
         pTrOn = P ("trOn"); pTrModel = P ("trModel"); pTrFreq = P ("trFreq"); pTrAmt = P ("trAmt");
         for (int m = 0; m < 2; ++m) { lastProg[m] = -1; for (auto& v : lastPitch[m]) v = 1.0e9f; }
         startTimerHz (20);
@@ -92,8 +93,19 @@ public:
             }
             l.add (std::move (g));
         }
-        l.add (cp ("config", "Configuration", StringArray { "Single", "Cascade", "Stereo Split", "Mono Split" }, 0));
+        // how the two machines are combined (default: one machine): one only, A into B, A and B side by side, A left / B right
+        l.add (cp ("config", "Machines", StringArray { "One Machine", "Series", "Parallel", "Left / Right" }, 0));
+        // ANALOG: the ChannelStrip preamp, on the reverb, on the EQ or both
+        l.add (bp ("anOn", "Analog On", false));
+        l.add (cp ("anTarget", "Analog On", StringArray { "Reverb", "EQ", "Both" }, 0));
+        l.add (cp ("anModel", "Analog Model", StringArray { "Clean", "Tube", "1073", "1080", "212" }, 1));
+        l.add (cp ("anColour", "Analog Character", StringArray { "Odd", "Even", "Heavy", "Crush" }, 1));
+        l.add (fp ("anDrive", "Analog Drive", 0.0f, 30.0f, 6.0f, false, "dB", 1));
+        l.add (fp ("anOut", "Analog Output", -12.0f, 12.0f, 0.0f, false, "dB", 1));
         l.add (fp ("out", "Output", -24.0f, 12.0f, 0.0f, false, "dB", 1));
+        // quality: oversampling of the ANALOG / EQ / compressor chain, and 64-bit EQ
+        l.add (cp ("os", "Oversampling", StringArray { "Off", "2x", "4x", "6x", "8x" }, 0));
+        l.add (cp ("prec", "Precision", StringArray { "32-bit", "64-bit" }, 0));
         // drawer: EQ
         l.add (bp ("eqOn", "EQ On", false));
         const char* bn[] = { "Low", "Low Mid", "High Mid", "High" };
@@ -171,6 +183,7 @@ public:
         if (m == 0) currentHostProgram = index;
         registerName[m] = {}; variation[m] = 1;
         setCurve (m, {}, false);                    // a curve is an edit of the loaded program
+        userPresetName = {};
         lastProg[m] = index;
         programLoaded.store (true);
     }
@@ -297,8 +310,11 @@ public:
         { bas = slotValue (m, a == l480::aHD ? 6 : 6); xov = slotValue (m, 7); hf = slotValue (m, 8); }
         else if (a == l480::aCHall || a == l480::aRPlate) { bas = slotValue (m, 0) / jmax (0.05f, slotValue (m, 1)); xov = slotValue (m, 2); hf = slotValue (m, 3); }
         else if (a == l480::aAmb) hf = 9000;
+        float treble = 1.0f;
+        if (a == l480::aLegacy) { bas = slotValue (m, 1); xov = slotValue (m, 13); treble = slotValue (m, 2); hf = 20000.0f * std::pow (0.05f, slotValue (m, 8)); }
         const float w = 1.0f / (1.0f + (f / xov) * (f / xov));
         float mul = bas * w + (1.0f - w);
+        if (treble != 1.0f) { const float h = (f / 4000.0f) * (f / 4000.0f), wh = h / (1.0f + h); mul = mul * (1.0f - wh) + treble * wh; }
         if (hf < 20500.0f) mul /= 1.0f + 0.5f * (f / hf) * (f / hf);
         return mul;
     }
@@ -311,16 +327,62 @@ public:
     std::atomic<bool> aCurveOn[2] { false, false };
     std::atomic<float> aCurveMul[2][pv::DecayEq::N] {};
 
+    // ------------------------------------------------------------------ your presets: the whole plugin (both machines, EQ, analog...)
+    static File presetFolder() { return registerFolder().getParentDirectory().getChildFile ("Presets"); }
+    StringArray userPresets() const
+    {
+        StringArray n; for (auto& f : presetFolder().findChildFiles (File::findFiles, false, "*.flxpreset")) n.add (f.getFileNameWithoutExtension());
+        n.sortNatural(); return n;
+    }
+    static bool isUiProperty (const Identifier& id) { const auto s = id.toString(); return s.startsWith ("ui") || s.startsWith ("theme"); }
+    bool saveUserPreset (const String& name)
+    {
+        auto st = apvts.copyState();
+        st.setProperty ("regA", registerName[0], nullptr); st.setProperty ("regB", registerName[1], nullptr);
+        st.setProperty ("varA", variation[0], nullptr); st.setProperty ("varB", variation[1], nullptr);
+        for (int i = st.getNumProperties(); --i >= 0;) if (isUiProperty (st.getPropertyName (i))) st.removeProperty (st.getPropertyName (i), nullptr);
+        auto dir = presetFolder(); dir.createDirectory();
+        auto xml = st.createXml(); if (! xml) return false;
+        const bool ok = xml->writeTo (dir.getChildFile (File::createLegalFileName (name) + ".flxpreset"));
+        if (ok) userPresetName = name;
+        return ok;
+    }
+    bool loadUserPreset (const String& name)
+    {
+        auto xml = parseXML (presetFolder().getChildFile (name + ".flxpreset"));
+        if (xml == nullptr || ! xml->hasTagName (apvts.state.getType())) return false;
+        auto keep = apvts.state.createCopy();                       // the window's own settings stay
+        applyState (ValueTree::fromXml (*xml));
+        for (int i = 0; i < keep.getNumProperties(); ++i) if (isUiProperty (keep.getPropertyName (i))) apvts.state.setProperty (keep.getPropertyName (i), keep.getProperty (keep.getPropertyName (i)), nullptr);
+        userPresetName = name;
+        return true;
+    }
+    String userPresetName;                                          // the loaded preset of yours, if any
+
     String registerName[2];   // "bank.num" when the machine holds a recalled register
     int variation[2] = { 1, 1 };   // 1 = factory, 2-10 = user variation, 0 = from a register
 
     // ------------------------------------------------------------------ audio
-    void prepareToPlay (double sampleRate, int) override
+    void prepareToPlay (double sampleRate, int samplesPerBlock) override
     {
         engine.prepare (sampleRate);
+        fbuf.setSize (2, jmax (samplesPerBlock, 512));
         sampleRateUi.store (sampleRate);
     }
     void releaseResources() override {}
+    // 64-bit audio from the host: converted at the edges (the EQ runs in 64-bit when Precision is 64-bit)
+    bool supportsDoublePrecisionProcessing() const override { return true; }
+    void processBlock (AudioBuffer<double>& buffer, MidiBuffer& midi) override
+    {
+        const int n = buffer.getNumSamples(), nc = jmin (2, buffer.getNumChannels());
+        if (fbuf.getNumSamples() < n || fbuf.getNumChannels() < 2) fbuf.setSize (2, n, false, false, true);
+        for (int c = 0; c < nc; ++c) { auto* d = fbuf.getWritePointer (c); const auto* s2 = buffer.getReadPointer (c); for (int i = 0; i < n; ++i) d[i] = (float) s2[i]; }
+        AudioBuffer<float> view (fbuf.getArrayOfWritePointers(), 2, n);
+        if (nc == 1) view.copyFrom (1, 0, view, 0, 0, n);
+        processBlock (view, midi);
+        for (int c = 0; c < buffer.getNumChannels(); ++c) { auto* d = buffer.getWritePointer (c); const auto* s2 = view.getReadPointer (jmin (c, 1)); for (int i = 0; i < n; ++i) d[i] = s2[i]; }
+    }
+    using AudioProcessor::processBlock;
     bool isBusesLayoutSupported (const BusesLayout& b) const override
     {
         const auto in = b.getMainInputChannelSet(), out = b.getMainOutputChannelSet();
@@ -349,6 +411,7 @@ public:
             for (int i = 0; i < n; ++i) { scope[(size_t) w] = 0.5f * (L[i] + R[i]); w = (w + 1) & (kScopeSize - 1); }
             scopeWrite.store (w, std::memory_order_release);
         }
+        if (engine.latency() != getLatencySamples()) setLatencySamples (engine.latency());
         meterIn.store (jmax (meterIn.load() * 0.85f, engine.meterIn()));
         meterOut.store (jmax (meterOut.load() * 0.85f, engine.meterOut()));
         compGr.store (prm.comp.on ? engine.compGr() : 0.0f);
@@ -364,7 +427,10 @@ public:
             for (int i = 0; i < l480::kMaxParams; ++i) p.val[m][i] = l480::toValue (l480::algoDef (a).p[i], pSlot[m][l480::realIndex (a, i)]->load());
         }
         p.config = jlimit (0, 3, (int) f (pCfg)); p.mute = mute.load();
+        { static const int osF[] = { 1, 2, 4, 6, 8 }; p.oversampling = osF[jlimit (0, 4, (int) f (pOs))]; p.precision64 = f (pPrec) > 0.5f; }
         for (int m = 0; m < 2; ++m) { p.curveOn[m] = aCurveOn[m].load(); for (int b = 0; b < pv::DecayEq::N; ++b) p.curveMul[m][b] = aCurveMul[m][b].load(); }
+        p.anOn = on (pAnOn); p.anTarget = jlimit (0, 2, (int) f (pAnTarget)); p.anModel = jlimit (0, 4, (int) f (pAnModel));
+        p.anColour = jlimit (0, 3, (int) f (pAnColour)); p.anDrive = f (pAnDrive); p.anOut = f (pAnOut);
         p.eqOn = on (pEqOn); for (int b = 0; b < 4; ++b) { p.eqF[b] = f (pEqF[b]); p.eqG[b] = f (pEqG[b]); }
         auto& c = p.comp;
         c.on = on (pCpOn); c.type = jlimit (0, 2, (int) f (pCpType)); c.vintage = on (pCpColor); c.duck = on (pCpDuck);
@@ -418,18 +484,19 @@ public:
     void setStateInformation (const void* data, int size) override
     {
         if (auto xml = getXmlFromBinary (data, size))
-            if (xml->hasTagName (apvts.state.getType()))
-            {
-                apvts.replaceState (ValueTree::fromXml (*xml));
-                registerName[0] = apvts.state.getProperty ("regA").toString(); registerName[1] = apvts.state.getProperty ("regB").toString();
-                // registers saved by older versions were named, not numbered: drop those labels
-                for (auto& r : registerName) if (! r.containsOnly ("0123456789.")) r = {};
-                variation[0] = (int) apvts.state.getProperty ("varA", 1); variation[1] = (int) apvts.state.getProperty ("varB", 1);
-                setCurve (0, curveFromString (apvts.state.getProperty ("curveA").toString()), (bool) apvts.state.getProperty ("curveOnA", false));
-                setCurve (1, curveFromString (apvts.state.getProperty ("curveB").toString()), (bool) apvts.state.getProperty ("curveOnB", false));
-                for (int m = 0; m < 2; ++m) lastProg[m] = programOf (m);
-                programLoaded.store (true);
-            }
+            if (xml->hasTagName (apvts.state.getType())) applyState (ValueTree::fromXml (*xml));
+    }
+    void applyState (const ValueTree& t)
+    {
+        apvts.replaceState (t);
+        registerName[0] = apvts.state.getProperty ("regA").toString(); registerName[1] = apvts.state.getProperty ("regB").toString();
+        // registers saved by older versions were named, not numbered: drop those labels
+        for (auto& r : registerName) if (! r.containsOnly ("0123456789.")) r = {};
+        variation[0] = (int) apvts.state.getProperty ("varA", 1); variation[1] = (int) apvts.state.getProperty ("varB", 1);
+        setCurve (0, curveFromString (apvts.state.getProperty ("curveA").toString()), (bool) apvts.state.getProperty ("curveOnA", false));
+        setCurve (1, curveFromString (apvts.state.getProperty ("curveB").toString()), (bool) apvts.state.getProperty ("curveOnB", false));
+        for (int m = 0; m < 2; ++m) lastProg[m] = programOf (m);
+        programLoaded.store (true);
     }
     void setUiProperty (const Identifier& id, const var& v) { apvts.state.setProperty (id, v, nullptr); }
     var getUiProperty (const Identifier& id, const var& def) const { return apvts.state.getProperty (id, def); }
@@ -450,10 +517,12 @@ public:
     std::atomic<int> scopeWrite { 0 };
 
 private:
-    l480::Engine engine; l480::EngineParams prm;
+    l480::Engine engine; l480::EngineParams prm; AudioBuffer<float> fbuf;
     std::atomic<float>* pProg[2] = {}; std::atomic<float>* pSlot[2][l480::kMaxParams] = {};
     std::atomic<float> *pCfg, *pOut, *pEqOn, *pEqF[4], *pEqG[4], *pCpOn, *pCpType, *pCpColor, *pCpDuck, *pCpThr, *pCpRatio, *pCpAtk, *pCpRel, *pCpMakeup, *pCpMix;
     std::atomic<float> *pDlOn, *pDlSync, *pDlPing, *pDlTimeL, *pDlTimeR, *pDlDivL, *pDlDivR, *pDlFb, *pDlMix, *pDlLow, *pDlHigh;
+    std::atomic<float> *pOs = nullptr, *pPrec = nullptr;
+    std::atomic<float> *pAnOn, *pAnTarget, *pAnModel, *pAnColour, *pAnDrive, *pAnOut;
     std::atomic<float> *pHwOn, *pHwIn, *pHwOut, *pHwXfIn, *pHwXfOut, *pHwNoise, *pTrOn, *pTrModel, *pTrFreq, *pTrAmt;
     std::atomic<int> pendingKey[2] { -1, -1 };
     int lastProg[2] = { -1, -1 }, currentHostProgram = 0; float lastPitch[2][2] = {};
