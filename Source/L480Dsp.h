@@ -895,7 +895,11 @@ struct ChorusAlgo : AlgoBase {
         dep = v[0] * 0.001f * fs; inc = v[1] / fs; fb = v[2] * 0.01f; gDif = 0.7f * v[3] / 99.0f;
         for (auto& h : hfc) h.setCut (fs, v[4] >= 21000.0f ? 0.45f * fs : v[4]);
         sinCos (v[5], mixD, mixW);
-        for (int i = 0; i < 6; ++i) { base[i] = v[6 + i] * 0.001f * fs + 2.0f; g[i] = lvGain (v[12 + i]) * 0.9f; }
+        float sg[2] = {};
+        for (int i = 0; i < 6; ++i) { base[i] = v[6 + i] * 0.001f * fs + 2.0f; g[i] = lvGain (v[12 + i]) * 0.9f; sg[i & 1] += std::max (0.0f, g[i]); }
+        // keep the regeneration loop below unity gain: without the hardware model nothing else bounds it
+        const float lg = std::abs (fb) * std::max (sg[0], sg[1]);
+        if (lg > 0.95f) fb *= 0.95f / lg;
     }
     void process (float& L, float& R, const Ctx&) override {
         float iL = L + fb * last[0], iR = R + fb * last[1];
@@ -909,7 +913,7 @@ struct ChorusAlgo : AlgoBase {
             const float m = 0.5f + 0.5f * std::sin (2.0f * kPi * (ph + (float) i / 6.0f));
             w[i & 1] += g[i] * ln[i & 1].read (std::max (1.0f, base[i] + dep * m));
         }
-        last[0] = w[0]; last[1] = w[1];
+        last[0] = std::tanh (w[0]); last[1] = std::tanh (w[1]);
         const float oL = hfc[0].lp (w[0]), oR = hfc[1].lp (w[1]);
         L = L * mixD + oL * mixW; R = R * mixD + oR * mixW;
     }
@@ -922,7 +926,10 @@ struct MBandAlgo : AlgoBase {
         fb = v[0] * 0.01f; q = 0.7f + v[1] / 99.0f * 12.0f; swp = v[2]; swd = v[3];
         for (auto& h : hfc) h.setCut (fs, v[4] >= 21000.0f ? 0.45f * fs : v[4]);
         sinCos (v[5], mixD, mixW);
-        for (int i = 0; i < 6; ++i) { base[i] = v[6 + i] * 0.001f * fs + 1.0f; g[i] = lvGain (v[12 + i]) * std::sqrt (q) * 2.2f; fr[i] = v[18 + i]; }
+        float sg = 0;
+        for (int i = 0; i < 6; ++i) { base[i] = v[6 + i] * 0.001f * fs + 1.0f; g[i] = lvGain (v[12 + i]) * std::sqrt (q) * 2.2f; fr[i] = v[18 + i]; sg += std::max (0.0f, g[i]); }
+        const float lg = std::abs (fb) * 0.5f * sg;   // band-pass peak gain is 1, so this is the loop gain bound
+        if (lg > 0.95f) fb *= 0.95f / lg;
         cnt = 0;
     }
     void process (float& L, float& R, const Ctx&) override {
@@ -944,7 +951,7 @@ struct MBandAlgo : AlgoBase {
             const float y = g[i] * bp[i].process (ln.read (base[i]));
             sum += y; w[i & 1] += y * 0.85f; w[1 - (i & 1)] += y * 0.35f;
         }
-        last = sum * 0.5f;
+        last = std::tanh (sum * 0.5f);
         const float oL = hfc[0].lp (w[0]), oR = hfc[1].lp (w[1]);
         L = L * mixD + oL * mixW; R = R * mixD + oR * mixW;
     }

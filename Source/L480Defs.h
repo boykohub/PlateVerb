@@ -332,10 +332,10 @@ inline const char* bankName (int bank) {
                                "Concert Hall", "Rich Plate", "6-Voice Chorus", "Multiband Delays",
                                "HD Combo", "Surround", "Classic Surround", "HD Reverb", "HD Classic",
                                "Matched Halls", "Matched Rooms", "Matched Spaces", "Matched Plates", "Matched Plates 2", "Matched Effects",
-                               "480L II Halls", "480L II Rooms", "480L II Spaces", "480L II Plates", "480L II Plates 2" };
-    return (bank >= 1 && bank <= 37) ? n[bank] : "";
+                               "480L II Halls", "480L II Rooms", "480L II Spaces", "480L II Plates", "480L II Plates 2", "480L 96k" };
+    return (bank >= 1 && bank <= 38) ? n[bank] : "";
 }
-constexpr int kNumBanks = 37;
+constexpr int kNumBanks = 38;
 
 constexpr float OFF = -1.0e9f, FULL = 1.0e9f;   // bottom / top of a parameter's range
 constexpr float RV = 0, EF = 1;                 // Random Hall MOD
@@ -690,6 +690,11 @@ inline const std::vector<Program>& programs() {
         { 37, 4, "Horn Plate", aLegacy, { 1.19, 1.051, 0.781, 1, 6.37, 15, 0.7, 0.7, 0, 1, 0.5, 1, 0.8, 300, 20000, 0, 0, 0, -5.03, 0.8, -0.96, 0.83, 1, 0, 0, 0, 0, 0, 0, 0 }, 3.3f },
         { 37, 5, "Echo Plate", aLegacy, { 1.683, 1.464, 0.457, 1, 15.46, 15, 0.7, 0.7, 0, 1, 0.5, 1, 0.8, 300, 20000, 0, 0, 0, -4.04, -0.66, 0.1, 3.26, 1, 0, 0, 0, 0, 0, 0, 0 }, 2.3f },
         { 37, 6, "Silver Plate", aLegacy, { 2.617, 0.988, 1.187, 1, 9.89, 15, 0.7, 0.7, 0, 1, 0.5, 1, 0.8, 300, 20000, 0, 0, 0, -3.31, -0.66, -0.86, 3.38, 1, 0, 0, 0, 0, 0, 0, 0 }, 2.9f },
+        { 38, 1, "Fat Plate 96k", aLegacy, { 1.942, 1.1214, 1.2621, 1.15, 0, 8.9112, 0.07, 0.431, 0, 0.677, 0.83, 1, 1.3957, 404, 20000, 0, 0, 0, 2.69, 6.74, 6.38, 10.76, 1, 0, 0, 0, 0, 0, 0, 0 } , 1.5f },
+        { 38, 2, "A Plate 96k", aLegacy, { 1.521, 0.596, 1.5, 1, 0, 19.4611, 0.7225, 0.7, 0.097, 0.895, 0.5, 1, 0.8, 300, 20000, 0, 0, 0, -1.34, -4.27, -0.27, 0.67, 0, 0, 0, 0, 0, 0, 0, 0 } , 5.0f },
+        { 38, 3, "Large Hall 96k", aLegacy, { 2.334, 1.129, 0.656, 1.412, 32.364, 19.4611, 0.025, 0.19, 0, 0.862, 0.718, 1, 1.3535, 879, 17379, 0, 0, 0, -2.13, 2.79, -1.56, -15, 1, 0, 0, 0, 0, 0, 0, 0 } , 7.0f },
+        { 38, 4, "Large+Stage 96k", aLegacy, { 2.292, 1.168, 0.8247, 1.135, 6.801, 17.0856, 0.4855, 0.393, 0.045, 1, 0.86, 1, 0.2451, 527, 20000, 0, 0, 0, -2.01, 2.07, -2.46, -15, 1, 0, 0, 0, 0, 0, 0, 0 } , 7.2f },
+        { 38, 5, "Small & Bright 96k", aLegacy, { 0.61, 1.0862, 1.0278, 0.775, 1.13, 19.4611, 0.7585, 0.587, 0.157, 0.963, 0.38, 1, 0.6342, 450, 17419, 0, 0, 0, -7.39, -2.23, -0.43, -6.11, 1, 0, 0, 0, 0, 0, 0, 0 } , 12.1f },
     }; addSurroundCart (t); return t; }();
     return p;
 }

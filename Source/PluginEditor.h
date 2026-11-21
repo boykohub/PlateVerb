@@ -728,7 +728,7 @@ private:
                 }
                 sections.push_back (s);
             };
-            sec ("480L", 1, 21); sec ("Surround / HD Cart", 22, 26); sec ("Matched to the 480L impulse responses", 27, 32); sec ("480L II  (the earlier Flexiverb's IR-matched presets)", 33, 37);
+            sec ("480L", 1, 21); sec ("Surround / HD Cart", 22, 26); sec ("Matched to the 480L impulse responses", 27, 32); sec ("480L II  (the earlier Flexiverb's IR-matched presets)", 33, 37); sec ("480L 96k  (measured from 96 kHz sweeps)", 38, 38);
             Section u; u.title = "Your presets  (" + Flexiverb480Processor::presetFolder().getFullPathName() + ")";
             Box ub; ub.title = "Saved with SAVE";
             for (auto& n : b.proc.userPresets()) ub.items.push_back ({ n, -1, n, {} });
