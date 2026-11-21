@@ -67,6 +67,7 @@ struct EngineParams {
     // ANALOG: the ChannelStrip preamp on the reverb, on the EQ, or both
     bool anOn = false; int anTarget = 0, anModel = 1, anColour = 1; float anDrive = 6.0f, anOut = 0.0f;   // anTarget 0 reverb, 1 EQ, 2 both
     bool curveOn[2] = { false, false }; float curveMul[2][pv::DecayEq::N] = {};   // RT graph per machine
+    int reflN[2] = { 0, 0 }; float reflMs[2][32] = {}, reflDb[2][32] = {}, reflPan[2][32] = {};   // your own early reflections
     bool mute = false;
     // drawer: EQ
     bool eqOn = false; float eqF[4] = { 100, 400, 2500, 8000 }, eqG[4] = {};
@@ -117,7 +118,8 @@ public:
     void process (float* L, float* R, int n, const EngineParams& p) {
         setOversampling (p.oversampling);
         for (auto& m : mach) m.erAtk = p.erAtkMs;
-        for (int m = 0; m < 2; ++m) { const auto& pr = programs()[(size_t) p.prog[m]]; mach[m].update (pr.algo, pr.bank, p.val[m], pr.trimDb, p.curveOn[m] ? p.curveMul[m] : nullptr, pr.shape); }
+        for (int m = 0; m < 2; ++m) { const auto& pr = programs()[(size_t) p.prog[m]]; mach[m].update (pr.algo, pr.bank, p.val[m], pr.trimDb, p.curveOn[m] ? p.curveMul[m] : nullptr, pr.shape);
+                                      mach[m].refl.set (p.reflN[m], p.reflMs[m], p.reflDb[m], p.reflPan[m]); }
         if (p.anModel != anM || p.anColour != anC || p.anDrive != anD || p.anOut != anO)
         { anVerb.set (p.anModel, p.anColour, p.anDrive, p.anOut, false, 70.0); anEq.set (p.anModel, p.anColour, p.anDrive, p.anOut, false, 70.0);
           anM = p.anModel; anC = p.anColour; anD = p.anDrive; anO = p.anOut; }

@@ -187,6 +187,7 @@ public:
         if (m == 0) currentHostProgram = index;
         registerName[m] = {}; variation[m] = 1;
         setCurve (m, {}, false);                    // a curve is an edit of the loaded program
+        setRefl (m, {});                            // so are your own reflections
         userPresetName = {};
         lastProg[m] = index;
         programLoaded.store (true);
@@ -226,6 +227,7 @@ public:
         x.setAttribute ("name", String (prog (m).name));
         for (int i = 0; i < l480::kMaxParams; ++i) x.setAttribute ("s" + String (i), (double) pSlot[m][i]->load());
         x.setAttribute ("curve", curveToString (curvePts[m])); x.setAttribute ("curveOn", curveOn[m]);
+        x.setAttribute ("refl", reflToString (refl[m]));
         return x.writeTo (f);
     }
     bool readSnapshot (int m, const File& f)
@@ -236,6 +238,7 @@ public:
         for (int i = 0; i < l480::kMaxParams; ++i)
             if (auto* sp = apvts.getParameter (slotId (m, i))) sp->setValueNotifyingHost ((float) x->getDoubleAttribute ("s" + String (i), sp->getValue()));
         setCurve (m, curveFromString (x->getStringAttribute ("curve")), x->getBoolAttribute ("curveOn"));
+        setRefl (m, reflFromString (x->getStringAttribute ("refl")));
         return true;
     }
     static String snapshotName (const File& f) { if (auto x = parseXML (f)) return x->getStringAttribute ("name"); return {}; }
@@ -304,6 +307,25 @@ public:
         apvts.state.setProperty (m == 0 ? "curveOnA" : "curveOnB", curveOn[m], nullptr);
     }
     bool hasDecayCurve (int m) const { return l480::algoHasDecayCurve (algoOf (m)); }
+    // ---- your own early reflections (edited on the screen like velocities)
+    struct Refl { float ms, db, pan; };
+    std::vector<Refl> refl[2];
+    std::atomic<int> aReflN[2] {}; std::atomic<float> aReflMs[2][32] {}, aReflDb[2][32] {}, aReflPan[2][32] {};
+    static String reflToString (const std::vector<Refl>& r) { String s; for (auto& q : r) s << String (q.ms, 2) << ":" << String (q.db, 2) << ":" << String (q.pan, 2) << ";"; return s; }
+    static std::vector<Refl> reflFromString (const String& s)
+    {
+        std::vector<Refl> r; StringArray t; t.addTokens (s, ";", "");
+        for (auto& e : t) { StringArray v; v.addTokens (e, ":", ""); if (v.size() == 3) r.push_back ({ v[0].getFloatValue(), v[1].getFloatValue(), v[2].getFloatValue() }); }
+        return r;
+    }
+    void setRefl (int m, std::vector<Refl> r)
+    {
+        if (r.size() > 32) r.resize (32);
+        refl[m] = r;
+        for (size_t k = 0; k < r.size(); ++k) { aReflMs[m][k].store (jlimit (0.1f, 300.0f, r[k].ms)); aReflDb[m][k].store (jlimit (-80.0f, 6.0f, r[k].db)); aReflPan[m][k].store (jlimit (-1.0f, 1.0f, r[k].pan)); }
+        aReflN[m].store ((int) r.size());
+        apvts.state.setProperty (m == 0 ? "reflA" : "reflB", reflToString (r), nullptr);
+    }
     float mainRt (int m) const { return slotValue (m, l480::algoMainRtSlot (algoOf (m))); }
     // the program's own decay shape (BAS/XOV and the RT high cut), as a multiplier of the main reverb time
     float programDecayMul (int m, float f) const
@@ -433,6 +455,7 @@ public:
         p.config = jlimit (0, 3, (int) f (pCfg)); p.mute = mute.load();
         { static const int osF[] = { 1, 2, 4, 6, 8 }; p.oversampling = osF[jlimit (0, 4, (int) f (pOs))]; p.precision64 = f (pPrec) > 0.5f; }
         for (int m = 0; m < 2; ++m) { p.curveOn[m] = aCurveOn[m].load(); for (int b = 0; b < pv::DecayEq::N; ++b) p.curveMul[m][b] = aCurveMul[m][b].load(); }
+        for (int m = 0; m < 2; ++m) { p.reflN[m] = aReflN[m].load(); for (int k = 0; k < p.reflN[m]; ++k) { p.reflMs[m][k] = aReflMs[m][k].load(); p.reflDb[m][k] = aReflDb[m][k].load(); p.reflPan[m][k] = aReflPan[m][k].load(); } }
         p.anOn = on (pAnOn); p.anTarget = jlimit (0, 2, (int) f (pAnTarget)); p.anModel = jlimit (0, 4, (int) f (pAnModel));
         p.anColour = jlimit (0, 3, (int) f (pAnColour)); p.anDrive = f (pAnDrive); p.anOut = f (pAnOut);
         p.eqOn = on (pEqOn);
@@ -501,6 +524,7 @@ public:
         variation[0] = (int) apvts.state.getProperty ("varA", 1); variation[1] = (int) apvts.state.getProperty ("varB", 1);
         setCurve (0, curveFromString (apvts.state.getProperty ("curveA").toString()), (bool) apvts.state.getProperty ("curveOnA", false));
         setCurve (1, curveFromString (apvts.state.getProperty ("curveB").toString()), (bool) apvts.state.getProperty ("curveOnB", false));
+        setRefl (0, reflFromString (apvts.state.getProperty ("reflA").toString())); setRefl (1, reflFromString (apvts.state.getProperty ("reflB").toString()));
         for (int m = 0; m < 2; ++m) lastProg[m] = programOf (m);
         programLoaded.store (true);
     }

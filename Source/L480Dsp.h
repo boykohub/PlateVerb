@@ -1098,12 +1098,39 @@ inline std::unique_ptr<AlgoBase> makeAlgo (int a) {
 }
 
 // A machine owns one instance of every algorithm (allocated in prepare), so loading a program never allocates.
+// your own early reflections: up to 32 taps of the machine's input (time, level re the input, side), added to its output
+struct UserRefl {
+    static constexpr int K = 32;
+    Line dl; int n = 0, d[K] = {}; float gL[K] = {}, gR[K] = {}, fs = 48000, key[K * 3 + 1] = {};
+    void prepare (float sr) { fs = sr; dl.init ((int) (0.32f * fs) + 8); dl.clear(); key[0] = -1; }
+    void set (int cnt, const float* ms, const float* db, const float* pan) {
+        cnt = std::max (0, std::min (K, cnt));
+        bool same = key[0] == (float) cnt;
+        for (int k = 0; k < cnt && same; ++k) same = key[1 + 3 * k] == ms[k] && key[2 + 3 * k] == db[k] && key[3 + 3 * k] == pan[k];
+        if (same) return;
+        key[0] = (float) cnt;
+        for (int k = 0; k < cnt; ++k) {
+            key[1 + 3 * k] = ms[k]; key[2 + 3 * k] = db[k]; key[3 + 3 * k] = pan[k];
+            d[k] = std::max (1, std::min ((int) (0.3f * fs), (int) std::lround (ms[k] * 0.001f * fs)));
+            const float g = db[k] <= -79.0f ? 0.0f : std::pow (10.0f, db[k] / 20.0f), p = clampf (pan[k], -1, 1);
+            gL[k] = g * std::sqrt (0.5f * (1 - p)); gR[k] = g * std::sqrt (0.5f * (1 + p));
+        }
+        n = cnt;
+    }
+    inline void process (float inL, float inR, float& L, float& R) {
+        dl.push (0.5f * (inL + inR));
+        if (n == 0) return;
+        for (int k = 0; k < n; ++k) { const float x = dl.readI (d[k]); L += gL[k] * x; R += gR[k] * x; }
+    }
+};
+
 struct Machine {
     std::unique_ptr<AlgoBase> algos[kNumAlgos];
+    UserRefl refl;
     int cur = -1, bank = 1; float fs = 48000;
     float fadeG = 1; int fadeState = 0, nextAlgo = -1, nextBank = 1;   // 10 ms fade out/in on program change
     void prepare (float sr) {
-        fs = sr;
+        fs = sr; refl.prepare (sr);
         for (auto& d : shapeDb) d = 999.0f;                      // redesign the shaping EQ at the new rate
         for (auto& c : shapeEq) for (auto& b : c) b.reset();
         for (int a = 0; a < kNumAlgos; ++a) { if (! algos[a]) algos[a] = makeAlgo (a); algos[a]->prepare (fs); algos[a]->reset(); }
@@ -1142,9 +1169,11 @@ struct Machine {
     }
     inline void process (float& L, float& R, const Ctx& c) {
         if (cur < 0) return;
+        const float iL = L, iR = R;
         algos[cur]->process (L, R, c);
         trimS += (trimG - trimS) * 0.0005f; L *= trimS; R *= trimS;
         if (shapeOn) for (int b = 0; b < 4; ++b) { L = shapeEq[0][b].process (L); R = shapeEq[1][b].process (R); }
+        refl.process (iL, iR, L, R);
         if (fadeState != 0) {
             const float step = 1.0f / (0.01f * fs);
             if (fadeState == 1) fadeG = std::max (0.0f, fadeG - step);
