@@ -101,24 +101,28 @@ struct EnvCal {
     float directW  = 0.175f;   // weight of the immediate part at SHAPE 0
     float basQ     = 1.0f;     // effective bass multiplier = BAS ^ basQ (1: the manual's value)
     float erScale  = 0.4375f;  // early reflections level
+    // echo density at the start: 1 = fills in at once (plates), lower = separate echoes for longer (big halls).
+    // density = densBase + densDif * (DIF/99 - 0.8) - densSize * SIZE/40 - densSpr * SPREAD/255 (0.05 .. 1)
+    float densBase = 1.0f, densDif = 0.0f, densSize = 0.0f, densSpr = 0.0f;
 };
 inline EnvCal& envCal() { static EnvCal c; return c; }
 
 struct EnvBuilder {
     static constexpr int K = 20;
-    Line dl[2]; float tapL[K] = {}, tapR[K] = {}, g[K] = {}, gD = 1, posL[K] = {}, posR[K] = {}; bool on = false; float fs = 48000;
-    float last[3] = { -1, -1, -1 };
+    Line dl[2]; float tapL[K] = {}, tapR[K] = {}, g[K] = {}, gD = 1, jitL[K] = {}, jitR[K] = {}; bool on = false; float fs = 48000;
+    float last[4] = { -1, -1, -1, -1 }; int n = K;
     void prepare (float sr) {
         fs = sr; for (auto& d : dl) d.init ((int) (0.8f * fs) + 16);
         uint32_t seed = 480u;
         auto rnd = [&seed] { seed = seed * 1664525u + 1013904223u; return (float) (seed >> 8) / 16777216.0f; };
-        for (int k = 0; k < K; ++k) { posL[k] = (k + 0.25f + 0.5f * rnd()) / K; posR[k] = (k + 0.25f + 0.5f * rnd()) / K; }
+        for (int k = 0; k < K; ++k) { jitL[k] = rnd(); jitR[k] = rnd(); }
         last[0] = -1;
     }
     void reset() { for (auto& d : dl) d.clear(); }
-    void set (float shp, float spr, float siz) {
-        if (shp == last[0] && spr == last[1] && siz == last[2]) return;
-        last[0] = shp; last[1] = spr; last[2] = siz;
+    void set (float shp, float spr, float siz, float dens = 1.0f) {
+        if (shp == last[0] && spr == last[1] && siz == last[2] && dens == last[3]) return;
+        last[0] = shp; last[1] = spr; last[2] = siz; last[3] = dens;
+        n = std::max (3, std::min (K, (int) std::lround (K * dens)));      // fewer, wider-spaced taps = a grainier start
         const auto& c = envCal();
         const float sh = clampf (shp / 255.0f, 0, 1), sp = clampf (spr / 255.0f, 0, 1), sz = clampf (siz / 40.0f, 0, 1.2f);
         const float T = c.tMaxMs * std::pow (sp, c.sprPow) * (c.sizeMin + (1.0f - c.sizeMin) * sz);
@@ -128,20 +132,20 @@ struct EnvBuilder {
         float sum = 0;
         gD = c.directW * std::pow (1.0f - sh, 2.0f);                      // the immediate part fades as SHAPE rises
         sum += gD * gD;
-        for (int k = 0; k < K; ++k) {
-            const float u = (k + 0.5f) / K;
-            g[k] = std::exp (a * (u - 0.5f)) / std::sqrt ((float) K);
+        for (int k = 0; k < n; ++k) {
+            const float u = (k + 0.5f) / n;
+            g[k] = std::exp (a * (u - 0.5f)) / std::sqrt ((float) n);
             sum += g[k] * g[k];
-            tapL[k] = std::max (1.0f, posL[k] * T * 0.001f * fs); tapR[k] = std::max (1.0f, posR[k] * T * 0.001f * fs);
+            tapL[k] = std::max (1.0f, (k + 0.25f + 0.5f * jitL[k]) / n * T * 0.001f * fs); tapR[k] = std::max (1.0f, (k + 0.25f + 0.5f * jitR[k]) / n * T * 0.001f * fs);
         }
         const float nrm = 1.0f / std::sqrt (std::max (1e-6f, sum));     // the same energy goes in, only spread in time
-        gD *= nrm; for (auto& x : g) x *= nrm;
+        gD *= nrm; for (int k = 0; k < n; ++k) g[k] *= nrm;
     }
     inline void process (float& L, float& R) {
         if (! on) return;
         dl[0].push (L); dl[1].push (R);
         float oL = L * gD, oR = R * gD;
-        for (int k = 0; k < K; ++k) { oL += g[k] * dl[0].readI ((int) tapL[k]); oR += g[k] * dl[1].readI ((int) tapR[k]); }
+        for (int k = 0; k < n; ++k) { oL += g[k] * dl[0].readI ((int) tapL[k]); oR += g[k] * dl[1].readI ((int) tapR[k]); }
         L = oL; R = oR;
     }
 };
@@ -169,17 +173,18 @@ struct ReverbAlgo : AlgoBase {       // aRev6 / aRev2 / aRHall
         const float size = clampf (0.55f + (siz - 10.0f) / 28.0f * 0.6f, 0.5f, 1.4f);
         const float build = clampf (3.0f + spr / 255.0f * 60.0f, 3, 230);
         early = clampf ((1.0f - shp / 255.0f * 0.8f) * cal.erScale, 0.0f, 1.5f);
-        env.set (shp, spr, siz);
+        const float dens = clampf (cal.densBase + cal.densDif * (dif - 0.8f) - cal.densSize * siz / 40.0f - cal.densSpr * spr / 255.0f, 0.05f, 1.0f);
+        env.set (shp, spr, siz, dens);
         const float dampHz = rtc >= 21000.0f ? 20000.0f : rtc;
         float spin = -1.0f; mod = 0.5f;
         if (random) { spin = std::max (0.05f, v[16] / 50.0f); mod = clampf (v[17] / 10.0f, 0.02f, 1.0f); }
         if (usePlate) {
             dampA = curveMul ? 1.0f : 1.0f - std::exp (-2.0f * kPi * std::min (dampHz, 0.45f * fs) / fs);
             plate.curveT = curveFor (std::min (rt, 70.0f));
-            plate.update (rt, size, bas, 1.0f, build, dif, pv::plateEffect (0, 0, 0.0f), 0.0f);
+            plate.update (rt, size, bas, 1.0f, build, dif * dens, pv::plateEffect (0, 0, 0.0f), 0.0f);
         } else {
             tank.curveT = curveFor (std::min (rt, 70.0f)); tank.erAttackMs = erAttackMs;
-            tank.update (rt, dampHz, size, bas, 1.0f, build, dif, pv::surfaceEffect (0, 0, 0.0f, 3.0f * size), 0.0f, spin, xov);
+            tank.update (rt, dampHz, size, bas, 1.0f, build, dif * dens, pv::surfaceEffect (0, 0, 0.0f, 3.0f * size), 0.0f, spin, xov);
         }
         for (auto& h : hfc) h.setCut (fs, hfcHz >= 21000.0f ? 0.45f * fs : hfcHz);
         sinCos (v[11], mixD, mixW);
