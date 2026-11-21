@@ -7,7 +7,7 @@
 //               type. Graph handles drag too (predelay, decay, taps, curve points).
 //  Keys         PAGE (reverb / delay) and the 480L's algorithms: HALL, RANDOM HALL, ROOM, CHAMBER, PLATE, AMBIENCE ...
 //  Faders       one per parameter of the page; names above them in their own text size.
-//  Drawer       machines, mute, hardware, output, iron, SETUP, ANALOG, EQ (with analog models), COMPRESSOR.
+//  Drawer       engine (single / dual), mute, SETUP, output, iron, ANALOG, EQ (with analog models), COMPRESSOR.
 //  SETUP        opens beside the plugin: colours, gradient, 3D depth, text sizes, oversampling, 64-bit.
 #include "FlexFonts.h"
 
@@ -1210,8 +1210,7 @@ public:
         machAKey->onClick = [this] { selectMachine (0); }; machBKey->onClick = [this] { selectMachine (1); };
         muteKey->onClick = [this] { proc.mute.store (! proc.mute.load()); };
         setupKey->onClick = [this] { setupOpen = ! setupOpen; if (setupOpen) setup.sync(); applySize(); };
-        hwKey = pk ("hwOn", "480L HARDWARE"); inKey = ck ("hwIn", "INPUT"); outKey = ck ("hwOut", "OUTPUT"); inKey->sync(); outKey->sync(); noiseKey = pk ("hwNoise", "NOISE");
-        xfInKey = pk ("hwXfIn", "IN TRANSFORMERS"); xfOutKey = pk ("hwXfOut", "OUT TRANSFORMERS"); ironKey = pk ("trOn", "IRON");
+        ironKey = pk ("trOn", "IRON");
         anOnKey = pk ("anOn", "ANALOG"); eqOnKey = pk ("eqOn", "EQ"); cpOnKey = pk ("cpOn", "COMPRESSOR"); satKey = pk ("cpColor", "SATURATE"); duckKey = pk ("cpDuck", "DUCKING");
         auto knob = [this, shower] (const String& id, const String& t, std::vector<ScaleMark> m, Colour Theme::* c)
         { auto k = std::make_unique<ScaleKnob> (theme, proc.apvts, id, t, std::move (m), c); k->onShow = shower; drawer.addAndMakeVisible (*k); return k; };
@@ -1429,7 +1428,7 @@ private:
         machAKey->setVisible (config() != 0); machBKey->setVisible (config() != 0);
         engineLabelY = y; engineBox.setBounds (x0 + 70, y, 120, kh); y += kh + gap;
         y = flowKeys ({ machAKey.get(), machBKey.get(), muteKey.get(), setupKey.get() }, x0, wAll, y, kh, gap);
-        y = flowKeys ({ hwKey.get(), inKey.get(), outKey.get(), noiseKey.get(), xfInKey.get(), xfOutKey.get(), ironKey.get() }, x0, wAll, y, kh, gap);
+        y = flowKeys ({ ironKey.get() }, x0, wAll, y, kh, gap);
         const int qw = wAll / 4;
         for (int i = 0; i < 4; ++i) sysKnob[i]->setBounds (x0 + i * qw - 4, y, qw + 8, 70 + kTxt);
         y += 72 + kTxt; sec ("SYSTEM", top);
@@ -1628,7 +1627,7 @@ private:
         l480::EngineParams p; const int pr = proc.programOf (machine);
         p.prog[0] = p.prog[1] = pr; p.config = l480::kSingle;
         for (int i = 0; i < l480::kMaxParams; ++i) { const auto& s = proc.spec (machine, i); p.val[0][i] = p.val[1][i] = s.lab ? proc.slotValue (machine, i) : 0.0f; }
-        p.hw.on = proc.apvts.getRawParameterValue ("hwOn")->load() > 0.5f;
+        p.hw.on = false;
         p.curveOn[0] = proc.curveOn[machine];
         for (int b = 0; b < pv::DecayEq::N; ++b) p.curveMul[0][b] = proc.aCurveMul[machine][b].load();
         p.erAtkMs = proc.apvts.getRawParameterValue ("erAtk")->load();
@@ -1707,9 +1706,7 @@ private:
         muteKey->setLit (proc.mute.load()); setupKey->setLit (setupOpen); panelKey->setLit (drawerOpen);
         if (drawerOpen)
         {
-            for (auto* k : { hwKey.get(), noiseKey.get(), xfInKey.get(), xfOutKey.get(), ironKey.get(), anOnKey.get(), eqOnKey.get(), cpOnKey.get(), satKey.get(), duckKey.get() }) k->sync();
-            bool relayout = false; for (auto* k : { inKey.get(), outKey.get() }) relayout = k->sync() || relayout;
-            if (relayout) layoutDrawer();
+            for (auto* k : { ironKey.get(), anOnKey.get(), eqOnKey.get(), cpOnKey.get(), satKey.get(), duckKey.get() }) k->sync();
         }
     }
     bool sigChanged() { const int s = lastSig ^ (proc.curveOn[machine] ? 77 : 0); if (s != lastDecaySig) { lastDecaySig = s; return true; } return false; }
@@ -1727,8 +1724,8 @@ private:
     std::vector<std::unique_ptr<LarcKey>> algKeys;
     std::vector<std::unique_ptr<LarcFader>> faders;
     Viewport drawerView; Drawer drawer;
-    std::unique_ptr<CycleKey> inKey, outKey; ComboBox engineBox; int engineLabelY = 0;
-    std::unique_ptr<ParamKey> hwKey, noiseKey, xfInKey, xfOutKey, ironKey, anOnKey, eqOnKey, cpOnKey, satKey, duckKey;
+    ComboBox engineBox; int engineLabelY = 0;
+    std::unique_ptr<ParamKey> ironKey, anOnKey, eqOnKey, cpOnKey, satKey, duckKey;
     std::unique_ptr<ScaleKnob> sysKnob[4], anKnob[5], eqKnob2[2], cpKnob[7];
     std::unique_ptr<DualKnob> eqKnob[4];
     PresetBrowser browser; SetupPanel setup;

@@ -451,7 +451,7 @@ public:
             p.dlMsR = jmin (2990.0f, (float) (kDivBeats[jlimit (0, 15, (int) f (pDlDivR))] * 60000.0 / bpm));
         }
         else { p.dlMsL = f (pDlTimeL); p.dlMsR = f (pDlTimeR); }
-        p.hw.on = on (pHwOn); p.hw.inAnalog = f (pHwIn) < 0.5f; p.hw.outAnalog = f (pHwOut) < 0.5f;
+        p.hw.on = false; (void) pHwOn;                     // no hardware modelling p.hw.inAnalog = f (pHwIn) < 0.5f; p.hw.outAnalog = f (pHwOut) < 0.5f;
         p.hw.xfIn = on (pHwXfIn); p.hw.xfOut = on (pHwXfOut); p.hw.noise = on (pHwNoise);
         p.trOn = on (pTrOn); p.trModel = jlimit (0, pv::kNumTransformers - 1, (int) f (pTrModel)); p.trFreq = f (pTrFreq); p.trAmt = f (pTrAmt);
         p.outDb = f (pOut);
