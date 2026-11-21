@@ -40,7 +40,8 @@ struct Theme
 {
     Colour panel { 0xff2c2d30 }, panelText { 0xffe9e5da }, cheek { 0xff141415 }, key { 0xffbdbab2 }, keyText { 0xff1c1d1f },
            keyLight { 0xffffa63a }, display { 0xff140707 }, displayText { 0xffff3a1e }, fader { 0xff2b2c2f },
-           eqKnob { 0xff5a6470 }, eqInner { 0xff8a2a22 }, compKnob { 0xff3a3c40 }, analogKnob { 0xff6b4a2c },
+           eqKnob { 0xff5c6168 }, eqInner { 0xffc23b2e }, compKnob { 0xff3a3d42 }, analogKnob { 0xffc23b2e },
+           stripPanel { 0xff4e6176 }, vuFace { 0xfff0e4c4 },
            lowCol { 0xffff3b24 }, midCol { 0xffffb22e }, highCol { 0xff5cc8ff };
     float gradient = 0.45f, keyPt = 12.5f, knobPt = 11.5f, displayPt = 15.0f, faderPt = 13.5f, keyHeight = 38.0f, keyPad = 0.0f;
     int depth = 2;                                         // 3D: 0 flat, 1 soft, 2 deep
@@ -54,7 +55,8 @@ struct Theme
             { "Screen", &Theme::display }, { "Screen text", &Theme::displayText }, { "Faders", &Theme::fader },
             { "EQ knobs", &Theme::eqKnob }, { "EQ gain caps", &Theme::eqInner }, { "Compressor knobs", &Theme::compKnob },
             { "Analog knobs", &Theme::analogKnob },
-            { "Graph low", &Theme::lowCol }, { "Graph mid", &Theme::midCol }, { "Graph high", &Theme::highCol } };
+            { "Graph low", &Theme::lowCol }, { "Graph mid", &Theme::midCol }, { "Graph high", &Theme::highCol },
+            { "Channel strip panel", &Theme::stripPanel }, { "VU meter face", &Theme::vuFace } };
         return v;
     }
     String toString() const
@@ -62,12 +64,12 @@ struct Theme
         XmlElement x ("LOOK");
         int i = 0; for (auto& it : items()) x.setAttribute ("c" + String (i++), (this->*it.c).toString());
         x.setAttribute ("grad", gradient); x.setAttribute ("keyPt", keyPt); x.setAttribute ("knobPt", knobPt); x.setAttribute ("dispPt", displayPt);
-        x.setAttribute ("faderPt", faderPt); x.setAttribute ("depth", depth); x.setAttribute ("keyH", keyHeight); x.setAttribute ("keyPad", keyPad); x.setAttribute ("v", 5);
+        x.setAttribute ("faderPt", faderPt); x.setAttribute ("depth", depth); x.setAttribute ("keyH", keyHeight); x.setAttribute ("keyPad", keyPad); x.setAttribute ("v", 6);
         return x.toString (XmlElement::TextFormat().singleLine().withoutHeader());
     }
     bool fromString (const String& s)
     {
-        auto x = parseXML (s); if (x == nullptr || ! x->hasTagName ("LOOK") || x->getIntAttribute ("v") < 5) return false;   // older looks: start fresh
+        auto x = parseXML (s); if (x == nullptr || ! x->hasTagName ("LOOK") || x->getIntAttribute ("v") < 6) return false;   // older looks: start fresh
         int i = 0; for (auto& it : items()) { const auto a = x->getStringAttribute ("c" + String (i++)); if (a.isNotEmpty()) this->*it.c = Colour::fromString (a); }
         gradient = (float) x->getDoubleAttribute ("grad", gradient); keyPt = (float) x->getDoubleAttribute ("keyPt", keyPt);
         knobPt = (float) x->getDoubleAttribute ("knobPt", knobPt); displayPt = (float) x->getDoubleAttribute ("dispPt", displayPt);
@@ -1189,6 +1191,62 @@ private:
 };
 
 // ============================================================================ SETUP: beside the plugin, so changes show live
+// ============================================================================ the compressor's VU meter: gain reduction, VU ballistics
+class VuMeter : public Component
+{
+public:
+    explicit VuMeter (const Theme& t) : th (t) {}
+    void setGr (float grDb, float dtMs)
+    {
+        const float k = 1.0f - std::exp (-dtMs / 65.0f);                // about 300 ms to 99 %: a VU needle
+        const float old = shown; shown += (jlimit (0.0f, 30.0f, grDb) - shown) * k;
+        if (std::abs (old - shown) > 0.01f) repaint();
+    }
+    void paint (Graphics& g) override
+    {
+        auto r = getLocalBounds().toFloat().reduced (1);
+        // housing
+        g.setColour (Colours::black.withAlpha (th.shadow())); g.fillRoundedRectangle (r.translated (1.5f * th.d3(), 2.5f * th.d3()), 6);
+        g.setGradientFill (ColourGradient (Colour (0xff2a2b2e), r.getX(), r.getY(), Colour (0xff0e0f10), r.getX(), r.getBottom(), false));
+        g.fillRoundedRectangle (r, 6);
+        auto face = r.reduced (8, 8);
+        g.setGradientFill (ColourGradient (th.vuFace.brighter (0.08f), face.getCentreX(), face.getY(), th.vuFace.darker (0.18f), face.getCentreX(), face.getBottom(), false));
+        g.fillRoundedRectangle (face, 3);
+        // scale: 0 at the right, gain reduction to the left
+        const Point<float> pv (face.getCentreX(), face.getBottom() + face.getHeight() * 0.55f);
+        const float rad = face.getHeight() * 1.18f, a0 = -0.78f, a1 = 0.78f;
+        auto ang = [&] (float gr) { const float u = 1.0f - std::pow (jlimit (0.0f, 20.0f, gr) / 20.0f, 0.62f); return a0 + (a1 - a0) * u; };
+        Path arc; arc.addCentredArc (pv.x, pv.y, rad, rad, 0, a0, a1, true);
+        g.setColour (Colour (0xff1b1b1b)); g.strokePath (arc, PathStrokeType (1.3f));
+        Path red; red.addCentredArc (pv.x, pv.y, rad + 3, rad + 3, 0, ang (6.0f), ang (20.0f), true);
+        g.setColour (Colour (0xffc0392b)); g.strokePath (red, PathStrokeType (3.0f));
+        g.setFont (ui (jmax (8.0f, face.getHeight() * 0.13f), W::Bold));
+        for (float gr : { 0.0f, 1.0f, 2.0f, 3.0f, 4.0f, 6.0f, 8.0f, 10.0f, 15.0f, 20.0f })
+        {
+            const float a = ang (gr); const bool major = gr == 0 || gr == 2 || gr == 4 || gr == 6 || gr == 10 || gr == 20;
+            g.setColour (gr >= 6 ? Colour (0xffb02a1e) : Colour (0xff1b1b1b));
+            g.drawLine (Line<float> (pv.getPointOnCircumference (rad, a), pv.getPointOnCircumference (rad + (major ? 8.0f : 5.0f), a)), major ? 1.4f : 1.0f);
+            if (major) { const auto q = pv.getPointOnCircumference (rad + 16.0f, a); g.drawText (gr == 0 ? "0" : "-" + String ((int) gr), Rectangle<float> (q.x - 14, q.y - 7, 28, 14), Justification::centred, false); }
+        }
+        g.setColour (Colour (0xff1b1b1b)); g.setFont (ui (jmax (8.0f, face.getHeight() * 0.12f), W::Bold, 0.1f));
+        g.drawText ("GAIN REDUCTION  dB", face.withTrimmedTop (face.getHeight() * 0.52f).withHeight (face.getHeight() * 0.2f), Justification::centred, false);
+        g.setFont (ui (jmax (9.0f, face.getHeight() * 0.16f), W::Bold, 0.05f));
+        g.drawText ("VU", face.withTrimmedTop (face.getHeight() * 0.7f), Justification::centred, false);
+        // needle
+        g.saveState(); g.reduceClipRegion (face.toNearestInt());
+        const float a = ang (shown);
+        g.setColour (Colours::black.withAlpha (0.18f)); g.drawLine (Line<float> (pv.translated (2, 2), pv.getPointOnCircumference (rad + 6, a).translated (2, 2)), 1.6f);
+        g.setColour (Colour (0xff111111)); g.drawLine (Line<float> (pv, pv.getPointOnCircumference (rad + 6, a)), 1.4f);
+        g.restoreState();
+        // glass
+        g.setGradientFill (ColourGradient (Colours::white.withAlpha (0.28f * jmax (0.3f, th.gradient)), face.getX(), face.getY(), Colours::transparentWhite, face.getX(), face.getCentreY(), false));
+        g.fillRoundedRectangle (face.withHeight (face.getHeight() * 0.5f), 3);
+        g.setColour (Colours::black.withAlpha (0.5f)); g.drawRoundedRectangle (face, 3, 1.0f);
+    }
+private:
+    const Theme& th; float shown = 0;
+};
+
 class SetupPanel : public Component
 {
 public:
@@ -1338,6 +1396,7 @@ public:
         }
 
         // drawer (scrolls when longer than the window)
+        drawer.addAndMakeVisible (vu);
         content.addAndMakeVisible (drawerView); drawerView.setViewedComponent (&drawer, false); drawerView.setScrollBarsShown (true, false);
         drawer.ed = this;
         auto dk = [this] (const String& t) { auto k = std::make_unique<LarcKey> (theme, t); drawer.addAndMakeVisible (*k); return k; };
@@ -1492,6 +1551,25 @@ private:
         for (auto& s : sections)
         {
             auto b = s.area.toFloat().expanded (8, 6).withTrimmedTop (-10);
+            if (s.title != "SYSTEM")
+            {   // the channel strip: a blue-grey console panel with screws
+                const auto sp = theme.stripPanel;
+                g.setColour (Colours::black.withAlpha (theme.shadow())); g.fillRoundedRectangle (b.translated (1.5f * theme.d3(), 3.0f * theme.d3()), 5);
+                g.setGradientFill (ColourGradient (theme.hi (sp, 0.6f), b.getX(), b.getY(), theme.lo (sp, 0.8f), b.getX(), b.getBottom(), false));
+                g.fillRoundedRectangle (b, 5);
+                g.setColour (Colours::white.withAlpha (0.025f));
+                for (float yy = b.getY() + 2; yy < b.getBottom(); yy += 3) g.drawHorizontalLine ((int) yy, b.getX() + 2, b.getRight() - 2);
+                g.setColour (Colours::white.withAlpha (0.18f)); g.drawRoundedRectangle (b, 5, 1.0f);
+                for (auto c : { b.getTopLeft().translated (9, 9), b.getTopRight().translated (-9, 9), b.getBottomLeft().translated (9, -9), b.getBottomRight().translated (-9, -9) })
+                {
+                    const auto sr = Rectangle<float> (9, 9).withCentre (c);
+                    g.setGradientFill (ColourGradient (Colour (0xffe2e4e6), sr.getX(), sr.getY(), Colour (0xff6d7277), sr.getRight(), sr.getBottom(), false)); g.fillEllipse (sr);
+                    g.setColour (Colours::black.withAlpha (0.55f)); g.drawLine (sr.getX() + 2, sr.getCentreY(), sr.getRight() - 2, sr.getCentreY(), 1.2f);
+                }
+                const auto f = ui (jmax (10.0f, theme.knobPt * 1.0f), W::Bold, 0.18f);
+                drawLegend (g, s.title, Rectangle<float> (b.getX() + 20, b.getY() + 3, b.getWidth() - 40, 16), f, Colours::white.withAlpha (0.92f), Justification::centredLeft);
+                continue;
+            }
             g.setColour (theme.panelText.withAlpha (0.25f)); g.drawRoundedRectangle (b, 4, 1.0f);
             const auto f = ui (jmax (9.0f, theme.knobPt * 0.85f), W::Bold, 0.14f); const float tw = textW (f, s.title) + 12;
             auto tr = Rectangle<float> (b.getX() + 10, b.getY() - 7, tw, 14);
@@ -1648,6 +1726,7 @@ private:
         y += 2 * (116 + kTxt); sec ("EQUALISER", top);
         top = y;
         y = flowKeys ({ cpOnKey.get(), satKey.get(), duckKey.get() }, x0, wAll, y, kh, gap);
+        vu.setBounds (x0 + (wAll - 240) / 2, y + 4, 240, 128); y += 140;
         for (int i = 0; i < 7; ++i) cpKnob[i]->setBounds (x0 + (i % 3) * aw, y + (i / 3) * (80 + kTxt), aw, 78 + kTxt);
         y += 3 * (80 + kTxt); sec ("COMPRESSOR", top);
         drawer.setSize (kDrawer - 10, y + 10);
@@ -1912,6 +1991,7 @@ private:
         }
         machAKey->setLit (config() != 0 && machine == 0); machBKey->setLit (config() != 0 && machine == 1);
         muteKey->setLit (proc.mute.load()); setupKey->setLit (setupOpen); panelKey->setLit (drawerOpen);
+        if (drawerOpen) vu.setGr (proc.compGr.load(), 1000.0f / 30.0f);
         if (drawerOpen)
         {
             for (auto* k : { ironKey.get(), anOnKey.get(), eqOnKey.get(), cpOnKey.get(), satKey.get(), duckKey.get() }) k->sync();
@@ -1988,6 +2068,7 @@ private:
     std::vector<std::unique_ptr<LarcFader>> faders;
     Viewport drawerView; Drawer drawer;
     ComboBox engineBox; int engineLabelY = 0;
+    VuMeter vu { theme };
     std::unique_ptr<ParamKey> ironKey, anOnKey, eqOnKey, cpOnKey, satKey, duckKey;
     std::unique_ptr<ScaleKnob> sysKnob[4], anKnob[5], eqKnob2[2], cpKnob[7];
     std::unique_ptr<DualKnob> eqKnob[4];
