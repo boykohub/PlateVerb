@@ -236,9 +236,9 @@ public:
         g.fillRoundedRectangle (glass, 3);
         auto meters = glass.removeFromLeft (34).reduced (6, 8);
         auto txt = glass.reduced (8, 10);
-        const float h = jmin (txt.getHeight() * 0.34f, 21.0f);
+        const float h = jmin (txt.getHeight() * 0.36f, txt.getWidth() / (18.0f * 0.9f));
         auto r1 = txt.removeFromTop (txt.getHeight() * 0.5f), r2 = txt;
-        segLine (g, line1, r1, h, 16); segLine (g, line2, r2, h, 16);
+        segLine (g, line1, r1, h, 18); segLine (g, line2, r2, h, 18);
         paintMeters (g, meters);
         g.setGradientFill (ColourGradient (Colours::white.withAlpha (0.06f), r.getX(), r.getY(), Colours::transparentWhite, r.getX(), r.getY() + r.getHeight() * 0.45f, false));
         g.fillRoundedRectangle (r.reduced (3.0f).withHeight (r.getHeight() * 0.45f), 3);
@@ -291,27 +291,307 @@ public:
     }
 };
 
+// ============================================================================ knobs with printed scales
+// All knobs turn 270 degrees, centred: the middle of the range points straight up (0 dB on a gain knob).
+static constexpr float kSweep = MathConstants<float>::pi * 0.75f;      // +-135 degrees from 12 o'clock
+static float knobAngle (float norm) { return -kSweep + 2.0f * kSweep * jlimit (0.0f, 1.0f, norm); }
+
+struct ScaleMark { float value; const char* text; };
+
+// numbers printed around a circle at the given values of a parameter
+static void drawScale (Graphics& g, RangedAudioParameter* p, Point<float> c, float radius, const std::vector<ScaleMark>& marks, Colour col, float fontH)
+{
+    g.setFont (ui (fontH, W::Semibold));
+    for (auto& m : marks)
+    {
+        const float a = knobAngle (p->convertTo0to1 (m.value));
+        const auto pt = c.getPointOnCircumference (radius, a);
+        g.setColour (col.withAlpha (0.55f));
+        g.drawLine (Line<float> (c.getPointOnCircumference (radius - fontH * 0.95f, a), c.getPointOnCircumference (radius - fontH * 0.55f, a)), 1.0f);
+        g.setColour (col);
+        g.drawText (m.text, Rectangle<float> (40, fontH + 2).withCentre (pt), Justification::centred, false);
+    }
+}
+
+// a moulded knob: shadow, skirt, cap with a pointer line
+static void drawKnobBody (Graphics& g, Rectangle<float> k, float angle, Colour body, Colour pointer, bool skirt)
+{
+    const float d = k.getWidth();
+    g.setColour (Colours::black.withAlpha (0.5f)); g.fillEllipse (k.translated (1.5f, 2.5f));
+    if (skirt)
+    {
+        g.setGradientFill (ColourGradient (body.brighter (0.35f), k.getX(), k.getY(), body.darker (0.6f), k.getRight(), k.getBottom(), false));
+        g.fillEllipse (k);
+        // fluting on the skirt edge
+        g.setColour (Colours::black.withAlpha (0.25f));
+        for (int i = 0; i < 36; ++i) { const float a = i * MathConstants<float>::twoPi / 36.0f; g.drawLine (Line<float> (k.getCentre().getPointOnCircumference (d * 0.43f, a), k.getCentre().getPointOnCircumference (d * 0.5f, a)), 0.8f); }
+        k = k.reduced (d * 0.1f);
+    }
+    g.setGradientFill (ColourGradient (body.brighter (0.25f), k.getCentreX(), k.getY(), body.darker (0.35f), k.getCentreX(), k.getBottom(), false));
+    g.fillEllipse (k);
+    g.setGradientFill (ColourGradient (Colours::white.withAlpha (0.22f), k.getCentreX(), k.getY(), Colours::transparentWhite, k.getCentreX(), k.getCentreY(), false));
+    g.fillEllipse (k.reduced (1.5f));
+    g.setColour (Colours::black.withAlpha (0.4f)); g.drawEllipse (k, 0.8f);
+    g.setColour (pointer);
+    const auto c = k.getCentre(); const float r = k.getWidth() * 0.5f;
+    g.drawLine (Line<float> (c.getPointOnCircumference (r * 0.25f, angle), c.getPointOnCircumference (r * 0.95f, angle)), 2.2f);
+}
+
+class ParamWatcher : private AudioProcessorValueTreeState::Listener, private AsyncUpdater
+{
+public:
+    ParamWatcher (AudioProcessorValueTreeState& s, StringArray ids, Component& c) : st (s), idList (ids), comp (c) { for (auto& i : idList) st.addParameterListener (i, this); }
+    ~ParamWatcher() override { for (auto& i : idList) st.removeParameterListener (i, this); }
+private:
+    void parameterChanged (const String&, float) override { triggerAsyncUpdate(); }
+    void handleAsyncUpdate() override { comp.repaint(); }
+    AudioProcessorValueTreeState& st; StringArray idList; Component& comp;
+};
+
+// one knob with its scale numbers, title below; drag up/down, double-click = default, wheel
+class ScaleKnob : public Component
+{
+public:
+    ScaleKnob (AudioProcessorValueTreeState& s, const String& id, const String& title, std::vector<ScaleMark> m, Colour cap = Colour (0xff3a3c40))
+        : st (s), param (s.getParameter (id)), name (title), marks (std::move (m)), capColour (cap), watch (s, { id }, *this) {}
+    std::function<void (const String&, const String&)> onShow;      // (name, value text) for the main display
+    void paint (Graphics& g) override
+    {
+        auto r = getLocalBounds().toFloat();
+        auto lab = r.removeFromBottom (14);
+        const float d = jmin (r.getWidth(), r.getHeight()) * 0.52f;
+        const auto c = r.getCentre().translated (0, 3);
+        drawScale (g, param, c, d * 0.5f + 11.0f, marks, larc::legend.withAlpha (0.85f), 8.5f);
+        drawKnobBody (g, Rectangle<float> (d, d).withCentre (c), knobAngle (param->getValue()), capColour, larc::legend, true);
+        drawLegend (g, name, lab, ui (9.5f, W::Bold, 0.08f));
+    }
+    void mouseDown (const MouseEvent&) override { start = param->getValue(); param->beginChangeGesture(); show(); }
+    void mouseDrag (const MouseEvent& e) override
+    {
+        const float fine = e.mods.isShiftDown() || e.mods.isAltDown() ? 0.1f : 1.0f;
+        param->setValueNotifyingHost (jlimit (0.0f, 1.0f, start - (float) e.getDistanceFromDragStartY() * 0.005f * fine)); show();
+    }
+    void mouseUp (const MouseEvent&) override { param->endChangeGesture(); }
+    void mouseDoubleClick (const MouseEvent&) override { param->beginChangeGesture(); param->setValueNotifyingHost (param->getDefaultValue()); param->endChangeGesture(); show(); }
+    void mouseWheelMove (const MouseEvent&, const MouseWheelDetails& w) override
+    {
+        param->beginChangeGesture(); param->setValueNotifyingHost (jlimit (0.0f, 1.0f, param->getValue() + w.deltaY * 0.03f)); param->endChangeGesture(); show();
+    }
+private:
+    void show() { if (onShow) onShow (name, param->getCurrentValueAsText()); }
+    AudioProcessorValueTreeState& st; RangedAudioParameter* param; String name; std::vector<ScaleMark> marks; Colour capColour; float start = 0;
+    ParamWatcher watch;
+};
+
+// concentric EQ knob (console style): outer skirt = frequency, inner cap = gain.
+// White numbers outside = frequency; red numbers on the inner ring = gain.
+class DualKnob : public Component
+{
+public:
+    DualKnob (AudioProcessorValueTreeState& s, const String& freqId, const String& gainId, const String& title, std::vector<ScaleMark> fMarks)
+        : st (s), fP (s.getParameter (freqId)), gP (s.getParameter (gainId)), name (title), fm (std::move (fMarks)), watch (s, { freqId, gainId }, *this) {}
+    std::function<void (const String&, const String&)> onShow;
+    void paint (Graphics& g) override
+    {
+        auto r = getLocalBounds().toFloat();
+        auto lab = r.removeFromBottom (14);
+        geometry (r);
+        static const std::vector<ScaleMark> gm { { -15, "-15" }, { -10, "-10" }, { 0, "0" }, { 10, "+10" }, { 15, "+15" } };
+        const Colour red (0xffff6a4a);
+        g.setColour (red.withAlpha (0.6f));
+        for (float db = -15; db <= 15; db += 5)
+        {
+            const float a = knobAngle (gP->convertTo0to1 (db));
+            g.drawLine (Line<float> (c.getPointOnCircumference (rOuter + 2.0f, a), c.getPointOnCircumference (rOuter + 5.5f, a)), 1.2f);
+        }
+        drawScale (g, fP, c, rOuter + 27.0f, fm, larc::legend.withAlpha (0.9f), 8.5f);
+        drawScale (g, gP, c, rOuter + 12.5f, gm, red, 7.0f);
+        drawKnobBody (g, Rectangle<float> (rOuter * 2, rOuter * 2).withCentre (c), knobAngle (fP->getValue()), Colour (0xff5a6470), larc::legend, true);
+        drawKnobBody (g, Rectangle<float> (rInner * 2, rInner * 2).withCentre (c), knobAngle (gP->getValue()), Colour (0xff8a2a22), Colours::white, false);
+        drawLegend (g, name, lab, ui (9.5f, W::Bold, 0.08f));
+    }
+    void mouseDown (const MouseEvent& e) override
+    {
+        geometry (getLocalBounds().toFloat().withTrimmedBottom (14));
+        active = e.position.getDistanceFrom (c) <= rInner + 1.0f ? gP : fP;
+        start = active->getValue(); active->beginChangeGesture(); show();
+    }
+    void mouseDrag (const MouseEvent& e) override
+    {
+        const float fine = e.mods.isShiftDown() || e.mods.isAltDown() ? 0.1f : 1.0f;
+        active->setValueNotifyingHost (jlimit (0.0f, 1.0f, start - (float) e.getDistanceFromDragStartY() * 0.005f * fine)); show();
+    }
+    void mouseUp (const MouseEvent&) override { if (active) active->endChangeGesture(); }
+    void mouseDoubleClick (const MouseEvent& e) override
+    {
+        geometry (getLocalBounds().toFloat().withTrimmedBottom (14));
+        auto* p = e.position.getDistanceFrom (c) <= rInner + 1.0f ? gP : fP;
+        p->beginChangeGesture(); p->setValueNotifyingHost (p->getDefaultValue()); p->endChangeGesture(); active = p; show();
+    }
+    void mouseWheelMove (const MouseEvent& e, const MouseWheelDetails& w) override
+    {
+        geometry (getLocalBounds().toFloat().withTrimmedBottom (14));
+        auto* p = e.position.getDistanceFrom (c) <= rInner + 1.0f ? gP : fP;
+        p->beginChangeGesture(); p->setValueNotifyingHost (jlimit (0.0f, 1.0f, p->getValue() + w.deltaY * 0.03f)); p->endChangeGesture(); active = p; show();
+    }
+private:
+    bool hitTest (int x, int y) override { geometry (getLocalBounds().toFloat().withTrimmedBottom (14)); return Point<float> ((float) x, (float) y).getDistanceFrom (c) < rOuter + 6.0f || y > getHeight() - 14; }
+    void geometry (Rectangle<float> r) { c = r.getCentre().translated (0, 4); rOuter = jmin ((r.getWidth() - 28.0f) * 0.22f, r.getHeight() * 0.22f); rInner = rOuter * 0.58f; }
+    void show() { if (onShow && active) onShow (name + (active == gP ? " GAIN" : " FREQ"), active->getCurrentValueAsText()); }
+    AudioProcessorValueTreeState& st; RangedAudioParameter *fP, *gP, *active = nullptr; String name; std::vector<ScaleMark> fm;
+    Point<float> c; float rOuter = 20, rInner = 11, start = 0;
+    ParamWatcher watch;
+};
+
+// a key bound to an on/off parameter: lit when on, text centred
+class ParamKey : public LarcKey
+{
+public:
+    ParamKey (AudioProcessorValueTreeState& s, const String& id, const String& t) : LarcKey (t, false, true), param (s.getParameter (id))
+    {
+        onClick = [this] { param->beginChangeGesture(); param->setValueNotifyingHost (param->getValue() > 0.5f ? 0.0f : 1.0f); param->endChangeGesture(); };
+    }
+    void sync() { setLit (param->getValue() > 0.5f); }
+private:
+    RangedAudioParameter* param;
+};
+
+// ============================================================================ decay-time graph (RT against frequency) for the selected machine
+// Dashed: the program's own decay. Solid: your curve. Click to add a point, drag to move it, double-click to remove it.
+class DecayGraph : public Component
+{
+public:
+    explicit DecayGraph (Flexiverb480Processor& p) : proc (p) {}
+    std::function<int()> machine;
+    std::function<void (const String&, const String&)> onShow;
+    void paint (Graphics& g) override
+    {
+        auto r = getLocalBounds().toFloat();
+        g.setColour (Colours::black.withAlpha (0.65f)); g.fillRoundedRectangle (r, 5);
+        auto glass = r.reduced (3.0f);
+        g.setGradientFill (ColourGradient (Colour (0xff120605), glass.getX(), glass.getY(), Colour (0xff060303), glass.getX(), glass.getBottom(), false));
+        g.fillRoundedRectangle (glass, 3);
+        plot = glass.reduced (34, 14).withTrimmedRight (-20).withTrimmedBottom (6);
+        const int m = machine ? machine() : 0;
+        if (! proc.hasDecayCurve (m))
+        {
+            g.setColour (larc::led.withAlpha (0.7f)); g.setFont (ui (12.0f, W::Semibold));
+            g.drawText ("This program has no reverb decay to shape", glass, Justification::centred, false);
+            return;
+        }
+        rtMain = jmax (0.05f, proc.mainRt (m));
+        yLo = jmax (0.02f, rtMain / 10.0f); yHi = rtMain * 6.0f;
+        // grid
+        g.setFont (ui (8.0f, W::Medium));
+        for (float f : { 50.0f, 100.0f, 200.0f, 500.0f, 1000.0f, 2000.0f, 5000.0f, 10000.0f })
+        {
+            const float x = xOf (f); g.setColour (larc::led.withAlpha (0.10f)); g.drawVerticalLine ((int) x, plot.getY(), plot.getBottom());
+            g.setColour (larc::led.withAlpha (0.55f)); g.drawText (f >= 1000 ? String (f / 1000, 0) + "k" : String ((int) f), Rectangle<float> (x - 15, plot.getBottom() + 1, 30, 10), Justification::centred, false);
+        }
+        for (float t : { 0.05f, 0.1f, 0.2f, 0.5f, 1.0f, 2.0f, 5.0f, 10.0f, 20.0f, 50.0f })
+        {
+            if (t < yLo || t > yHi) continue;
+            const float y = yOf (t); g.setColour (larc::led.withAlpha (0.10f)); g.drawHorizontalLine ((int) y, plot.getX(), plot.getRight());
+            g.setColour (larc::led.withAlpha (0.55f)); g.drawText (String (t, t < 1 ? 2 : 0) + " s", Rectangle<float> (plot.getX() - 34, y - 5, 31, 10), Justification::centredRight, false);
+        }
+        // the program's own decay (dashed)
+        {
+            Path pp; bool first = true;
+            for (int i = 0; i <= 120; ++i) { const float f = 20.0f * std::pow (1000.0f, i / 120.0f); const Point<float> pt (xOf (f), yOf (rtMain * proc.programDecayMul (m, f))); if (first) pp.startNewSubPath (pt); else pp.lineTo (pt); first = false; }
+            Path dashed; const float dl[] = { 4.0f, 3.0f }; PathStrokeType (1.0f).createDashedStroke (dashed, pp, dl, 2);
+            g.setColour (larc::led.withAlpha (proc.curveOn[m] ? 0.35f : 0.8f)); g.fillPath (dashed);
+        }
+        // your curve
+        const auto& pts = proc.curvePts[m];
+        if (proc.curveOn[m] && ! pts.empty())
+        {
+            Path pc;
+            for (int i = 0; i <= 160; ++i) { const float f = 20.0f * std::pow (1000.0f, i / 160.0f); const Point<float> pt (xOf (f), yOf (rtMain * Flexiverb480Processor::curveEval (pts, f))); if (i == 0) pc.startNewSubPath (pt); else pc.lineTo (pt); }
+            g.setColour (larc::led.withAlpha (0.25f)); g.strokePath (pc, PathStrokeType (4.0f));
+            g.setColour (larc::led); g.strokePath (pc, PathStrokeType (1.8f));
+            for (size_t i = 0; i < pts.size(); ++i)
+            {
+                const Point<float> pt (xOf (pts[i].f), yOf (rtMain * pts[i].m));
+                g.setColour (Colours::black); g.fillEllipse (Rectangle<float> (11, 11).withCentre (pt));
+                g.setColour ((int) i == drag || (int) i == hover ? Colours::white : larc::led); g.drawEllipse (Rectangle<float> (9, 9).withCentre (pt), 2.0f);
+            }
+        }
+        g.setColour (larc::led.withAlpha (0.7f)); g.setFont (ui (9.0f, W::Bold, 0.06f));
+        g.drawText ("MACHINE " + String (m == 0 ? "A" : "B") + (proc.curveOn[m] ? "   YOUR CURVE" : "   PROGRAM DECAY  -  CLICK TO ADD A POINT"), glass.reduced (8, 3).withHeight (12), Justification::topLeft, false);
+    }
+    void mouseMove (const MouseEvent& e) override { const int h = hit (e.position); if (h != hover) { hover = h; repaint(); } }
+    void mouseExit (const MouseEvent&) override { hover = -1; repaint(); }
+    void mouseDown (const MouseEvent& e) override
+    {
+        const int m = machine ? machine() : 0;
+        if (! proc.hasDecayCurve (m) || ! plot.contains (e.position.x, e.position.y) && hit (e.position) < 0) return;
+        auto pts = proc.curvePts[m];
+        if (! proc.curveOn[m]) pts = proc.programCurve (m);           // start from the program's own shape
+        drag = hit (e.position);
+        if (drag < 0 || ! proc.curveOn[m])
+        {
+            pts.push_back ({ fOf (e.position.x), jlimit (0.02f, 20.0f, tOf (e.position.y) / rtMain) });
+            std::sort (pts.begin(), pts.end(), [] (auto& a, auto& b) { return a.f < b.f; });
+            proc.setCurve (m, pts, true);
+            drag = hit (e.position);
+        }
+        else proc.setCurve (m, pts, true);
+        show(); repaint();
+    }
+    void mouseDrag (const MouseEvent& e) override
+    {
+        const int m = machine ? machine() : 0;
+        if (drag < 0 || drag >= (int) proc.curvePts[m].size()) return;
+        auto pts = proc.curvePts[m];
+        const float lo = drag > 0 ? pts[(size_t) drag - 1].f * 1.05f : 20.0f, hi = drag + 1 < (int) pts.size() ? pts[(size_t) drag + 1].f / 1.05f : 20000.0f;
+        pts[(size_t) drag] = { jlimit (lo, hi, fOf (e.position.x)), jlimit (0.02f, 20.0f, tOf (jlimit (plot.getY(), plot.getBottom(), e.position.y)) / rtMain) };
+        proc.setCurve (m, pts, true); show(); repaint();
+    }
+    void mouseUp (const MouseEvent&) override { drag = -1; repaint(); }
+    void mouseDoubleClick (const MouseEvent& e) override
+    {
+        const int m = machine ? machine() : 0; const int h = hit (e.position);
+        if (h < 0 || ! proc.curveOn[m]) return;
+        auto pts = proc.curvePts[m]; pts.erase (pts.begin() + h);
+        proc.setCurve (m, pts, ! pts.empty()); drag = hover = -1; repaint();
+    }
+private:
+    float xOf (float f) const { return plot.getX() + plot.getWidth() * std::log (f / 20.0f) / std::log (1000.0f); }
+    float fOf (float x) const { return jlimit (20.0f, 20000.0f, 20.0f * std::pow (1000.0f, (x - plot.getX()) / plot.getWidth())); }
+    float yOf (float t) const { return plot.getBottom() - plot.getHeight() * std::log (jlimit (yLo, yHi, t) / yLo) / std::log (yHi / yLo); }
+    float tOf (float y) const { return yLo * std::pow (yHi / yLo, (plot.getBottom() - y) / plot.getHeight()); }
+    int hit (Point<float> p) const
+    {
+        const int m = machine ? machine() : 0; if (! proc.curveOn[m]) return -1;
+        const auto& pts = proc.curvePts[m];
+        for (size_t i = 0; i < pts.size(); ++i) if (p.getDistanceFrom ({ xOf (pts[i].f), yOf (rtMain * pts[i].m) }) < 8.0f) return (int) i;
+        return -1;
+    }
+    void show()
+    {
+        const int m = machine ? machine() : 0; const auto& pts = proc.curvePts[m];
+        if (onShow && drag >= 0 && drag < (int) pts.size())
+        {
+            const float f = pts[(size_t) drag].f, t = rtMain * pts[(size_t) drag].m;
+            onShow ("DECAY " + (f >= 1000 ? String (f / 1000, 2) + " KHZ" : String ((int) f) + " HZ"), String (t, t < 10 ? 2 : 1) + " S");
+        }
+    }
+    Flexiverb480Processor& proc; Rectangle<float> plot; float rtMain = 1, yLo = 0.1f, yHi = 10; int drag = -1, hover = -1;
+};
+
 // ============================================================================ CTRL pages: setup on the sliders (the 480L's control mode)
 struct CtrlSlot { const char* lab; const char* id; const char* name; };
-static constexpr int kCtrlPages = 8;
+static constexpr int kCtrlPages = 4;
 static const CtrlSlot kCtrl[kCtrlPages][6] = {
     { { "CNFG", "config", "Configuration" }, { "OUT", "out", "Output Level" }, { "HW", "hwOn", "480L Hardware" },
       { "IN", "hwIn", "Input Type" }, { "OUTT", "hwOut", "Output Type" }, { "NOIS", "hwNoise", "Converter Noise" } },
     { { "XFIN", "hwXfIn", "Input Transformers" }, { "XFOU", "hwXfOut", "Output Transformers" }, { "IRON", "trOn", "Iron" },
       { "MODL", "trModel", "Iron Model" }, { "FREQ", "trFreq", "Iron Frequency" }, { "AMT", "trAmt", "Iron Amount" } },
-    { { "EQ", "eqOn", "EQ In" }, { "LOW", "eqG0", "EQ Low Gain" }, { "LMID", "eqG1", "EQ Low Mid Gain" },
-      { "HMID", "eqG2", "EQ High Mid Gain" }, { "HIGH", "eqG3", "EQ High Gain" }, {} },
-    { {}, { "LOF", "eqF0", "EQ Low Freq" }, { "LMF", "eqF1", "EQ Low Mid Freq" },
-      { "HMF", "eqF2", "EQ High Mid Freq" }, { "HIF", "eqF3", "EQ High Freq" }, {} },
-    { { "COMP", "cpOn", "Compressor In" }, { "TYPE", "cpType", "Comp Type" }, { "THR", "cpThr", "Threshold" },
-      { "RAT", "cpRatio", "Ratio" }, { "ATK", "cpAtk", "Attack" }, { "REL", "cpRel", "Release" } },
-    { { "GAIN", "cpMakeup", "Makeup Gain" }, { "MIX", "cpMix", "Comp Mix" }, { "SAT", "cpColor", "Colour" },
-      { "DUCK", "cpDuck", "Ducking" }, {}, {} },
-    { { "DLY", "dlOn", "Delay In" }, { "SYNC", "dlSync", "Tempo Sync" }, { "TIML", "dlTimeL", "Delay Left" },
+    { { "DLY", "dlOn", "Delay On" }, { "SYNC", "dlSync", "Tempo Sync" }, { "TIML", "dlTimeL", "Delay Left" },
       { "TIMR", "dlTimeR", "Delay Right" }, { "FBK", "dlFb", "Feedback" }, { "MIX", "dlMix", "Delay Mix" } },
     { { "PING", "dlPing", "Ping-Pong" }, { "LOW", "dlLow", "Delay Low" }, { "HIGH", "dlHigh", "Delay High" }, {}, {}, {} },
 };
-static const char* kCtrlPageName[kCtrlPages] = { "SETUP", "IRON", "EQ GAIN", "EQ FREQ", "COMPRESSOR", "COMP 2", "DELAY", "DELAY 2" };
+static const char* kCtrlPageName[kCtrlPages] = { "SETUP", "IRON", "DELAY", "DELAY 2" };
 
 struct FlexLnf : public LookAndFeel_V4
 {
@@ -322,7 +602,8 @@ struct FlexLnf : public LookAndFeel_V4
 class Flexiverb480Editor : public AudioProcessorEditor, private Timer
 {
 public:
-    static constexpr int kW = 452, kH = 640;
+    static constexpr int kL = 452, kH = 700;          // the remote
+    static constexpr int kTab = 24, kPanel = 440;     // drawer tab and drawer panel
     static constexpr int kBankGroups = (l480::kNumBanks + 9) / 10;
 
     explicit Flexiverb480Editor (Flexiverb480Processor& p) : AudioProcessorEditor (p), proc (p)
@@ -355,14 +636,54 @@ public:
             fader[i]->onReset = [this, i] { faderReset (i); };
         }
 
+        // drawer: decay graph, EQ (concentric knobs), compressor
+        drawerOpen = (bool) proc.getUiProperty ("uiDrawer", false);
+        content.addAndMakeVisible (drawer); drawer.ed = this;
+        drawer.addAndMakeVisible (graph);
+        graph.machine = [this] { return machine; };
+        auto shower = [this] (const String& a, const String& b) { showMessage (a, b, 1500); };
+        graph.onShow = shower;
+        curveKey = std::make_unique<LarcKey> ("CURVE ON", false, true); drawer.addAndMakeVisible (*curveKey);
+        curveKey->onClick = [this]
+        {
+            if (! proc.hasDecayCurve (machine)) return;
+            if (proc.curveOn[machine]) proc.setCurve (machine, proc.curvePts[machine], false);
+            else proc.setCurve (machine, proc.curvePts[machine].empty() ? proc.programCurve (machine) : proc.curvePts[machine], true);
+            graph.repaint();
+        };
+        resetKey = std::make_unique<LarcKey> ("RESET", false, false); drawer.addAndMakeVisible (*resetKey);
+        resetKey->onClick = [this] { proc.setCurve (machine, {}, false); graph.repaint(); };
+        const char* bn[] = { "LOW", "LOW MID", "HIGH MID", "HIGH" };
+        const std::vector<ScaleMark> fm[4] = {
+            { { 20, "20" }, { 50, "50" }, { 100, "100" }, { 200, "200" }, { 500, "500" } },
+            { { 100, "100" }, { 200, "200" }, { 500, "500" }, { 1000, "1k" }, { 2000, "2k" } },
+            { { 800, ".8k" }, { 1500, "1.5k" }, { 3000, "3k" }, { 5000, "5k" }, { 8000, "8k" } },
+            { { 2000, "2k" }, { 4000, "4k" }, { 8000, "8k" }, { 12000, "12k" }, { 20000, "20k" } } };
+        for (int b = 0; b < 4; ++b)
+        {
+            eqKnob[b] = std::make_unique<DualKnob> (proc.apvts, "eqF" + String (b), "eqG" + String (b), bn[b], fm[b]);
+            eqKnob[b]->onShow = shower; drawer.addAndMakeVisible (*eqKnob[b]);
+        }
+        auto knob = [this, shower] (const String& id, const String& t, std::vector<ScaleMark> m)
+        { auto k = std::make_unique<ScaleKnob> (proc.apvts, id, t, std::move (m)); k->onShow = shower; drawer.addAndMakeVisible (*k); return k; };
+        cpKnob[0] = knob ("cpType", "TYPE", { { 0, "VCA" }, { 1, "FET" }, { 2, "OPTO" } });
+        cpKnob[1] = knob ("cpThr", "THRESHOLD", { { -60, "-60" }, { -48, "-48" }, { -36, "-36" }, { -24, "-24" }, { -12, "-12" }, { 0, "0" } });
+        cpKnob[2] = knob ("cpRatio", "RATIO", { { 1, "1" }, { 2, "2" }, { 4, "4" }, { 8, "8" }, { 20, "20" } });
+        cpKnob[3] = knob ("cpAtk", "ATTACK", { { 0.05f, ".05" }, { 1, "1" }, { 10, "10" }, { 100, "100" }, { 300, "300" } });
+        cpKnob[4] = knob ("cpRel", "RELEASE", { { 20, "20" }, { 100, "100" }, { 500, "500" }, { 2000, "2k" }, { 5000, "5k" } });
+        cpKnob[5] = knob ("cpMakeup", "MAKEUP", { { 0, "0" }, { 6, "6" }, { 12, "12" }, { 18, "18" }, { 24, "24" } });
+        cpKnob[6] = knob ("cpMix", "MIX", { { 0, "0" }, { 0.25f, "25" }, { 0.5f, "50" }, { 0.75f, "75" }, { 1, "100" } });
+        auto pk = [this] (const String& id, const String& t) { auto k = std::make_unique<ParamKey> (proc.apvts, id, t); drawer.addAndMakeVisible (*k); return k; };
+        eqOnKey = pk ("eqOn", "EQ ON"); cpOnKey = pk ("cpOn", "COMP ON"); satKey = pk ("cpColor", "SATURATE"); duckKey = pk ("cpDuck", "DUCKING");
+
         lnf.setColour (PopupMenu::backgroundColourId, Colour (0xff1c1d1f)); lnf.setColour (PopupMenu::textColourId, Colour (0xffe8e6e1));
         lnf.setColour (PopupMenu::highlightedBackgroundColourId, larc::led.darker (0.2f)); lnf.setColour (PopupMenu::highlightedTextColourId, Colours::white);
         lnf.setColour (PopupMenu::headerTextColourId, Colour (0xff9a968e));
         lnf.setDefaultSansSerifTypeface (FlexFonts::get().medium);
         setLookAndFeel (&lnf);
-        layout();
-        setResizable (false, false);
-        applySize();
+        layout(); layoutDrawer();
+        setResizable (true, true);
+        applySize (false);
         refreshPage (true);
         updateLeds();
         startTimerHz (30);
@@ -370,13 +691,32 @@ public:
     ~Flexiverb480Editor() override { stopTimer(); setLookAndFeel (nullptr); }
 
     void paint (Graphics& g) override { g.fillAll (larc::cheek); }
-    void resized() override {}
+    // the whole window scales: the content is laid out at 1x and scaled to the window, keeping its proportions
+    void resized() override
+    {
+        if (applying) return;
+        scale = jlimit (0.5f, 3.0f, getWidth() / (float) baseWidth());
+        content.setTransform (AffineTransform::scale (scale));
+        proc.setUiProperty ("uiScale", scale);
+    }
 
     class Content : public Component
     {
     public:
         Flexiverb480Editor* ed = nullptr;
         void paint (Graphics& g) override { if (ed) ed->paintPanel (g); }
+        void mouseDown (const MouseEvent& e) override
+        {
+            if (! ed) return;
+            if (e.mods.isPopupMenu()) ed->showSizeMenu();
+            else if (e.x >= kL && e.x < kL + kTab) ed->toggleDrawer();
+        }
+    };
+    class Drawer : public Component
+    {
+    public:
+        Flexiverb480Editor* ed = nullptr;
+        void paint (Graphics& g) override { if (ed) ed->paintDrawer (g); }
         void mouseDown (const MouseEvent& e) override { if (ed && e.mods.isPopupMenu()) ed->showSizeMenu(); }
     };
 
@@ -384,7 +724,7 @@ private:
     // ---------------------------------------------------------------- panel
     void paintPanel (Graphics& g)
     {
-        auto r = Rectangle<float> (0, 0, (float) kW, (float) kH);
+        auto r = Rectangle<float> (0, 0, (float) kL, (float) kH);
         const float sw = 14.0f;
         for (auto sr : { r.withWidth (sw), r.withLeft (r.getRight() - sw) })
         {
@@ -421,14 +761,44 @@ private:
         drawLegend (g, "flexiverb", Rectangle<float> (x, np.getY(), w1 + 2, 24), f1, Justification::centredLeft);
         drawLegend (g, " 480", Rectangle<float> (x + w1, np.getY(), w2 + 4, 24), f2, Justification::centredLeft, larc::legend.withAlpha (0.6f));
         drawLegend (g, configLegend(), np.withTrimmedTop (26), ui (8.5f, W::Bold, 0.14f), Justification::centredTop, larc::legend.withAlpha (0.55f));
+        // drawer tab
+        auto tab = Rectangle<float> ((float) kL, 0, (float) kTab, (float) kH);
+        g.setGradientFill (ColourGradient (larc::cheek.brighter (0.3f), tab.getX(), 0, larc::cheek.darker (0.3f), tab.getRight(), 0, false));
+        g.fillRect (tab);
+        g.setColour (Colours::black.withAlpha (0.6f)); g.drawVerticalLine (kL, 0, (float) kH);
+        {
+            Graphics::ScopedSaveState ss (g);
+            g.addTransform (AffineTransform::rotation (-MathConstants<float>::halfPi, tab.getCentreX(), tab.getCentreY()));
+            auto t = Rectangle<float> (260, 16).withCentre (tab.getCentre());
+            g.setColour (drawerOpen ? larc::led : larc::legend.withAlpha (0.85f)); g.setFont (ui (10.0f, W::Bold, 0.18f));
+            g.drawText (drawerOpen ? "CLOSE   EQ  -  COMP  -  DECAY" : "OPEN   EQ  -  COMP  -  DECAY", t, Justification::centred, false);
+        }
+    }
+    void paintDrawer (Graphics& g)
+    {
+        auto r = drawer.getLocalBounds().toFloat();
+        g.setGradientFill (ColourGradient (larc::panel.brighter (0.12f), 0, 0, larc::panel.darker (0.25f), 0, r.getBottom(), false));
+        g.fillRect (r);
+        auto sr = r.withLeft (r.getRight() - 14);
+        g.setGradientFill (ColourGradient (larc::cheek.brighter (0.25f), sr.getX(), 0, larc::cheek.darker (0.4f), sr.getRight(), 0, false)); g.fillRect (sr);
+        auto title = [&g] (Rectangle<int> a, const String& t)
+        {
+            auto b = a.toFloat().expanded (8, 6).withTrimmedTop (-10);
+            g.setColour (larc::legend.withAlpha (0.28f)); g.drawRoundedRectangle (b, 4, 1.0f);
+            const auto f = ui (9.0f, W::Bold, 0.14f); const float tw = textW (f, t) + 12;
+            auto tr = Rectangle<float> (b.getX() + 10, b.getY() - 6, tw, 12);
+            g.setColour (larc::panel); g.fillRect (tr);
+            drawLegend (g, t, tr, f, Justification::centred, larc::legend.withAlpha (0.85f));
+        };
+        title (decayArea, "DECAY TIME"); title (eqArea, "EQUALISER"); title (compArea, "COMPRESSOR");
     }
 
     void layout()
     {
-        const int x0 = 30, x1 = kW - 30, wAll = x1 - x0;
-        display.setBounds (x0, 26, wAll, 96);
+        const int x0 = 30, x1 = kL - 30, wAll = x1 - x0;
+        display.setBounds (x0, 24, wAll, 128);                 // the larger main display
         const int kh = 34, gap = 6;
-        int y = 150;
+        int y = 180;
         // mode keys 2 x 2 on the left, numeric keys 2 x 5 on the right
         const int mw = 52;
         for (int i = 0; i < 4; ++i) modeKey[i]->setBounds (x0 + (i % 2) * (mw + gap), y + (i / 2) * (kh + gap), mw, kh);
@@ -449,18 +819,54 @@ private:
         for (int i = 0; i < 6; ++i) fader[i]->setBounds (x0 + i * colW, y, colW, fh);
         namePlate = Rectangle<float> ((float) x0, (float) (kH - 54), (float) wAll, 44);
     }
-    void applySize()
+    int baseWidth() const { return kL + kTab + (drawerOpen ? kPanel : 0); }
+    bool applying = false;
+    void applySize (bool keepScale = true)
     {
-        content.setBounds (0, 0, kW, kH);
+        (void) keepScale;
+        applying = true;
+        const int w = baseWidth();
+        content.setBounds (0, 0, w, kH);
+        drawer.setBounds (kL + kTab, 0, kPanel, kH); drawer.setVisible (drawerOpen);
         content.setTransform (AffineTransform::scale (scale));
-        setSize (roundToInt (kW * scale), roundToInt (kH * scale));
+        if (auto* c = getConstrainer()) c->setFixedAspectRatio ((double) w / kH);
+        setResizeLimits (roundToInt (w * 0.5f), roundToInt (kH * 0.5f), roundToInt (w * 3.0f), roundToInt (kH * 3.0f));
+        setSize (roundToInt (w * scale), roundToInt (kH * scale));
+        applying = false;
+        content.repaint();
+    }
+    void toggleDrawer() { drawerOpen = ! drawerOpen; proc.setUiProperty ("uiDrawer", drawerOpen); applySize(); }
+    Rectangle<int> decayArea, eqArea, compArea;
+    void layoutDrawer()
+    {
+        const int x0 = 26, wAll = kPanel - 26 - 30, kw = 96, kh2 = 28;
+        int y = 30;
+        graph.setBounds (x0, y, wAll, 150); y += 156;
+        curveKey->setBounds (x0 + wAll - 2 * kw - 6, y, kw, kh2); resetKey->setBounds (x0 + wAll - kw, y, kw, kh2);
+        decayArea = Rectangle<int> (x0, 30, wAll, y + kh2 - 30);
+        y += kh2 + 34;
+        eqOnKey->setBounds (x0 + wAll - kw, y - 2, kw, kh2);
+        const int eqTop = y; y += 28;
+        const int ew = wAll / 4;
+        for (int b = 0; b < 4; ++b) eqKnob[b]->setBounds (x0 + b * ew - 14, y, ew + 28, 134);     // wider than the column: room for the numbers
+        y += 134; eqArea = Rectangle<int> (x0, eqTop, wAll, y - eqTop);
+        y += 32;
+        const int cTop = y;
+        cpOnKey->setBounds (x0 + wAll - 3 * kw - 12, y - 2, kw, kh2); satKey->setBounds (x0 + wAll - 2 * kw - 6, y - 2, kw, kh2); duckKey->setBounds (x0 + wAll - kw, y - 2, kw, kh2);
+        y += 30;
+        const int cw = wAll / 4;
+        for (int i = 0; i < 4; ++i) cpKnob[i]->setBounds (x0 + i * cw, y, cw, 94);
+        y += 96;
+        for (int i = 4; i < 7; ++i) cpKnob[i]->setBounds (x0 + (i - 4) * cw + cw / 2, y, cw, 94);
+        y += 94; compArea = Rectangle<int> (x0, cTop, wAll, y - cTop);
     }
     void showSizeMenu()
     {
         PopupMenu m; m.addSectionHeader ("Window size");
         const float sizes[] = { 0.75f, 0.9f, 1.0f, 1.25f, 1.5f, 1.75f, 2.0f };
         for (int i = 0; i < 7; ++i) m.addItem (i + 1, String (roundToInt (sizes[i] * 100)) + "%", true, std::abs (sizes[i] - scale) < 0.01f);
-        m.showMenuAsync (PopupMenu::Options(), [this, sizes] (int r) { if (r > 0) { scale = sizes[r - 1]; proc.setUiProperty ("uiScale", scale); applySize(); } });
+        m.addSeparator(); m.addItem (100, "Drag the lower right corner to scale freely", false);
+        m.showMenuAsync (PopupMenu::Options(), [this, sizes] (int r) { if (r > 0 && r < 100) { scale = sizes[r - 1]; proc.setUiProperty ("uiScale", scale); applySize(); } });
     }
 
     // ---------------------------------------------------------------- state
@@ -779,12 +1185,25 @@ private:
             if (fader[i]->animate()) fader[i]->repaint();
         }
         updateLeds();
+        if (drawerOpen)
+        {
+            for (auto* k : { eqOnKey.get(), cpOnKey.get(), satKey.get(), duckKey.get() }) k->sync();
+            curveKey->setLit (proc.curveOn[machine]);
+            const float rt = proc.mainRt (machine);
+            const int sig = proc.programOf (machine) * 31 + machine * 7 + (proc.curveOn[machine] ? 1 : 0) + (int) proc.curvePts[machine].size() * 1000;
+            if (rt != lastRt || sig != lastSig) { lastRt = rt; lastSig = sig; graph.repaint(); }
+        }
     }
+    float lastRt = -1; int lastSig = -1;
 
     // ---------------------------------------------------------------- members
     Flexiverb480Processor& proc;
     FlexLnf lnf;
-    Content content;
+    Content content; Drawer drawer; bool drawerOpen = false;
+    DecayGraph graph { proc };
+    std::unique_ptr<LarcKey> curveKey, resetKey;
+    std::unique_ptr<DualKnob> eqKnob[4]; std::unique_ptr<ScaleKnob> cpKnob[7];
+    std::unique_ptr<ParamKey> eqOnKey, cpOnKey, satKey, duckKey;
     LarcDisplay display; SliderDisplay sliderDisplay;
     std::unique_ptr<LarcKey> modeKey[4], numKey[10], pageKey, ctrlKey, machKey, muteKey, stoKey;
     std::unique_ptr<LarcFader> fader[6];
