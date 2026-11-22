@@ -512,6 +512,12 @@ public:
             }
             return;
         }
+        // double-click on an empty spot always puts a note there, whatever the tool (so an erased note comes straight back)
+        if (e.getNumberOfClicks() > 1 && note >= 0 && hit (e.position) == nullptr && st.tool != Tool::Split) {
+            st.proc.beginEdit(); addNote (note, st.snapFloor (tick)); st.proc.endEdit ("Add note");
+            if (preview) preview (note);
+            return;
+        }
         const Tool tool = (e.mods.isAltDown() && st.tool == Tool::Draw) ? Tool::Erase : st.tool;
         switch (tool) {
             case Tool::Split:
@@ -524,7 +530,10 @@ public:
                 return;
             case Tool::Draw:
                 if (note < 0) return;
-                if (auto* n = hit (e.position)) { const int i = indexOfNote (*n); st.apply ("Delete note", [i] (Pattern& q) { q.notes.erase (q.notes.begin() + i); }); return; }
+                if (auto* n = hit (e.position)) {
+                    if (e.getNumberOfClicks() > 1) return;              // second click of a double-click: keep the note just drawn
+                    const int i = indexOfNote (*n); st.apply ("Delete note", [i] (Pattern& q) { q.notes.erase (q.notes.begin() + i); }); return;
+                }
                 st.proc.beginEdit(); mode = Mode::Draw; drawLane = note;
                 addNote (note, st.snapFloor (tick));
                 if (preview) preview (note);
