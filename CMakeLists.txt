@@ -70,7 +70,7 @@ juce_add_plugin(DrumPlayer
   VST3_CATEGORIES Instrument Drum Generator
   PRODUCT_NAME "Drum Player")
 
-target_sources(DrumPlayer PRIVATE DrumPlayer/Source/DPPlugin.cpp)
+target_sources(DrumPlayer PRIVATE DrumPlayer/Source/DPPlugin.cpp DrumPlayer/Source/DPClipboard.cpp)
 target_include_directories(DrumPlayer PRIVATE Source DrumPlayer/Source)
 target_compile_features(DrumPlayer PRIVATE cxx_std_17)
 target_compile_definitions(DrumPlayer PUBLIC

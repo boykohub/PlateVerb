@@ -168,7 +168,7 @@ struct Settings
         return (k >= zoneLow && k <= zoneHigh) ? k : -1;
     }
     int recQuantize = 0;                           // 0 off, else note value index + 1
-    int splitBars = 4;                             // dropped grooves are cut every N bars (0 = keep whole)
+    int splitBars = 4;                             // when you choose to cut a groove into keys: every N bars
 };
 
 struct Song
@@ -537,7 +537,7 @@ inline ImportedPart readMidiFile (const File& f)
     int tpq = mf.getTimeFormat();
     double secScale = 0.0;
     if (tpq <= 0) { mf.convertTimestampTicksToSeconds(); secScale = 2.0 * PPQ; tpq = PPQ; }   // SMPTE: assume 120 bpm
-    int lastEnd = 0;
+    int lastEnd = 0, endOfTrack = 0;
     for (int t = 0; t < mf.getNumTracks(); ++t) {
         MidiMessageSequence seq (*mf.getTrack (t));
         seq.updateMatchedPairs();
@@ -546,6 +546,7 @@ inline ImportedPart readMidiFile (const File& f)
             const auto& m = e->message;
             auto toTicks = [&] (double ts) { return (int) std::round (secScale > 0 ? ts * secScale : ts * PPQ / tpq); };
             if (m.isTimeSignatureMetaEvent()) { int num = 4, den = 4; m.getTimeSignatureInfo (num, den); r.beatsPerBar = jlimit (1, 16, (int) std::round (num * 4.0 / den)); }
+            if (m.isEndOfTrackMetaEvent()) endOfTrack = jmax (endOfTrack, toTicks (m.getTimeStamp()));
             if (! m.isNoteOn()) continue;
             Note n; n.tick = toTicks (m.getTimeStamp()); n.note = m.getNoteNumber(); n.velocity = jlimit (1, 127, (int) m.getVelocity());
             n.length = e->noteOffObject != nullptr ? jmax (10, toTicks (e->noteOffObject->message.getTimeStamp()) - n.tick) : 60;
@@ -554,9 +555,12 @@ inline ImportedPart readMidiFile (const File& f)
         }
     }
     std::stable_sort (r.notes.begin(), r.notes.end());
-    // length: whole bars covering the last note
+    // length in whole bars. The file's own end mark wins when it has one (drum plugins write the groove length there);
+    // otherwise the bars the notes fill, where a hit just after a bar line (the next downbeat) doesn't add a bar
     const int bar = r.beatsPerBar * PPQ;
-    r.lengthTicks = jmax (bar, (lastEnd + bar - 1) / bar * bar);
+    int bars = jmax (1, (lastEnd - PPQ / 4 + bar - 1) / bar);
+    if (endOfTrack >= bar / 2 && endOfTrack + bar / 8 >= lastEnd - PPQ / 4) bars = jmax (1, (int) std::round ((double) endOfTrack / bar));
+    r.lengthTicks = bars * bar;
     // a clip that starts a little late (some plugins write an offset) is shifted back to the first bar line
     if (! r.notes.empty()) {
         const int first = r.notes.front().tick;

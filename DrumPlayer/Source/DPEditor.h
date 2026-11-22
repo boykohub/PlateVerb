@@ -2,6 +2,8 @@
 #pragma once
 #include "DPPanels.h"
 
+std::vector<std::wstring> dpClipboardFiles();      // DPClipboard.cpp
+
 namespace dp {
 
 // everything lives in Body; the editor scales Body for the zoom setting
@@ -860,8 +862,30 @@ private:
         chooser->launchAsync (FileBrowserComponent::openMode | FileBrowserComponent::canSelectFiles | FileBrowserComponent::canSelectMultipleItems,
             [this] (const FileChooser& fc) { StringArray f; for (auto& r : fc.getResults()) f.add (r.getFullPathName()); if (! f.isEmpty()) importFiles (f, st.song().editKey); });
     }
-    void importFiles (StringArray files, int startKey)
+    // MIDI files on the clipboard (copied in Explorer or another program), or paths copied as text
+    StringArray clipboardMidiFiles() const
     {
+        StringArray out;
+        for (auto& w : dpClipboardFiles()) { String p (w.c_str()); if (isMidiPath (p) && File (p).existsAsFile()) out.add (p); }
+        if (out.isEmpty())
+            for (auto& line : StringArray::fromLines (SystemClipboard::getTextFromClipboard())) {
+                const auto p = line.trim().unquoted();
+                if (isMidiPath (p) && File::isAbsolutePath (p) && File (p).existsAsFile()) out.add (p);
+            }
+        return out;
+    }
+    static bool isMidiPath (const String& p) { return p.endsWithIgnoreCase (".mid") || p.endsWithIgnoreCase (".midi") || p.endsWithIgnoreCase (".smf"); }
+    void pasteMidiToKey (int key, bool cut)
+    {
+        auto files = clipboardMidiFiles();
+        if (files.isEmpty()) { showToast ("No MIDI file on the clipboard. Copy a .mid file (for example in Explorer), or drag the groove onto the key"); return; }
+        importFiles (files, key, cut);
+    }
+
+    void importFiles (StringArray files, int startKey, bool cut = false)
+    {
+        // one dropped groove becomes one pattern; it's cut into several keys only when you ask (Shift while dropping, or the menu)
+        cut = cut || ModifierKeys::currentModifiers.isShiftDown();
         files.sortNatural();
         std::vector<Pattern> pieces;
         for (auto& path : files) {
@@ -869,7 +893,7 @@ private:
             if (! f.existsAsFile()) continue;
             auto part = readMidiFile (f);
             if (part.notes.empty()) continue;
-            for (auto& p : splitToPatterns (part, st.song().settings.splitBars)) {
+            for (auto& p : splitToPatterns (part, cut ? st.song().settings.splitBars : 0)) {
                 const int from = st.song().importMap;
                 if (from >= 0 && from != st.song().playMap) convertPattern (p, st.song().map (from), st.song().map (st.song().playMap));
                 pieces.push_back (std::move (p));
@@ -1162,6 +1186,11 @@ private:
             m.addItem (3, "Copy pattern");
         }
         if (hasPatternClip) m.addItem (4, "Paste pattern here");
+        if (! clipboardMidiFiles().isEmpty()) {
+            m.addItem (40, p.isEmpty() ? "Paste MIDI file here" : "Replace with the MIDI file on the clipboard");
+            m.addItem (41, "Paste MIDI file, cut into keys every " + String (jmax (1, s.settings.splitBars)) + " bars");
+        }
+        m.addItem (42, p.isEmpty() ? "Import MIDI file here..." : "Replace with a MIDI file...");
         if (! p.isEmpty()) {
             m.addItem (5, "Duplicate to the next free key");
             m.addItem (8, "Move to the next key I press");
@@ -1183,6 +1212,14 @@ private:
                           st.applySong ("Duplicate pattern", [k, d] (Song& s2) { s2.keys[(size_t) d] = s2.keys[(size_t) k]; s2.keys[(size_t) d].name += " copy"; s2.editKey = d; }); break; }
                 case 6: exportPattern (k); break;
                 case 7: st.applySong ("Clear key", [k] (Song& s2) { s2.keys[(size_t) k] = Pattern(); }); break;
+                case 40: pasteMidiToKey (k, false); break;
+                case 41: pasteMidiToKey (k, true); break;
+                case 42: {
+                    chooser = std::make_unique<FileChooser> ("Import MIDI", File::getSpecialLocation (File::userDocumentsDirectory), "*.mid;*.midi");
+                    chooser->launchAsync (FileBrowserComponent::openMode | FileBrowserComponent::canSelectFiles | FileBrowserComponent::canSelectMultipleItems,
+                        [this, k] (const FileChooser& fc) { StringArray f; for (auto& r2 : fc.getResults()) f.add (r2.getFullPathName()); if (! f.isEmpty()) importFiles (f, k); });
+                    break;
+                }
                 case 8: learnFrom = k; learnSerial = proc.lastInSerial.load(); showToast ("Press the key on your keyboard where " + keyName (k) + "'s pattern should go"); break;
                 case 2900: newGroup (k); break;
                 case 2901: renameGroup (st.song().keys[(size_t) k].group); break;

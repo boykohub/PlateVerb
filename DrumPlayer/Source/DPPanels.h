@@ -1523,8 +1523,8 @@ public:
         setupLabel (*this, lPlayCh, "Drum pads / live notes on"); setupCombo (*this, playCh, chans, 1, "Notes on this channel are always played and recorded, never pattern keys");
         setupButton (*this, mirror, "Pattern keys in every octave", true, "The pattern keys repeat up the whole keyboard, so any octave works. Use separate channels for live drums then");
         setupLabel (*this, lStop, "Stop key"); setupCombo (*this, stopKey, stopKeys);
-        setupLabel (*this, lSplit, "Cut dropped grooves every");
-        setupCombo (*this, split, { "Keep whole", "1 bar", "2 bars", "4 bars", "8 bars", "16 bars" });
+        setupLabel (*this, lSplit, "Cutting a groove into keys");
+        setupCombo (*this, split, { "Keep whole", "1 bar", "2 bars", "4 bars", "8 bars", "16 bars" }, 1, "Used when you hold Shift while dropping, or choose 'cut into keys' when pasting. A normal drop keeps the groove whole");
         setupButton (*this, hostStop, "Stop when Studio One stops", true);
         setupButton (*this, thru, "Pass other notes through", true, "Notes outside the pattern keys go straight to the drum plugin, so you can play along");
         setupButton (*this, fills, "Dropped fills to black keys", true, "When several files are dropped, files with 'fill' in the name go to black keys");
