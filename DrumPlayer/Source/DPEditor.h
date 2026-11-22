@@ -1097,6 +1097,46 @@ private:
             });
     }
 
+    // ------------------------------------------------------------ key groups (Intro, Verse...)
+    void newGroup (int key)
+    {
+        auto* aw = new AlertWindow ("New group", "A name, for example Intro, Verse, Chorus:", MessageBoxIconType::NoIcon);
+        aw->addTextEditor ("n", "");
+        aw->addButton ("Create", 1, KeyPress (KeyPress::returnKey)); aw->addButton ("Cancel", 0, KeyPress (KeyPress::escapeKey));
+        aw->enterModalState (true, ModalCallbackFunction::create ([this, aw, key] (int r) {
+            const auto n = aw->getTextEditorContents ("n").trim();
+            if (r != 1 || n.isEmpty()) return;
+            static const uint32 cols[] = { 0xff5aa9ff, 0xffb8f28b, 0xffffc15e, 0xffc9a7ff, 0xffff8fa3, 0xff6ee7d8, 0xffffa36e, 0xffe3e37a };
+            st.applySong ("New group", [n, key] (Song& s2) { s2.groups.push_back ({ n, cols[s2.groups.size() % 8] }); s2.keys[(size_t) key].group = (int) s2.groups.size() - 1; });
+            groupColour (st.song().keys[(size_t) key].group);
+        }), true);
+    }
+    void renameGroup (int g)
+    {
+        if (g < 0 || g >= (int) st.song().groups.size()) return;
+        auto* aw = new AlertWindow ("Rename group", "", MessageBoxIconType::NoIcon);
+        aw->addTextEditor ("n", st.song().groups[(size_t) g].name);
+        aw->addButton ("OK", 1, KeyPress (KeyPress::returnKey)); aw->addButton ("Cancel", 0, KeyPress (KeyPress::escapeKey));
+        aw->enterModalState (true, ModalCallbackFunction::create ([this, aw, g] (int r) {
+            const auto n = aw->getTextEditorContents ("n").trim();
+            if (r == 1 && n.isNotEmpty()) st.applySong ("Rename group", [g, n] (Song& s2) { if (g < (int) s2.groups.size()) s2.groups[(size_t) g].name = n; });
+        }), true);
+    }
+    struct GroupPicker : public ColourSelector, private ChangeListener
+    {
+        std::function<void (Colour)> onColour;
+        GroupPicker() : ColourSelector (ColourSelector::showColourAtTop | ColourSelector::showSliders | ColourSelector::showColourspace) { setSize (300, 300); addChangeListener (this); }
+        void changeListenerCallback (ChangeBroadcaster*) override { if (onColour) onColour (getCurrentColour()); }
+    };
+    void groupColour (int g)
+    {
+        if (g < 0 || g >= (int) st.song().groups.size()) return;
+        auto p = std::make_unique<GroupPicker>();
+        p->setCurrentColour (Colour (st.song().groups[(size_t) g].colour), dontSendNotification);
+        p->onColour = [this, g] (Colour c) { if (g < (int) proc.edit.groups.size()) { proc.edit.groups[(size_t) g].colour = c.getARGB(); proc.publish(); strip.repaint(); bigStrip.repaint(); tray.repaint(); chainStrip.repaint(); songLane.repaint(); } };
+        CallOutBox::launchAsynchronously (std::move (p), getLocalArea (&strip, strip.getLocalBounds()).withSizeKeepingCentre (40, 20), this);
+    }
+
     void keyMenu (int k)
     {
         auto& s = st.song();
@@ -1108,6 +1148,17 @@ private:
         if (! p.isEmpty()) {
             PopupMenu type; for (int t = 0; t < 4; ++t) type.addItem (10 + t, typeName ((PatternType) t), true, (int) p.type == t);
             m.addSubMenu ("Type", type);
+            PopupMenu grp;
+            grp.addItem (3000, "No group", true, p.group < 0);
+            for (int i = 0; i < (int) s.groups.size() && i < 60; ++i) grp.addColouredItem (3001 + i, s.groups[(size_t) i].name, Colour (s.groups[(size_t) i].colour), true, p.group == i);
+            grp.addSeparator();
+            if (p.group >= 0) { for (int n : { 2, 4, 8 }) grp.addItem (2910 + n, "Give this group to the next " + String (n) + " keys too"); grp.addSeparator(); }
+            grp.addItem (2900, "New group...");
+            if (p.group >= 0 && p.group < (int) s.groups.size()) {
+                const auto gn = s.groups[(size_t) p.group].name;
+                grp.addItem (2901, "Rename \"" + gn + "\"..."); grp.addItem (2902, "Change \"" + gn + "\" colour..."); grp.addItem (2903, "Delete \"" + gn + "\"");
+            }
+            m.addSubMenu ("Group", grp);
             m.addItem (3, "Copy pattern");
         }
         if (hasPatternClip) m.addItem (4, "Paste pattern here");
@@ -1133,8 +1184,20 @@ private:
                 case 6: exportPattern (k); break;
                 case 7: st.applySong ("Clear key", [k] (Song& s2) { s2.keys[(size_t) k] = Pattern(); }); break;
                 case 8: learnFrom = k; learnSerial = proc.lastInSerial.load(); showToast ("Press the key on your keyboard where " + keyName (k) + "'s pattern should go"); break;
+                case 2900: newGroup (k); break;
+                case 2901: renameGroup (st.song().keys[(size_t) k].group); break;
+                case 2902: groupColour (st.song().keys[(size_t) k].group); break;
+                case 2903: { const int g = st.song().keys[(size_t) k].group;
+                             st.applySong ("Delete group", [g] (Song& s2) { if (g < 0 || g >= (int) s2.groups.size()) return; s2.groups.erase (s2.groups.begin() + g);
+                                 for (auto& q : s2.keys) { if (q.group == g) q.group = -1; else if (q.group > g) q.group--; }
+                                 for (auto& q : s2.park) { if (q.group == g) q.group = -1; else if (q.group > g) q.group--; } }); break; }
                 default:
-                    if (r >= 10 && r < 14) { const int t = r - 10; st.applySong ("Pattern type", [k, t] (Song& s2) { s2.keys[(size_t) k].type = (PatternType) t; }); }
+                    if (r >= 3000 && r < 3062) { const int g = r - 3001; st.applySong ("Key group", [k, g] (Song& s2) { s2.keys[(size_t) k].group = g; }); }
+                    else if (r >= 2912 && r <= 2918) {
+                        const int n = r - 2910;
+                        st.applySong ("Key group", [k, n] (Song& s2) { const int g = s2.keys[(size_t) k].group; for (int i = 1; i <= n && k + i < 128; ++i) s2.keys[(size_t) (k + i)].group = g; });
+                    }
+                    else if (r >= 10 && r < 14) { const int t = r - 10; st.applySong ("Pattern type", [k, t] (Song& s2) { s2.keys[(size_t) k].type = (PatternType) t; }); }
                     else if (r >= 2000 && r < 2200) { const int c = r - 2000; st.applySong ("Add to chain", [k, c] (Song& s2) { if (c < (int) s2.chains.size()) s2.chains[(size_t) c].steps.push_back ({ k, 1 }); }); showToast ("Added to the chain"); }
                     break;
             }

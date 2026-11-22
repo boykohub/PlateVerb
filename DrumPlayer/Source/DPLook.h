@@ -49,6 +49,12 @@ inline Font font (float h, int weight = 1)
     auto tf = weight <= 0 ? f.reg : weight == 1 ? f.med : weight == 2 ? f.semi : f.bold;
     return Font (FontOptions (tf).withHeight (h * Theme::get().textScale));     // "All text" size applies everywhere
 }
+// a pattern's colour: its group's, or else by type (groove, fill...)
+inline Colour patternColour (const Song& s, const Pattern& p)
+{
+    if (p.group >= 0 && p.group < (int) s.groups.size()) return Colour (s.groups[(size_t) p.group].colour);
+    return th::typeColour (p.type);
+}
 inline float textWidth (const Font& f, const String& s) { return GlyphArrangement::getStringWidth (f, s); }
 
 // button height follows the "All buttons" size in the Look editor

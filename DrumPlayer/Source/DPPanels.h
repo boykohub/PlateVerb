@@ -82,6 +82,7 @@ public:
             g.setGradientFill (ColourGradient (Colour (0xffe9eaee).withMultipliedBrightness (usable ? 1.0f : 0.55f), r.getTopLeft(),
                                                Colour (0xffb9bcc4).withMultipliedBrightness (usable ? 1.0f : 0.55f), r.getBottomLeft(), false));
             g.fillRoundedRectangle (r.reduced (0.5f, 0), 3);
+            if (p.group >= 0 && p.group < (int) s.groups.size()) { g.setColour (Colour (s.groups[(size_t) p.group].colour).withAlpha (0.28f)); g.fillRoundedRectangle (r.reduced (0.5f, 0), 3); }
             g.setColour (Colours::black.withAlpha (0.55f)); g.drawRoundedRectangle (r.reduced (0.5f, 0), 3, 1.0f);
             drawTile (g, r.withTrimmedTop (r.getHeight() * 0.56f).reduced (2.5f, 3), k, p, false);
             decorate (g, r, k, play, queued, blink);
@@ -95,6 +96,7 @@ public:
             g.setColour (Colours::black.withAlpha (0.5f)); g.fillRoundedRectangle (r.translated (1.5f, 2), 3);
             g.setGradientFill (ColourGradient (Colour (0xff3a3e46), r.getTopLeft(), Colour (0xff101114), r.getBottomLeft(), false));
             g.fillRoundedRectangle (r, 3);
+            if (p.group >= 0 && p.group < (int) s.groups.size()) { g.setColour (Colour (s.groups[(size_t) p.group].colour).withAlpha (0.35f)); g.fillRoundedRectangle (r, 3); }
             drawTile (g, r.withTrimmedTop (r.getHeight() * 0.3f).reduced (2, 3), k, p, true);
             decorate (g, r, k, play, queued, blink);
         }
@@ -271,7 +273,7 @@ private:
             return;
         }
         if (p.notes.empty() && p.name.isEmpty()) return;
-        const auto c = th::typeColour (p.type);
+        const auto c = patternColour (st.song(), p);
         g.setColour (c.withAlpha (black ? 0.85f : 0.9f));
         g.fillRoundedRectangle (r, 3);
         g.setColour (th::ink);
@@ -310,7 +312,7 @@ public:
             const auto& p = st.song().park[(size_t) i];
             g.setColour (i == hover ? th::green.withAlpha (0.35f) : Colours::black.withAlpha (0.3f)); g.fillRoundedRectangle (r, 4);
             if (! p.isEmpty()) {
-                g.setColour (th::typeColour (p.type)); g.fillRoundedRectangle (r.reduced (1.5f), 4);
+                g.setColour (patternColour (st.song(), p)); g.fillRoundedRectangle (r.reduced (1.5f), 4);
                 g.setColour (th::ink); g.setFont (font (9.5f, 2));
                 g.drawFittedText (p.name.isNotEmpty() ? p.name : String (typeName (p.type)), r.reduced (3, 1).toNearestInt(), Justification::centred, 2, 0.8f);
             }
@@ -445,7 +447,7 @@ public:
             const auto& p = st.song().keys[(size_t) jlimit (0, 127, step.key)];
             const bool on = playingThis && playStep == i;
             g.setColour (Colours::black.withAlpha (0.35f)); g.fillRoundedRectangle (r.translated (0, 1), 5);
-            g.setColour (th::typeColour (p.type).withAlpha (p.notes.empty() ? 0.35f : 0.9f)); g.fillRoundedRectangle (r, 5);
+            g.setColour (patternColour (st.song(), p).withAlpha (p.notes.empty() ? 0.35f : 0.9f)); g.fillRoundedRectangle (r, 5);
             if (on) { g.setColour (th::amber); g.drawRoundedRectangle (r.expanded (1), 5, 2.2f); }
             if (i == dragStep) { g.setColour (Colours::black.withAlpha (0.4f)); g.fillRoundedRectangle (r, 5); }
             g.setColour (th::ink); g.setFont (font (10.5f, 2));
@@ -645,7 +647,7 @@ public:
             auto r = clipRect (c);
             if (r.getRight() < 0 || r.getX() > getWidth()) continue;
             const auto& p = s.keys[(size_t) jlimit (0, 127, c.key)];
-            const auto col = th::typeColour (p.type).withMultipliedAlpha (c.muted ? 0.3f : 1.0f);
+            const auto col = patternColour (s, p).withMultipliedAlpha (c.muted ? 0.3f : 1.0f);
             g.setColour (Colours::black.withAlpha (0.35f)); g.fillRoundedRectangle (r.translated (0, 1), 4);
             g.setGradientFill (ColourGradient (col.brighter (0.15f), r.getTopLeft(), col.darker (0.25f), r.getBottomLeft(), false));
             g.fillRoundedRectangle (r, 4);

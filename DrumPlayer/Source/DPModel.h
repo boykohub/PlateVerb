@@ -84,6 +84,7 @@ struct Pattern
 {
     String name;
     PatternType type = PatternType::Groove;
+    int group = -1;                      // your own group (Intro, Verse...), shown as the key's colour
     int bars = 1, beatsPerBar = 4;
     std::vector<Note> notes;
     std::map<int, int> laneLength;       // note → loop length in ticks (polyrhythm); absent = pattern length
@@ -111,6 +112,12 @@ struct Lane
 };
 
 struct ChainStep { int key = -1, repeats = 1; };
+struct Group { String name; uint32 colour = 0xff7fd1ff; };          // your own designations, each with a colour
+inline std::vector<Group> defaultGroups()
+{
+    return { { "Intro", 0xff5aa9ff }, { "Verse", 0xffb8f28b }, { "Pre-chorus", 0xff6ee7d8 }, { "Chorus", 0xffffc15e },
+             { "Bridge", 0xffc9a7ff }, { "Fill", 0xffffa36e }, { "Breakdown", 0xffe3e37a }, { "Outro", 0xffff8fa3 } };
+}
 // a chunk on the song lane: plays a key's pattern from `start` for `length` beats, `offset` beats into it (it repeats if longer)
 struct Clip { double start = 0, length = 4, offset = 0; int key = 12; bool muted = false, selected = false; };
 struct Chain { String name; std::vector<ChainStep> steps; int triggerNote = -1; bool loop = true; };
@@ -171,6 +178,7 @@ struct Song
     std::array<int, aCount> customNotes {};        // Custom map: note per articulation (-1 = none)
     std::array<Pattern, numKeys> keys;
     std::vector<Clip> clips;                       // the song lane
+    std::vector<Group> groups = defaultGroups();
     bool songMode = false;                         // the song lane plays (with Studio One's transport, or its own Play)
     std::vector<Lane> lanes;
     std::vector<Chain> chains { Chain { "Chain 1", {}, -1, true } };      // as many as you like
@@ -639,7 +647,7 @@ inline void writeSongMidi (const Song& s, const File& f, int channel)
 inline std::unique_ptr<XmlElement> patternToXml (const Pattern& p, const String& tag = "P")
 {
     auto x = std::make_unique<XmlElement> (tag);
-    x->setAttribute ("name", p.name); x->setAttribute ("type", (int) p.type);
+    x->setAttribute ("name", p.name); x->setAttribute ("type", (int) p.type); x->setAttribute ("group", p.group);
     x->setAttribute ("bars", p.bars); x->setAttribute ("bpb", p.beatsPerBar);
     String s; s.preallocateBytes (p.notes.size() * 24);
     for (auto& n : p.notes) s << n.tick << ',' << n.length << ',' << n.note << ',' << n.velocity << ',' << n.probability << ',' << n.art << ';';
@@ -654,6 +662,7 @@ inline Pattern patternFromXml (const XmlElement& x)
 {
     Pattern p;
     p.name = x.getStringAttribute ("name"); p.type = (PatternType) jlimit (0, 3, x.getIntAttribute ("type"));
+    p.group = jlimit (-1, 63, x.getIntAttribute ("group", -1));
     p.bars = jlimit (1, maxBars, x.getIntAttribute ("bars", 1)); p.beatsPerBar = jlimit (1, 16, x.getIntAttribute ("bpb", 4));
     for (auto& tok : StringArray::fromTokens (x.getStringAttribute ("notes"), ";", "")) {
         auto f = StringArray::fromTokens (tok, ",", "");
@@ -694,6 +703,8 @@ inline std::unique_ptr<XmlElement> songToXml (const Song& s)
         String st; for (auto& step : c.steps) st << step.key << ':' << step.repeats << ';';
         e->setAttribute ("steps", st);
     }
+    auto* gs = x->createNewChildElement ("Groups");
+    for (auto& g : s.groups) { auto* e = gs->createNewChildElement ("G"); e->setAttribute ("name", g.name); e->setAttribute ("colour", String::toHexString ((int) g.colour)); }
     auto* sg = x->createNewChildElement ("SongLane");
     sg->setAttribute ("on", s.songMode);
     for (auto& c : s.clips) {
@@ -744,6 +755,10 @@ inline Song songFromXml (const XmlElement& x)
                 auto f = StringArray::fromTokens (tok, ":", ""); if (f.size() == 2) c.steps.push_back ({ f[0].getIntValue(), jmax (1, f[1].getIntValue()) });
             }
         }
+    }
+    if (auto* gs = x.getChildByName ("Groups")) {
+        s.groups.clear();
+        for (auto* e : gs->getChildIterator()) s.groups.push_back ({ e->getStringAttribute ("name"), (uint32) e->getStringAttribute ("colour", "ff7fd1ff").getHexValue32() });
     }
     if (auto* sg = x.getChildByName ("SongLane")) {
         s.songMode = sg->getBoolAttribute ("on", false);
