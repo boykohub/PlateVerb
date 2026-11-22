@@ -219,6 +219,8 @@ public:
     std::atomic<int> recSession { 0 };
     std::array<std::atomic<uint32>, 128> outHits {}, inHits {};   // per note, for the lane lights
     std::atomic<int> lastInNote { -1 }, lastInKey { -1 }, lastInSerial { 0 };   // the last key pressed and the pattern key it hit
+    std::atomic<int> lastTrigger { 0 };              // what that press did: 1 starts, 2 empty key, 3 stops it, 4 stop key, 5 chain
+    std::atomic<uint32> notesSent { 0 };             // every note Drum Player has sent out
 
     // ---------------------------------------------------------------- display (read by the editor)
     std::atomic<int> playingKey { -1 }, queuedKey { -2 }, chainPlaying { -1 }, chainStep { -1 };
@@ -375,8 +377,9 @@ private:
         midi.swapWith (out);
         lastPpqEnd = ppqEnd;
         if (! playing) internalPpq = ppqEnd;
-        playingKey = songOn() ? songKeyNow : cur.key;
-        if (! songOn()) songBeatUi = -1.0;
+        const bool songNow = songOn() && cur.key < 0 && ! queued.active;
+        playingKey = songNow ? songKeyNow : cur.key;
+        if (! songNow) songBeatUi = -1.0;
         queuedKey = queued.active ? queued.key : -2;
         chainPlaying = chain; chainStep = chainIdx;
         if (cur.key >= 0) playRelTicks = (ppqEnd - cur.start) * PPQ;
@@ -588,16 +591,20 @@ private:
         if (m.isNoteOnOrOff()) {
             const int nn = m.getNoteNumber();
             for (int c = 0; c < (int) S->chains.size(); ++c)
-                if (S->chains[(size_t) c].triggerNote == nn) { if (m.isNoteOn()) startChain (c, ppq); return; }
+                if (S->chains[(size_t) c].triggerNote == nn) { if (m.isNoteOn()) { lastTrigger = 5; lastInNote = nn; lastInKey = -1; lastInSerial++; startChain (c, ppq); } return; }
             const int key = st.keyForNote (nn, m.getChannel());
             const int stop = st.resolveStop();
             if (m.isNoteOn()) { lastInNote = nn; lastInKey = key; lastInSerial++; }
             if (stop >= 0 && (key == stop || (key < 0 && nn == stop && st.keyForNote (nn, m.getChannel()) < 0 && stop > st.zoneHigh))) {
-                if (m.isNoteOn()) { stopNow (out, sample); chain = -1; }
+                if (m.isNoteOn()) { stopNow (out, sample); chain = -1; lastTrigger = 4; }
                 return;
             }
             if (key >= 0) {
-                if (m.isNoteOn()) triggerKey (key, ppq);
+                if (m.isNoteOn()) {
+                    const bool stops = S->settings.latch && key == cur.key && ! queued.active && S->keys[(size_t) key].type == PatternType::Groove;
+                    lastTrigger = ! keyHasPattern (key) ? 2 : stops ? 3 : 1;
+                    triggerKey (key, ppq);
+                }
                 else if (! st.latch && (key == cur.key || (queued.active && key == queued.key))) { stopNow (out, sample); chain = -1; }
                 return;
             }
@@ -669,7 +676,7 @@ private:
 
     void renderTo (double a, double b)
     {
-        if (songOn()) { flushOffs (out, a, false); renderSong (a, b); return; }
+        if (songOn() && cur.key < 0 && ! queued.active) { flushOffs (out, a, false); renderSong (a, b); return; }   // a pressed key takes over from the song
         while (true) {
             flushOffs (out, a, false);
             if (queued.active && queued.ppq < b) {
@@ -748,6 +755,7 @@ private:
                 for (size_t o = 0; o < offs.size(); ++o)
                     if (offs[o].note == nt.note && offs[o].ch == ch) { out.addEvent (MidiMessage::noteOff (ch, nt.note), smp); offs[o] = offs.back(); offs.pop_back(); break; }
                 out.addEvent (MidiMessage::noteOn (ch, nt.note, (uint8) vel), smp);
+                notesSent++;
                 offs.push_back ({ evPpq + jmax (10, nt.length) / (double) PPQ, nt.note, ch });
                 lastHitNote = nt.note; lastHitSerial++;
                 outHits[(size_t) nt.note]++;

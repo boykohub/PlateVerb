@@ -693,7 +693,8 @@ private:
         status.setText ("Tool: " + String (toolName (st.tool)) + "   |   " + keyName (st.song().editKey) + "   " + (p.name.isNotEmpty() ? p.name : String ("(empty key)")) + "   |   "
                         + String ((int) p.notes.size()) + " notes   |   " + String (p.bars) + " x " + String (p.beatsPerBar) + "/4"
                         + "   |   pattern keys " + keyName (st.song().settings.zoneLow) + " to " + keyName (st.song().settings.zoneHigh)
-                        + "   |   playing on " + builtInMaps()[(size_t) st.song().playMap].name + ", ch " + String (st.song().settings.outChannel), dontSendNotification);
+                        + "   |   playing on " + builtInMaps()[(size_t) st.song().playMap].name + ", ch " + String (st.song().settings.outChannel)
+                        + "   |   notes sent: " + String ((int) proc.notesSent.load()), dontSendNotification);
     }
     void syncSwingPreset()
     {
@@ -732,6 +733,7 @@ private:
             if (lit != recBtn.getToggleState()) recBtn.setToggleState (lit, dontSendNotification);
         }
         if (headers.pollHits()) headers.repaint();
+        if (const uint32 ns = proc.notesSent.load(); ns != lastNotesSent && (Time::getMillisecondCounter() - lastStatusMs) > 250) { lastNotesSent = ns; lastStatusMs = Time::getMillisecondCounter(); refreshControls(); }
         if (const double sb = proc.songBeatUi.load(); sb >= 0 || lastSongBeat >= 0) { lastSongBeat = sb; songLane.repaint(); }
         if (const int ser = proc.lastInSerial.load(); ser != lastInSerialSeen) {     // which key was pressed, and what it did
             lastInSerialSeen = ser;
@@ -751,10 +753,16 @@ private:
                     showToast ("Moved to " + keyName (to));
                 }
             }
+            const int how = proc.lastTrigger.load();
             String t = "Key " + keyName (n) + " (" + String (n) + ")";
-            if (k >= 0 && k == st.song().settings.resolveStop()) t << "  ->  STOP";
-            else if (k >= 0) t << "  ->  pattern " + keyName (k) + (st.song().keys[(size_t) k].notes.empty() ? String ("  (empty key)") : "  " + st.song().keys[(size_t) k].name);
-            else t << "  ->  drum: " << st.song().laneName (n);
+            if (how == 4) t << "  ->  STOP";
+            else if (how == 5) t << "  ->  starts a chain";
+            else if (k >= 0) {
+                t << "  ->  " + keyName (k) + (st.song().keys[(size_t) k].notes.empty() ? String (": empty key") : "  " + st.song().keys[(size_t) k].name);
+                if (how == 1 && ! st.song().keys[(size_t) k].notes.empty()) t << "  (starts)";
+                if (how == 3) t << "  (stops)";
+            }
+            else t << "  ->  plays drum: " << st.song().laneName (n);
             keyInfo.setText (t, dontSendNotification);
         }
         {   // new drums arriving from the keyboard or pads get their own lane straight away
@@ -774,6 +782,7 @@ private:
     int lastChainState = -1;
     std::array<uint32, 128> lastIn {};
     double lastSongBeat = -1;
+    uint32 lastNotesSent = 0, lastStatusMs = 0;
     int learnFrom = -1, learnSerial = 0;
 
     static void repaintEverything (Component& c) { c.repaint(); for (auto* ch : c.getChildren()) repaintEverything (*ch); }
