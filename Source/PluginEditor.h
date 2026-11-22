@@ -1,12 +1,12 @@
 // Flexiverb 480 editor (included by PluginProcessor.cpp).
 //
 //  Preset bar   the preset menu (click: every preset at once, by category), < > beside it, SAVE.
-//  Screen       REVERB page: the early reflections and the low / mid / high decay of the program as it is set now
-//               (rendered in the background from the engine itself), the decay-time curve, and every reverb number.
-//               DELAY page: the delay taps and every delay number. Numbers: right-click and drag up/down, or click and
-//               type. Graph handles drag too (predelay, decay, taps, curve points).
-//  Keys         PAGE (reverb / delay) and the 480L's algorithms: HALL, RANDOM HALL, ROOM, CHAMBER, PLATE, AMBIENCE ...
-//  Faders       one per parameter of the page; names above them in their own text size.
+//  Screen       the early reflections and the low / mid / high decay waterfall of the program as it is set now
+//               (rendered in the background from the engine itself), the decay-time curve, and beside them the delay
+//               taps. Numbers: right-click and drag up/down, or click and type. Graph handles drag too.
+//  Keys         the 480L's algorithms: HALL, RANDOM HALL, ROOM, CHAMBER, PLATE, AMBIENCE ...
+//  Faders       every control at once, no pages: the program's row (reverb, pitch ...) and under it the delay row,
+//               each in a recessed bay, grouped by function, with the value in a small LARC-style display window.
 //  Drawer       engine (single / dual), mute, SETUP, output, iron, ANALOG, EQ (with analog models), COMPRESSOR.
 //  SETUP        opens beside the plugin: colours, gradient, 3D depth, text sizes, oversampling, 64-bit.
 #include "FlexFonts.h"
@@ -697,7 +697,7 @@ public:
             g.drawText (t.label, Rectangle<float> (x + 9, y - 5, 44, 11), Justification::left, false);
         }
         g.setColour (col.withAlpha (0.6f)); g.setFont (ui (th.sz (9.0f), W::Bold, 0.05f));
-        g.drawText ("Delay taps: drag a point - sideways for time, up and down for level", getLocalBounds().toFloat().reduced (th.sz (36.0f), 0).withHeight (th.sz (12.0f) + 2), Justification::topLeft, false);
+        g.drawFittedText ("DELAY TAPS:  drag a point - sideways = time, up/down = level", (getLocalBounds().toFloat().reduced (th.sz (36.0f), 0).withHeight (th.sz (12.0f) + 2)).toNearestInt(), Justification::topLeft, 1, 0.8f);
     }
     void mouseMove (const MouseEvent& e) override { collect(); const int h = hit (e.position); if (h != hover) { hover = h; repaint(); } }
     void mouseExit (const MouseEvent&) override { hover = -1; repaint(); }
@@ -1064,7 +1064,7 @@ private:
 };
 
 // ============================================================================ what a number or fader controls: a program slot or a plugin parameter
-struct Target { int slot = -1; RangedAudioParameter* param = nullptr; String name; bool trigger = false; String group; };
+struct Target { int slot = -1; RangedAudioParameter* param = nullptr; String name; bool trigger = false; String group; int row = 0; };   // row 0 reverb, 1 delay
 
 // ============================================================================ the reverb picture: early reflections and low / mid / high decay
 // Animated: the curves glide to each new response; live bars show the output's low, mid and high level.
@@ -1581,6 +1581,41 @@ private:
     String name; TextButton autoBtn { "AUTOMATIC  (from the middle colour)" }; std::unique_ptr<ChangeListener> listener;
 };
 
+// ============================================================================ a small round X that closes a panel; lights yellow under the mouse
+class CloseX : public Component, private Timer
+{
+public:
+    explicit CloseX (const Theme& t) : th (t) { setRepaintsOnMouseActivity (true); setMouseCursor (MouseCursor::PointingHandCursor); }
+    std::function<void()> onClick;
+    void paint (Graphics& g) override
+    {
+        auto r = getLocalBounds().toFloat().reduced (1.5f);
+        const float d = jmin (r.getWidth(), r.getHeight()); r = Rectangle<float> (d, d).withCentre (r.getCentre());
+        g.setColour (Colours::black.withAlpha (th.shadow())); g.fillEllipse (r.translated (0.8f * th.d3(), 1.6f * th.d3()));
+        const Colour base = th.key.interpolatedWith (th.keyLight, glow);
+        g.setGradientFill (ColourGradient (th.hi (base, 1.2f), r.getX(), r.getY(), th.lo (base, 1.4f), r.getX(), r.getBottom(), false));
+        g.fillEllipse (r);
+        g.setColour (Colours::white.withAlpha (0.35f * th.d3())); g.drawEllipse (r.reduced (0.8f), 0.8f);
+        g.setColour (Colours::black.withAlpha (0.5f)); g.drawEllipse (r, 1.0f);
+        if (glow > 0.01f) { g.setColour (th.keyLight.withAlpha (0.35f * glow)); g.drawEllipse (r.expanded (1.5f), 2.0f); }
+        const auto c = r.getCentre(); const float a = d * 0.2f, w = jmax (1.6f, d * 0.09f) + (down ? 0.3f : 0.0f);
+        g.setColour (th.keyText);
+        g.drawLine (c.x - a, c.y - a, c.x + a, c.y + a, w); g.drawLine (c.x - a, c.y + a, c.x + a, c.y - a, w);
+    }
+    void mouseEnter (const MouseEvent&) override { startTimerHz (60); }
+    void mouseExit (const MouseEvent&) override { startTimerHz (60); }
+    void mouseDown (const MouseEvent&) override { down = true; repaint(); }
+    void mouseUp (const MouseEvent& e) override { down = false; repaint(); if (getLocalBounds().contains (e.getPosition()) && onClick) onClick(); }
+private:
+    void timerCallback() override
+    {
+        const float t = isMouseOver() ? 1.0f : 0.0f; glow += (t - glow) * 0.3f;
+        if (std::abs (t - glow) < 0.01f) { glow = t; stopTimer(); }
+        repaint();
+    }
+    const Theme& th; float glow = 0; bool down = false;
+};
+
 class SetupPanel : public Component
 {
 public:
@@ -1594,11 +1629,12 @@ public:
         depthBox.onChange = [this] { th.depth = depthBox.getSelectedItemIndex(); if (onChange) onChange(); };
         osAtt = std::make_unique<AudioProcessorValueTreeState::ComboBoxAttachment> (proc.apvts, "os", osBox);
         precAtt = std::make_unique<AudioProcessorValueTreeState::ComboBoxAttachment> (proc.apvts, "prec", precBox);
-        for (auto* b : { &resetBtn, &saveBtn, &closeBtn, &addKeyBtn }) addAndMakeVisible (*b);
+        for (auto* b : { &resetBtn, &saveBtn, &addKeyBtn }) addAndMakeVisible (*b);
+        addAndMakeVisible (closeX);
         addKeyBtn.onClick = [this] { if (onAddKey) onAddKey(); };
         resetBtn.onClick = [this] { th = Theme(); sync(); if (onChange) onChange(); };
         saveBtn.onClick = [this] { Theme::defaultFile().getParentDirectory().createDirectory(); Theme::defaultFile().replaceWithText (th.toString()); saveBtn.setButtonText ("SAVED AS DEFAULT"); };
-        closeBtn.onClick = [this] { if (onClose) onClose(); };
+        closeX.onClick = [this] { if (onClose) onClose(); };
         sync();
     }
     std::function<void()> onChange, onClose, onAddKey;
@@ -1623,7 +1659,7 @@ public:
         precBox.setBounds (r.getX() + 110, y, 120, 24); y += 44;
         resetBtn.setBounds (r.getX(), y, r.getWidth(), 28); y += 34;
         saveBtn.setBounds (r.getX(), y, r.getWidth(), 28); y += 34;
-        closeBtn.setBounds (r.getX(), y, r.getWidth(), 28);
+        closeX.setBounds (getWidth() - 18 - 26, 20, 26, 26);
     }
     int preferredHeight() const { return 18 + 40 + 22 + (int) Theme::items().size() * 26 + 30 + 8 * 30 + 34 + 52 + 74 + 34 * 2 + 28 + 30; }
     void paint (Graphics& g) override
@@ -1666,9 +1702,10 @@ private:
     Flexiverb480Processor& proc;
     Slider grad, keyPt, keyHt, keyWd, knobPt, dispPt, faderPt; ComboBox osBox, precBox, depthBox;
     std::unique_ptr<AudioProcessorValueTreeState::ComboBoxAttachment> osAtt, precAtt;
-    TextButton resetBtn { "RESET THE LOOK" }, saveBtn { "SAVE AS DEFAULT FOR NEW WINDOWS" }, closeBtn { "CLOSE" }, addKeyBtn { "MAKE A BUTTON FOR THE CURRENT PRESET" };
+    TextButton resetBtn { "RESET THE LOOK" }, saveBtn { "SAVE AS DEFAULT FOR NEW WINDOWS" }, addKeyBtn { "MAKE A BUTTON FOR THE CURRENT PRESET" };
     std::vector<Rectangle<int>> swatches; int lookTop = 0, qualTop = 0;
     std::unique_ptr<ChangeListener> listener;
+    CloseX closeX { th };
 };
 
 struct FlexLnf : public LookAndFeel_V4
@@ -1682,7 +1719,7 @@ struct FlexLnf : public LookAndFeel_V4
 class Flexiverb480Editor : public AudioProcessorEditor, private Timer
 {
 public:
-    static constexpr int kL = 780, kH = 920, kDrawer = 390, kSetup = 340, kMaxFaders = 40;
+    static constexpr int kL = 1180, kH = 1080, kDrawer = 390, kSetup = 340, kMaxFaders = 56;
 
     explicit Flexiverb480Editor (Flexiverb480Processor& p) : AudioProcessorEditor (p), proc (p), decay (theme, p), delayView (theme, p), reverbView (theme), browser (theme, p), setup (theme, p)
     {
@@ -1797,6 +1834,7 @@ public:
         drawer.addAndMakeVisible (engineBox); engineBox.addItemList ({ "Single", "Dual" }, 1);
         engineBox.onChange = [this] { auto* c = proc.apvts.getParameter ("config"); const int v = engineBox.getSelectedItemIndex() == 0 ? 0 : 2;
                                       if ((config() != 0) != (v != 0)) { c->beginChangeGesture(); c->setValueNotifyingHost (c->convertTo0to1 ((float) v)); c->endChangeGesture(); } };
+        drawer.addAndMakeVisible (drawerX); drawerX.onClick = [this] { drawerOpen = false; proc.setUiProperty ("uiDrawer", false); applySize(); };
         machAKey = dk ("MACHINE A"); machBKey = dk ("MACHINE B"); muteKey = dk ("MUTE"); setupKey = dk ("SETUP");
         machAKey->onClick = [this] { selectMachine (0); }; machBKey->onClick = [this] { selectMachine (1); };
         muteKey->onClick = [this] { proc.mute.store (! proc.mute.load()); };
@@ -1929,10 +1967,46 @@ private:
         g.setGradientFill (theme.grad (&Theme::panel, face, 0.45f));
         g.fillRect (face);
         // group headings, then each fader's name and value - every one of them in its own size and colour
+        // LARC-style side cheeks
+        for (auto sr : { face.withWidth (12.0f), face.withLeft (face.getRight() - 12.0f) })
+        {
+            g.setGradientFill (theme.grad (&Theme::cheek, sr, 0.8f)); g.fillRect (sr);
+            g.setColour (Colours::white.withAlpha (0.06f * theme.d3())); g.drawVerticalLine ((int) sr.getX() + 1, sr.getY(), sr.getBottom());
+            g.setColour (Colours::black.withAlpha (0.5f)); g.drawVerticalLine ((int) sr.getRight() - 1, sr.getY(), sr.getBottom());
+        }
+        // the fader bays: a recessed plate per row, its name down the left, a screw in each corner
+        for (auto& bay : bays)
+        {
+            const auto b = bay.area.toFloat();
+            g.setColour (Colours::white.withAlpha (0.05f * theme.d3())); g.drawRoundedRectangle (b.translated (0, 1.0f), 7, 1.0f);
+            g.setGradientFill (theme.grad (&Theme::panel, b, 0.35f, Colours::black, 0.28f)); g.fillRoundedRectangle (b, 7);
+            {   // inner shadow along the top edge
+                ColourGradient sh (Colours::black.withAlpha (0.35f * theme.d3()), b.getX(), b.getY(), Colours::transparentBlack, b.getX(), b.getY() + 10, false);
+                g.setGradientFill (sh); g.fillRoundedRectangle (b.withHeight (12), 7);
+            }
+            g.setColour (Colours::black.withAlpha (0.55f)); g.drawRoundedRectangle (b, 7, 1.2f);
+            auto cap = b.withWidth ((float) kBayCap).reduced (0, 10);
+            g.setColour (Colours::black.withAlpha (0.25f)); g.fillRoundedRectangle (cap.withTrimmedLeft (3).withTrimmedRight (1), 4);
+            {
+                Graphics::ScopedSaveState ss (g);
+                g.addTransform (AffineTransform::rotation (-MathConstants<float>::halfPi, cap.getCentreX(), cap.getCentreY()));
+                const String tid = "bay:" + bay.title;
+                const auto f = ui (theme.tpt (tid, 11.0f), W::Bold, 0.3f);
+                g.setFont (f); g.setColour (theme.tcol (tid, theme.panelText.withAlpha (0.55f)));
+                g.drawText (bay.title, Rectangle<float> (cap.getHeight(), cap.getWidth()).withCentre (cap.getCentre()), Justification::centred, false);
+            }
+            for (auto c : { b.getTopRight().translated (-9, 9), b.getBottomRight().translated (-9, -9) })
+            {
+                const auto sr = Rectangle<float> (7, 7).withCentre (c);
+                g.setGradientFill (ColourGradient (theme.panelText.withAlpha (0.55f), sr.getX(), sr.getY(), Colours::black.withAlpha (0.6f), sr.getRight(), sr.getBottom(), false)); g.fillEllipse (sr);
+                g.setColour (Colours::black.withAlpha (0.6f)); g.drawLine (sr.getX() + 1.5f, sr.getBottom() - 1.5f, sr.getRight() - 1.5f, sr.getY() + 1.5f, 1.0f);
+            }
+        }
         for (auto& gb : groupBoxes)
         {
             const String id = "group:" + gb.group; const Colour c = theme.tcol (id, theme.keyLight);
-            const auto f = ui (groupPtFor (gb.group), W::Bold, 0.14f);
+            auto f = ui (groupPtFor (gb.group), W::Bold, 0.14f);
+            { const float need = textW (f, groupTitle (gb.group)) + 14; if (need > gb.head.getWidth()) f = ui (groupPtFor (gb.group) * jmax (0.55f, gb.head.getWidth() / need), W::Bold, 0.08f); }
             const auto h = gb.head.toFloat(); const String t = groupTitle (gb.group); const float tw = textW (f, t) + 12;
             g.setColour (c.withAlpha (0.55f));
             g.drawLine (h.getX() + 4, h.getCentreY(), h.getCentreX() - tw / 2, h.getCentreY(), 1.0f);
@@ -1945,8 +2019,14 @@ private:
             const auto& tg = pageTargets[(size_t) i];
             g.setColour (theme.tcol ("fader name:" + tg.name, theme.panelText)); g.setFont (ui (theme.tpt ("fader name:" + tg.name, theme.faderPt), W::Semibold));
             g.drawFittedText (targetName (tg), nameR[(size_t) i], Justification::centredBottom, nameLines, 0.75f);
-            g.setColour (theme.tcol ("fader value:" + tg.name, theme.keyLight)); g.setFont (ui (theme.tpt ("fader value:" + tg.name, theme.faderPt), W::Bold));
-            g.drawFittedText (targetText (tg), valueR[(size_t) i], Justification::centred, 1, 0.7f);
+            {   // the value in a little LARC-style display window
+                const auto vr = valueR[(size_t) i].toFloat();
+                g.setColour (Colours::black.withAlpha (0.55f)); g.fillRoundedRectangle (vr, 3);
+                g.setGradientFill (theme.grad (&Theme::display, vr.reduced (1.5f), 0.5f)); g.fillRoundedRectangle (vr.reduced (1.5f), 2);
+                g.setColour (Colours::white.withAlpha (0.05f)); g.fillRoundedRectangle (vr.reduced (1.5f).withHeight (vr.getHeight() * 0.45f), 2);
+            }
+            g.setColour (theme.tcol ("fader value:" + tg.name, theme.displayText)); g.setFont (ui (theme.tpt ("fader value:" + tg.name, theme.faderPt) * 0.92f, W::Bold));
+            g.drawFittedText (targetText (tg), valueR[(size_t) i].reduced (2, 0), Justification::centred, 1, 0.6f);
         }
         if (nShown == 0) drawLegend (g, "nothing on this page", faderArea.toFloat(), ui (13.0f, W::Medium), theme.panelText.withAlpha (0.5f));
         const auto f1 = ui (18.0f, W::Bold, -0.02f), f2 = ui (18.0f, W::Regular);
@@ -2011,15 +2091,16 @@ private:
         presetName.setBounds (x0, y, prevKey->getX() - gap - x0, kh);
         y += kh + 10;
         screen.setBounds (x0, y, wAll, 360); layoutScreen(); y += 370;
-        std::vector<LarcKey*> keys { pageKey.get() }; for (auto& k : algKeys) keys.push_back (k.get()); for (auto& k : myKeys) keys.push_back (k.get());
+        pageKey->setVisible (false);
+        std::vector<LarcKey*> keys; for (auto& k : algKeys) keys.push_back (k.get()); for (auto& k : myKeys) keys.push_back (k.get());
         y = flowKeys (keys, x0, wAll, y, kh, gap) + 4;
         {
             float gp = theme.faderPt * 0.95f, np = theme.faderPt, vp = theme.faderPt;
             for (auto& t : pageTargets) { gp = jmax (gp, groupPtFor (t.group)); np = jmax (np, theme.tpt ("fader name:" + t.name, theme.faderPt)); vp = jmax (vp, theme.tpt ("fader value:" + t.name, theme.faderPt)); }
             nameLines = 3;
-            labelH = gp + 10 + np * (nameLines + 0.3f) + vp + 10;
+            labelH = gp + 10 + np * (nameLines + 0.3f) + vp + 16;
         }
-        faderArea = Rectangle<int> (x0, y + (int) labelH, wAll, kH - 46 - (y + (int) labelH));
+        faderArea = Rectangle<int> (x0, y + (int) labelH + 8, wAll, kH - 50 - (y + (int) labelH + 8));
         layoutFaders();
         layoutDrawer();
     }
@@ -2027,9 +2108,11 @@ private:
     {
         auto r = screen.getLocalBounds().reduced (8);
         r.removeFromTop ((int) theme.displayPt + 8);                      // the status line
+        // reverb picture and decay line on the left, the delay picture beside them: nothing to page through
+        auto dl = r.removeFromRight (r.getWidth() * 34 / 100); r.removeFromRight (8);
+        delayView.setBounds (dl);
         reverbView.setBounds (r.withHeight (r.getHeight() * 2 / 3 - 3));
         decay.setBounds (r.withTrimmedTop (r.getHeight() * 2 / 3 + 3));
-        delayView.setBounds (r);
         placeCells();
     }
     // the numbers sit on the picture: predelay at its line, decay time at the decay handle, the rest written across the
@@ -2121,12 +2204,12 @@ private:
             PopupMenu sub; bool any = false;
             for (size_t i = 0; i < pageTargets.size(); ++i)
             {
-                if (groupOf (pageTargets[i].name, page) != gname) continue;
+                if (pageTargets[i].group != gname) continue;
                 const String key = targetKey (pageTargets[i]);
                 bool on = false; for (auto& p : pins) on = on || p.key == key;
                 sub.addItem (1 + (int) i, pageTargets[i].name, ! on, on); any = true;
             }
-            if (any) m.addSubMenu (gname.substring (0, 1) + gname.substring (1).toLowerCase(), sub);
+            if (any) m.addSubMenu (groupTitle (gname).substring (0, 1) + groupTitle (gname).substring (1).toLowerCase(), sub);
         }
         const auto b = screen.getLocalBounds();
         m.showMenuAsync (PopupMenu::Options().withTargetScreenArea (Rectangle<int> (screen.localPointToGlobal (atInScreen), screen.localPointToGlobal (atInScreen)).expanded (1)),
@@ -2152,45 +2235,60 @@ private:
     std::vector<GroupBox> groupBoxes;
     std::vector<Rectangle<int>> nameR, valueR; int nameLines = 2;
     float groupPtFor (const String& g) const { return theme.tpt ("group:" + g, theme.faderPt * 0.95f); }
+    // one bay per row (reverb, then delay), each a recessed plate with its name down the left side
+    struct Bay { String title; Rectangle<int> area; };
+    std::vector<Bay> bays;
+    static constexpr int kBayCap = 22;          // the strip on the left of a bay that carries its name
     void layoutFaders()
     {
         nShown = jmin ((int) pageTargets.size(), kMaxFaders);
-        groupBoxes.clear(); nameR.assign ((size_t) kMaxFaders, {}); valueR.assign ((size_t) kMaxFaders, {});
-        // runs of the same group
+        groupBoxes.clear(); bays.clear(); nameR.assign ((size_t) kMaxFaders, {}); valueR.assign ((size_t) kMaxFaders, {});
+        // runs of the same group, and the rows they sit in
         std::vector<std::pair<int, int>> runs;   // first, count
         for (int i = 0; i < nShown; ++i) { if (runs.empty() || pageTargets[(size_t) i].group != pageTargets[(size_t) runs.back().first].group) runs.push_back ({ i, 0 }); ++runs.back().second; }
-        const int rows = nShown > 16 ? 2 : 1;
-        std::vector<std::vector<int>> rowRuns ((size_t) rows);
-        {   // two rows: split between groups where the rows come out most even
-            size_t split = runs.size();
-            if (rows == 2) { int best = 1 << 30, cnt = 0; for (size_t k = 0; k + 1 < runs.size(); ++k) { cnt += runs[k].second; const int d = std::abs (nShown - 2 * cnt); if (d < best) { best = d; split = k + 1; } } }
-            for (size_t k = 0; k < runs.size(); ++k) rowRuns[(size_t) (k < split ? 0 : 1)].push_back ((int) k);
-        }
-        const int gapG = 16;
-        const int rowH = (faderArea.getHeight() - (rows - 1) * (int) labelH) / rows;
-        for (int r = 0; r < rows; ++r)
+        std::vector<int> runRow;                 // the row each run sits in
+        for (auto& r : runs) runRow.push_back (pageTargets[(size_t) r.first].row);
+        if (std::find (runRow.begin(), runRow.end(), 1) == runRow.end() || std::find (runRow.begin(), runRow.end(), 0) == runRow.end())
+            if (nShown > 18 && runs.size() > 1)
+            {   // only one kind of control, and many: two rows, split between groups where they come out most even
+                int best = 1 << 30, cnt = 0; size_t split = 1;
+                for (size_t k = 0; k + 1 < runs.size(); ++k) { cnt += runs[k].second; const int d = std::abs (nShown - 2 * cnt); if (d < best) { best = d; split = k + 1; } }
+                const int base = runRow[0];
+                for (size_t k = 0; k < runs.size(); ++k) runRow[k] = 100 + base * 10 + (k < split ? 0 : 1);
+            }
+        std::vector<int> rowIds;
+        for (int id : runRow) if (rowIds.empty() || rowIds.back() != id) rowIds.push_back (id);
+        const int rows = jmax (1, (int) rowIds.size());
+        const int gapG = 14, gapR = 14;
+        const int rowH = (faderArea.getHeight() - (rows - 1) * ((int) labelH + gapR)) / rows;
+        for (int r = 0; r < (int) rowIds.size(); ++r)
         {
-            int n = 0; for (int k : rowRuns[(size_t) r]) n += runs[(size_t) k].second;
+            std::vector<int> mine; int n = 0;
+            for (size_t k = 0; k < runs.size(); ++k) if (runRow[k] == rowIds[(size_t) r]) { mine.push_back ((int) k); n += runs[k].second; }
             if (n == 0) continue;
-            const int ng = (int) rowRuns[(size_t) r].size();
-            const float colW = (faderArea.getWidth() - gapG * (ng - 1)) / (float) n;
-            const int y = faderArea.getY() + r * (rowH + (int) labelH);
-            float x = (float) faderArea.getX();
-            for (int k : rowRuns[(size_t) r])
+            const int ng = (int) mine.size();
+            int left = faderArea.getX() + kBayCap + 6; const int width = faderArea.getRight() - 20 - left;
+            const float colW = jmin (110.0f, (width - gapG * (ng - 1)) / (float) n);
+            left += (int) ((width - (colW * n + gapG * (ng - 1))) * 0.5f);           // few faders: centred
+            const int y = faderArea.getY() + r * (rowH + (int) labelH + gapR);
+            bays.push_back ({ (rowIds[(size_t) r] >= 100 ? (rowIds[(size_t) r] - 100) / 10 : rowIds[(size_t) r]) == 0 ? String (l480::algoDef (proc.algoOf (machine)).name).toUpperCase() : String ("DELAY"),
+                              Rectangle<int> (faderArea.getX(), y - (int) labelH - 9, faderArea.getWidth(), rowH + (int) labelH + 13) });
+            float x = (float) left;
+            for (int k : mine)
             {
                 const auto& run = runs[(size_t) k];
                 const float x0 = x;
+                const auto& g = pageTargets[(size_t) run.first].group;
+                const int headB = y - (int) labelH + (int) (groupPtFor (g) + 10);
                 for (int q = 0; q < run.second; ++q)
                 {
                     const int i = run.first + q;
                     faders[(size_t) i]->setBounds ((int) x, y, (int) colW, rowH); faders[(size_t) i]->setVisible (true);
                     const float vpt = theme.tpt ("fader value:" + pageTargets[(size_t) i].name, theme.faderPt);
-                    valueR[(size_t) i] = Rectangle<int> ((int) x, y - (int) (vpt + 6), (int) colW, (int) (vpt + 4));
-                    nameR[(size_t) i] = Rectangle<int> ((int) x + 1, y - (int) labelH + (int) (groupPtFor (run.second > 0 ? pageTargets[(size_t) run.first].group : String()) + 10), (int) colW - 2,
-                                                          valueR[(size_t) i].getY() - (y - (int) labelH + (int) (groupPtFor (pageTargets[(size_t) run.first].group) + 10)));
+                    valueR[(size_t) i] = Rectangle<int> ((int) x + 2, y - (int) (vpt + 12), (int) colW - 4, (int) (vpt + 9));
+                    nameR[(size_t) i] = Rectangle<int> ((int) x + 1, headB, (int) colW - 2, valueR[(size_t) i].getY() - 2 - headB);
                     x += colW;
                 }
-                const auto& g = pageTargets[(size_t) run.first].group;
                 groupBoxes.push_back ({ g, Rectangle<int> ((int) x0, y - (int) labelH, (int) (x - x0), (int) groupPtFor (g) + 6) });
                 x += gapG;
             }
@@ -2215,6 +2313,7 @@ private:
         const int titleH = jmax (kh, roundToInt (theme.knobPt) + 10);
         // SYSTEM
         frame ("SYSTEM", A, S - 4);
+        drawerX.setBounds (fx + fw - 8 - 24, A + 7, 24, 24);
         {
             int y = A + 6;
             machAKey->setVisible (config() != 0); machBKey->setVisible (config() != 0);
@@ -2249,13 +2348,14 @@ private:
             const int y = T + 4 + 4;
             int kx = x0 + wAll;
             for (auto* k : { duckKey.get(), satKey.get(), cpOnKey.get() }) { const int w = (int) k->preferredWidth(); kx -= w; k->setBounds (kx, y, w, kh); kx -= gap; }
-            const int ky = y + titleH, avail = H - 4 - ky, r1 = avail * 52 / 100, w5 = wAll / 5;
-            const int vw = jmin (wAll * 52 / 100, (int) (r1 * 1.9f));
-            vu.setBounds (x0, ky + 2, vw, r1 - 4);
+            const int ky = y + titleH, avail = H - 4 - ky, r1 = jmin (avail * 52 / 100, 150), w5 = wAll / 5;
+            const int vw = jmin (wAll * 52 / 100, (int) (r1 * 1.9f)), vh = jmin (r1 - 4, (int) (vw * 0.62f));
+            vu.setBounds (x0, ky + 2 + (r1 - 4 - vh) / 2, vw, vh);
             const int rw = (wAll - vw) / 2;
             cpKnob[1]->setBounds (x0 + vw, ky, rw, r1); cpKnob[2]->setBounds (x0 + vw + rw, ky, rw, r1);
             const int order[5] = { 0, 3, 4, 5, 6 };
-            for (int i = 0; i < 5; ++i) cpKnob[order[i]]->setBounds (x0 + i * w5, ky + r1, w5, avail - r1);
+            const int kh2 = jmin (avail - r1, 130), ky2 = ky + r1 + (avail - r1 - kh2) / 2;
+            for (int i = 0; i < 5; ++i) cpKnob[order[i]]->setBounds (x0 + i * w5, ky2, w5, kh2);
         }
         drawer.setSize (kDrawer, kH);
     }
@@ -2338,30 +2438,40 @@ private:
     }
     void buildPage()
     {
+        // everything on one page: the reverb row, and under it the delay row (echoes, taps and the delay)
         pageTargets.clear();
         const int algo = proc.algoOf (machine);
         for (int i = 0; i < l480::kMaxParams; ++i)
         {
             const auto& s = proc.spec (machine, i);
             if (! s.lab || s.alias >= 0 || i >= l480::algoDef (algo).pages * 6) continue;
-            if (isDelaySpec (s, algo) != (page == 1)) continue;
-            pageTargets.push_back ({ i, nullptr, plainName (s.name), s.unit == l480::uKey });
+            Target t { i, nullptr, plainName (s.name), s.unit == l480::uKey }; t.row = isDelaySpec (s, algo) ? 1 : 0;
+            pageTargets.push_back (t);
         }
-        auto addP = [this] (const char* id, const char* nm) { pageTargets.push_back ({ -1, proc.apvts.getParameter (id), nm, false }); };
-        if (page == 0) addP ("erAtk", "Reflection Attack");
-        else
-        {
-            const bool sync = proc.apvts.getRawParameterValue ("dlSync")->load() > 0.5f;
-            addP ("dlOn", "Delay On"); addP ("dlSync", "Tempo Sync"); addP (sync ? "dlDivL" : "dlTimeL", "Delay Left"); addP (sync ? "dlDivR" : "dlTimeR", "Delay Right");
-            addP ("dlFb", "Feedback"); addP ("dlMix", "Delay Level"); addP ("dlAtk", "Delay Attack"); addP ("dlPing", "Ping-Pong"); addP ("dlLow", "Delay Bass"); addP ("dlHigh", "Delay Treble");
-        }
-        // grouped by function, in a fixed order
+        auto addP = [this] (const char* id, const char* nm, int row) { Target t { -1, proc.apvts.getParameter (id), nm, false }; t.row = row; pageTargets.push_back (t); };
+        bool reverb = false; for (auto& t : pageTargets) reverb = reverb || t.row == 0;
+        if (reverb) addP ("erAtk", "Reflection Attack", 0);          // only where there is a reverb to shape
+        const bool sync = proc.apvts.getRawParameterValue ("dlSync")->load() > 0.5f;
+        addP ("dlOn", "Delay On", 1); addP ("dlSync", "Tempo Sync", 1); addP (sync ? "dlDivL" : "dlTimeL", "Delay Left", 1); addP (sync ? "dlDivR" : "dlTimeR", "Delay Right", 1);
+        addP ("dlFb", "Feedback", 1); addP ("dlMix", "Delay Level", 1); addP ("dlAtk", "Delay Attack", 1); addP ("dlPing", "Ping-Pong", 1); addP ("dlLow", "Delay Bass", 1); addP ("dlHigh", "Delay Treble", 1);
+        // grouped by function, in a fixed order: reverb groups first, then the delay groups
         const StringArray order = groupOrder();
-        for (auto& t : pageTargets) t.group = groupOf (t.name, page);
-        std::stable_sort (pageTargets.begin(), pageTargets.end(), [&order] (const Target& a, const Target& b) { return order.indexOf (a.group) < order.indexOf (b.group); });
+        for (auto& t : pageTargets) t.group = rowGroup (groupOf (t.name, t.row), t.row);
+        std::stable_sort (pageTargets.begin(), pageTargets.end(), [&order] (const Target& a, const Target& b)
+                          { return a.row != b.row ? a.row < b.row : order.indexOf (a.group) < order.indexOf (b.group); });
     }
-    StringArray groupOrder() const { return page == 1 ? StringArray { "TIME", "REPEATS", "LEVEL", "TONE", "SHAPE", "OTHER" } : StringArray { "EARLY", "DECAY", "SPACE", "TONE", "MIX", "OTHER" }; }
-    static String groupTitle (const String& g) { return g == "OTHER" ? String ("MORE") : g; }
+    static String rowGroup (const String& g, int row)
+    {
+        if (row == 0) return g;
+        if (g == "TIME") return "DELAY TIME";
+        if (g == "LEVEL") return "ECHO LEVEL";
+        if (g == "TONE") return "DELAY TONE";
+        if (g == "SHAPE") return "DELAY SHAPE";
+        if (g == "OTHER") return "DELAY MORE";
+        return g;
+    }
+    StringArray groupOrder() const { return { "EARLY", "DECAY", "SPACE", "TONE", "MIX", "OTHER", "DELAY TIME", "REPEATS", "ECHO LEVEL", "DELAY TONE", "DELAY SHAPE", "DELAY MORE" }; }
+    static String groupTitle (const String& g) { return g == "OTHER" || g == "DELAY MORE" ? String ("MORE") : g == "ECHO LEVEL" ? String ("ECHOES") : g.startsWith ("DELAY ") ? g.substring (6) : g; }
     String targetName (const Target& t) const { return t.name; }
     float targetNorm (const Target& t) const { if (t.param) return t.param->getValue(); const auto& s = proc.spec (machine, t.slot); return (s.unit == l480::uKey) ? 0.0f : proc.slotNorm (machine, t.slot); }
     String targetText (const Target& t) const
@@ -2419,8 +2529,7 @@ private:
             faders[(size_t) i]->setTarget (pageTargets[(size_t) i].trigger ? 0.0f : targetNorm (pageTargets[(size_t) i]));
             if (snap) faders[(size_t) i]->snap();
         }
-        const bool delayPage = page == 1;
-        delayView.setVisible (delayPage); reverbView.setVisible (! delayPage); decay.setVisible (! delayPage);
+        delayView.setVisible (true); reverbView.setVisible (true); decay.setVisible (true);
         lastRv = -1; screen.repaint();
     }
 
@@ -2560,7 +2669,7 @@ private:
     Theme theme;
     FlexLnf lnf;
     float scale = 0.8f;
-    Content content; Screen screen; PresetName presetName;
+    Content content; Screen screen; PresetName presetName; CloseX drawerX { theme };
     DecayGraph decay; DelayGraph delayView; ReverbView reverbView; ResponseRenderer renderer;
     std::vector<std::unique_ptr<NumberCell>> cells;
     std::unique_ptr<LarcKey> prevKey, nextKey, saveKey, panelKey, pageKey, machAKey, machBKey, muteKey, setupKey;
