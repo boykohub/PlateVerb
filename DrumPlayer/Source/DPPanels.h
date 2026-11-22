@@ -1296,6 +1296,16 @@ public:
             auto* sw = swatches.add (new Swatch (i == 0 ? "Top" : i == 1 ? "Middle" : "Bottom"));
             addAndMakeVisible (sw);
             sw->onClick = [this, i, sw] { pick (i, sw); };
+            sw->onDrop = [this, i] (Colour c) { setColour (i, c); };
+            sw->onMenu = [this, i, sw] {
+                PopupMenu m; m.addItem (1, "Copy this colour"); if (hasCopied) m.addItem (2, "Paste colour");
+                m.addItem (3, "Copy to all three boxes");
+                m.showMenuAsync (PopupMenu::Options().withTargetComponent (sw), [this, i, sw] (int r) {
+                    if (r == 1) { copied = sw->colour; hasCopied = true; }
+                    else if (r == 2) setColour (i, copied);
+                    else if (r == 3) for (int k = 0; k < 3; ++k) setColour (k, sw->colour);
+                });
+            };
         }
         setupButton (*this, d3, "3D", true);
         d3.onClick = [this] { el().threeD = d3.getToggleState(); changed(); };
@@ -1367,19 +1377,39 @@ public:
         a.removeFromTop (8); help.setBounds (a.removeFromTop (58));
     }
 private:
-    struct Swatch : public Component
+    // a colour box: click to pick, drag it onto another box to copy the colour, right-click to copy and paste
+    struct Swatch : public Component, public DragAndDropTarget, public SettableTooltipClient
     {
-        explicit Swatch (String t) : title (std::move (t)) {}
-        std::function<void()> onClick; Colour colour; bool enabled = true; String title;
+        explicit Swatch (String t) : title (std::move (t)) { setTooltip ("Click: pick a colour. Drag onto another box: copy this colour there. Right-click: copy / paste"); }
+        std::function<void()> onClick; std::function<void (Colour)> onDrop; std::function<void()> onMenu;
+        Colour colour; bool enabled = true; String title; bool hover = false, dragged = false;
+        void mouseDown (const MouseEvent& e) override { dragged = false; if (e.mods.isPopupMenu() && onMenu) onMenu(); }
+        void mouseDrag (const MouseEvent& e) override
+        {
+            if (dragged || e.mods.isPopupMenu() || e.getDistanceFromDragStart() < 5) return;
+            if (auto* c = DragAndDropContainer::findParentDragContainerFor (this)) {
+                dragged = true;
+                Image img (Image::ARGB, 28, 28, true); { Graphics g (img); g.setColour (colour); g.fillRoundedRectangle (1, 1, 26, 26, 5); g.setColour (Colours::white); g.drawRoundedRectangle (1, 1, 26, 26, 5, 1.5f); }
+                c->startDragging ("colour:" + colour.toString(), this, ScaledImage (img));
+            }
+        }
+        bool isInterestedInDragSource (const SourceDetails& d) override { return d.description.toString().startsWith ("colour:") && d.sourceComponent.get() != this; }
+        void itemDragEnter (const SourceDetails&) override { hover = true; repaint(); }
+        void itemDragExit (const SourceDetails&) override { hover = false; repaint(); }
+        void itemDropped (const SourceDetails& d) override
+        {
+            hover = false;
+            if (onDrop) onDrop (Colour::fromString (d.description.toString().fromFirstOccurrenceOf ("colour:", false, false)));
+        }
         void paint (Graphics& g) override
         {
             auto r = getLocalBounds().toFloat().reduced (1).withTrimmedBottom (16);
             g.setColour (colour.withMultipliedAlpha (enabled ? 1.0f : 0.3f)); g.fillRoundedRectangle (r, 5);
-            g.setColour (th::line); g.drawRoundedRectangle (r, 5, 1.0f);
+            g.setColour (hover ? th::green : th::line); g.drawRoundedRectangle (r, 5, hover ? 2.5f : 1.0f);
             g.setFont (font (10.5f, 2)); g.setColour (th::dim);
             g.drawText (title, getLocalBounds().removeFromBottom (14), Justification::centred);
         }
-        void mouseUp (const MouseEvent&) override { if (onClick) onClick(); }
+        void mouseUp (const MouseEvent& e) override { if (! dragged && ! e.mods.isPopupMenu() && onClick) onClick(); dragged = false; }
     };
     struct Picker : public ColourSelector, private ChangeListener
     {
@@ -1424,6 +1454,14 @@ private:
         d3.setToggleState (e->threeD, dontSendNotification);
         depth.setValue (e->depth, dontSendNotification); fontSz.setValue (e->fontSize, dontSendNotification);
         loading = false;
+    }
+    Colour copied; bool hasCopied = false;
+    void setColour (int i, Colour c)
+    {
+        auto& e = el();
+        if (! e.custom) { seed (e); e.custom = true; }
+        (i == 0 ? e.c0 : i == 1 ? e.c1 : e.c2) = c;
+        changed();
     }
     void pick (int i, Swatch* sw)
     {
