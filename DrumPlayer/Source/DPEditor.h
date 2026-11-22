@@ -591,8 +591,8 @@ private:
         r1.place (nameEd, 150); r1.place (typeBox, 84); r1.skip (6);
         r1.place (lLen, 44); r1.place (barsEd, 40); r1.place (lenMenuBtn); r1.place (bpbBox, 58); r1.skip (6);
         r1.place (lGrid, 30); r1.place (gridBox, 70); r1.skip (10);
-        for (auto* b : toolBtns) r1.place (*b);
-        r1.skip (10); r1.place (undoBtn); r1.place (redoBtn);
+        for (auto* b : toolBtns) b->setVisible (false);     // tools live in the right-click menu, the Tools menu and keys 1-7
+        r1.place (undoBtn); r1.place (redoBtn);
         a.removeFromTop (4);
         // toolbar 2
         auto t2 = a.removeFromTop (28);
@@ -690,7 +690,7 @@ private:
         playModeBtn.setToggleState (st.song().settings.keyMode == 1, dontSendNotification);
         strip.ensureVisible (st.song().editKey); bigStrip.ensureVisible (st.song().editKey);
         syncSwingPreset();
-        status.setText (keyName (st.song().editKey) + "   " + (p.name.isNotEmpty() ? p.name : String ("(empty key)")) + "   |   "
+        status.setText ("Tool: " + String (toolName (st.tool)) + "   |   " + keyName (st.song().editKey) + "   " + (p.name.isNotEmpty() ? p.name : String ("(empty key)")) + "   |   "
                         + String ((int) p.notes.size()) + " notes   |   " + String (p.bars) + " x " + String (p.beatsPerBar) + "/4"
                         + "   |   pattern keys " + keyName (st.song().settings.zoneLow) + " to " + keyName (st.song().settings.zoneHigh)
                         + "   |   playing on " + builtInMaps()[(size_t) st.song().playMap].name + ", ch " + String (st.song().settings.outChannel), dontSendNotification);
@@ -807,7 +807,7 @@ private:
         if (m == 0) showToast ("Pattern mode: keys from C-1 up play patterns");
         refreshControls();
     }
-    void setTool (Tool t) { st.tool = t; st.stamping = false; for (int i = 0; i < toolBtns.size(); ++i) toolBtns[i]->setToggleState (i == (int) t, dontSendNotification); grid.repaint(); }
+    void setTool (Tool t) { st.tool = t; st.stamping = false; refreshControls(); for (int i = 0; i < toolBtns.size(); ++i) toolBtns[i]->setToggleState (i == (int) t, dontSendNotification); grid.repaint(); }
 
     void setScale (float s)
     {

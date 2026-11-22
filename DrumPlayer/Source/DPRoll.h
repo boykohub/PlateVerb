@@ -754,8 +754,16 @@ private:
             m.addSubMenu ("Timing", tm);
             PopupMenu drums; for (auto& l : st.song().lanes) if (l.note != hitNote->note) drums.addItem (1000 + l.note, l.name + "  (" + String (l.note) + ")");
             m.addSubMenu ("Move to drum", drums);
-            PopupMenu se; se.addItem (33, "All in this lane"); se.addItem (34, "All with this velocity"); se.addItem (35, "Every 2nd note in this lane"); se.addItem (32, "Invert");
+            PopupMenu se;
+            se.addItem (36, "Add the neighbour on the left"); se.addItem (37, "Add the neighbour on the right"); se.addItem (38, "Add both neighbours");
+            se.addItem (39, "Everything to the left in this lane"); se.addItem (40, "Everything to the right in this lane");
+            se.addItem (33, "All in this lane"); se.addItem (41, "All drums at this moment"); se.addItem (34, "All with this velocity");
+            se.addItem (35, "Every 2nd note in this lane"); se.addItem (32, "Invert");
             m.addSubMenu ("Select", se);
+            PopupMenu tools;
+            static const char* tn2[] = { "Select (arrow)  1", "Draw (pencil)  5", "Erase  4", "Split (scissors)  3", "Paint brush  7", "Mute  6", "Line (velocity ramps)  2" };
+            for (int t = 0; t < 7; ++t) tools.addItem (900 + t, tn2[t], true, (int) st.tool == t);
+            m.addSubMenu ("Tool", tools);
             if (st.lastAction) m.addItem (951, "Click notes to apply \"" + st.lastName + "\"", true, st.stamping);
         } else {
             // on empty space: tools, paste, selecting, and the pattern itself
@@ -774,7 +782,8 @@ private:
         const int splitTick = st.snapRound (st.xToTick ((float) e.x));
         const int g = st.gridTicks() > 1 ? st.gridTicks() : 240;
         const int gi = st.grid >= 0 ? st.grid : 3;
-        m.showMenuAsync (PopupMenu::Options().withMousePosition(), [this, splitTick, laneNote, clickedVel, g, gi] (int r) {
+        const int hitTick = hitNote != nullptr ? hitNote->tick : -1, hitLane = hitNote != nullptr ? hitNote->note : -1;
+        m.showMenuAsync (PopupMenu::Options().withMousePosition(), [this, splitTick, laneNote, clickedVel, g, gi, hitTick, hitLane] (int r) {
             if (r <= 0) return;
             // note actions are remembered so they can be repeated or stamped
             auto act = [this] (const String& name, std::function<void (Pattern&)> f) { st.remember (name, f); st.apply (name, f); };
@@ -807,6 +816,21 @@ private:
                 case 32: for (auto& n : st.pat().notes) n.selected = ! n.selected; st.publish(); break;
                 case 33: for (auto& n : st.pat().notes) n.selected = n.note == laneNote; st.publish(); break;
                 case 34: for (auto& n : st.pat().notes) n.selected = n.velocity == clickedVel; st.publish(); break;
+                case 36: case 37: case 38: {                       // neighbours in the same lane
+                    auto& q = st.pat(); int left = -1, right = -1;
+                    for (int i = 0; i < (int) q.notes.size(); ++i) {
+                        const auto& n = q.notes[(size_t) i];
+                        if (n.note != hitLane) continue;
+                        if (n.tick < hitTick && (left < 0 || n.tick > q.notes[(size_t) left].tick)) left = i;
+                        if (n.tick > hitTick && (right < 0 || n.tick < q.notes[(size_t) right].tick)) right = i;
+                    }
+                    if ((r == 36 || r == 38) && left >= 0) q.notes[(size_t) left].selected = true;
+                    if ((r == 37 || r == 38) && right >= 0) q.notes[(size_t) right].selected = true;
+                    st.publish(); break;
+                }
+                case 39: for (auto& n : st.pat().notes) if (n.note == hitLane && n.tick <= hitTick) n.selected = true; st.publish(); break;
+                case 40: for (auto& n : st.pat().notes) if (n.note == hitLane && n.tick >= hitTick) n.selected = true; st.publish(); break;
+                case 41: for (auto& n : st.pat().notes) n.selected = std::abs (n.tick - hitTick) <= 10; st.publish(); break;
                 case 35: { int c = 0; for (auto& n : st.pat().notes) { n.selected = false; if (n.note == laneNote) n.selected = (c++ % 2) == 1; } st.publish(); break; }
                 default:
                     if (r >= 100 && r <= 200) { const int v = r - 100; act ("Chance " + String (v) + "%", [v] (Pattern& q) { for (auto& n : q.notes) if (n.selected) n.probability = v; }); }
