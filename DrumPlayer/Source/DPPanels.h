@@ -1379,7 +1379,7 @@ private:
             g.setFont (font (10.5f, 2)); g.setColour (th::dim);
             g.drawText (title, getLocalBounds().removeFromBottom (14), Justification::centred);
         }
-        void mouseUp (const MouseEvent&) override { if (enabled && onClick) onClick(); }
+        void mouseUp (const MouseEvent&) override { if (onClick) onClick(); }
     };
     struct Picker : public ColourSelector, private ChangeListener
     {
@@ -1427,10 +1427,16 @@ private:
     }
     void pick (int i, Swatch* sw)
     {
+        // clicking a colour switches this part to your own colours
+        auto& e = el();
+        if (! e.custom) { seed (e); e.custom = true; changed(); }
+        sw->colour = i == 0 ? e.c0 : i == 1 ? e.c1 : e.c2;
         auto p = std::make_unique<Picker>();
         p->setCurrentColour (sw->colour, dontSendNotification);
         p->onColour = [this, i] (Colour c) { auto& e = el(); (i == 0 ? e.c0 : i == 1 ? e.c1 : e.c2) = c; changed(); };
-        CallOutBox::launchAsynchronously (std::move (p), sw->getScreenBounds(), nullptr);
+        // open inside the plugin window: a free-floating picker can end up hidden behind Studio One
+        auto* top = sw->getTopLevelComponent();
+        CallOutBox::launchAsynchronously (std::move (p), top->getLocalArea (sw, sw->getLocalBounds()), top);
     }
     int getNumRows() override { return items.size(); }
     void paintListBoxItem (int row, Graphics& g, int w, int h, bool sel) override

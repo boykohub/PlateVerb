@@ -356,7 +356,7 @@ public:
     void openCurve()
     {
         auto c = std::make_unique<CurvePanel> (st);
-        CallOutBox::launchAsynchronously (std::move (c), vel.getScreenBounds().withSizeKeepingCentre (40, 40).translated (0, -vel.getHeight() / 2), nullptr);
+        CallOutBox::launchAsynchronously (std::move (c), getLocalArea (&vel, vel.getLocalBounds()).withSizeKeepingCentre (40, 40).translated (0, -vel.getHeight() / 2), this);
     }
 
     // ------------------------------------------------------------ the menu bar (File, Edit, Notes, ...)
