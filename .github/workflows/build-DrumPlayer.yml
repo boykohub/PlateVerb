@@ -1,0 +1,21 @@
+name: Build DrumPlayer
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'DrumPlayer/**'
+      - 'Source/FlexFonts.h'
+      - 'CMakeLists.txt'
+      - '.github/workflows/build-DrumPlayer.yml'
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -B build -A x64
+      - run: cmake --build build --config Release --target DrumPlayer_VST3
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DrumPlayer-VST3
+          path: build/DrumPlayer_artefacts/Release/VST3

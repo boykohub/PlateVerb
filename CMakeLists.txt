@@ -56,3 +56,25 @@ target_compile_definitions(N1081 PUBLIC
 target_link_libraries(N1081
   PRIVATE juce::juce_audio_processors juce::juce_dsp
   PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_lto_flags)
+
+# ---------------------------------------------------------------- Drum Player (fourth plugin: key-triggered drum patterns, MIDI out)
+juce_add_plugin(DrumPlayer
+  COMPANY_NAME "Boyko"
+  PLUGIN_MANUFACTURER_CODE Boyk
+  PLUGIN_CODE DrmP
+  FORMATS VST3
+  IS_SYNTH TRUE
+  NEEDS_MIDI_INPUT TRUE
+  NEEDS_MIDI_OUTPUT TRUE
+  IS_MIDI_EFFECT FALSE
+  VST3_CATEGORIES Instrument Drum Generator
+  PRODUCT_NAME "Drum Player")
+
+target_sources(DrumPlayer PRIVATE DrumPlayer/Source/DPPlugin.cpp)
+target_include_directories(DrumPlayer PRIVATE Source DrumPlayer/Source)
+target_compile_features(DrumPlayer PRIVATE cxx_std_17)
+target_compile_definitions(DrumPlayer PUBLIC
+  JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0)
+target_link_libraries(DrumPlayer
+  PRIVATE juce::juce_audio_processors
+  PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_lto_flags)
