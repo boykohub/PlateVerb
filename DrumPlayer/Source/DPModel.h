@@ -14,7 +14,8 @@ using namespace juce;
 
 constexpr int PPQ = 960;                 // internal ticks per quarter note
 constexpr int maxBars = 256;           // any length the user sets (the old 4-bar limit is gone)
-constexpr int numKeys = 128;
+constexpr int numKeys = 129;                 // 128 keys, plus one hidden slot for previewing grooves
+constexpr int previewKey = 128;
 
 // ------------------------------------------------------------------ note values
 struct NoteValue { const char* name; int ticks; bool triplet; };
@@ -693,7 +694,7 @@ inline std::unique_ptr<XmlElement> songToXml (const Song& s)
     x->setAttribute ("playMap", s.playMap); x->setAttribute ("importMap", s.importMap);
     String cn; for (int v : s.customNotes) cn << v << ','; x->setAttribute ("customMap", cn);
     auto* ks = x->createNewChildElement ("Keys");
-    for (int k = 0; k < numKeys; ++k) if (! s.keys[(size_t) k].isEmpty()) { auto px = patternToXml (s.keys[(size_t) k]); px->setAttribute ("key", k); ks->addChildElement (px.release()); }
+    for (int k = 0; k < 128; ++k) if (! s.keys[(size_t) k].isEmpty()) { auto px = patternToXml (s.keys[(size_t) k]); px->setAttribute ("key", k); ks->addChildElement (px.release()); }
     auto* pk = x->createNewChildElement ("Park");
     for (int i = 0; i < (int) s.park.size(); ++i) if (! s.park[(size_t) i].isEmpty()) { auto px = patternToXml (s.park[(size_t) i]); px->setAttribute ("slot", i); pk->addChildElement (px.release()); }
     auto* ls = x->createNewChildElement ("Lanes");
@@ -741,7 +742,7 @@ inline Song songFromXml (const XmlElement& x)
     { auto f = StringArray::fromTokens (x.getStringAttribute ("customMap"), ",", ""); f.removeEmptyStrings();
       if (f.size() == aCount) for (int a = 0; a < aCount; ++a) s.customNotes[(size_t) a] = jlimit (-1, 127, f[a].getIntValue()); }
     if (auto* ks = x.getChildByName ("Keys"))
-        for (auto* e : ks->getChildIterator()) { const int k = e->getIntAttribute ("key", -1); if (k >= 0 && k < numKeys) s.keys[(size_t) k] = patternFromXml (*e); }
+        for (auto* e : ks->getChildIterator()) { const int k = e->getIntAttribute ("key", -1); if (k >= 0 && k < 128) s.keys[(size_t) k] = patternFromXml (*e); }
     if (auto* pk = x.getChildByName ("Park"))
         for (auto* e : pk->getChildIterator()) { const int i = e->getIntAttribute ("slot", -1); if (i >= 0 && i < (int) s.park.size()) s.park[(size_t) i] = patternFromXml (*e); }
     if (auto* ls = x.getChildByName ("Lanes"))

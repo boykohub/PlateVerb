@@ -1,6 +1,6 @@
 // Drum Player: the main window.
 #pragma once
-#include "DPPanels.h"
+#include "DPGrooves.h"
 
 std::vector<std::wstring> dpClipboardFiles();      // DPClipboard.cpp
 
@@ -41,7 +41,7 @@ public:
     explicit DrumPlayerEditor (DrumPlayerProcessor& p)
         : AudioProcessorEditor (p), proc (p), st (p),
           strip (st, false), bigStrip (st, true), tray (st), bigTray (st), chainStrip (st), ruler (st), headers (st), grid (st), vel (st), songLane (st), songHeader (st, songLane),
-          quantPage (st), humPage (st), chainPage (st), setPage (st), presetPage (st), mapPage (st), recPage (st)
+          quantPage (st), humPage (st), chainPage (st), setPage (st), presetPage (st), mapPage (st), recPage (st), groovePage (st)
     {
         setLookAndFeel (&lnf);
         LookAndFeel::setDefaultLookAndFeel (&lnf);
@@ -70,6 +70,8 @@ public:
         body.addAndMakeVisible (keyInfo); keyInfo.setFont (font (11.5f, 2)); keyInfo.setColour (Label::textColourId, th::dim);
         keyInfo.setComponentID ("Pressed key"); keyInfo.setText ("Press a key...", dontSendNotification); keyInfo.setJustificationType (Justification::centredLeft);
         setupButton (body, chainsBtn, "Chains", true);
+        setupButton (body, groovesBtn, "Grooves", true, "Browse your MIDI grooves by style and type, listen, and drag them onto keys");
+        groovesBtn.onClick = [this] { togglePage (groovePage, groovesBtn); };
         setupButton (body, mapBtn, "Drum Map", true, "Which drum plugin you're playing, and where dropped MIDI comes from");
         mapBtn.onClick = [this] { togglePage (mapPage, mapBtn); };
         setupButton (body, settingsBtn, "Settings", true);
@@ -226,7 +228,8 @@ public:
         };
 
         // ---------------- pages
-        for (Page* pg : { (Page*) &quantPage, (Page*) &humPage, (Page*) &chainPage, (Page*) &setPage, (Page*) &presetPage, (Page*) &mapPage, (Page*) &recPage }) body.addChildComponent (pg);
+        for (Page* pg : { (Page*) &quantPage, (Page*) &humPage, (Page*) &chainPage, (Page*) &setPage, (Page*) &presetPage, (Page*) &mapPage, (Page*) &recPage, (Page*) &groovePage }) body.addChildComponent (pg);
+        groovePage.onLoad = [this] (const File& f, int k) { importFiles ({ f.getFullPathName() }, k); };
         presetPage.onLoaded = [this] { refreshAll(); };
         setPage.look.collectIds = [this] {
             StringArray out;
@@ -551,6 +554,7 @@ private:
     Body body;
     float scale = 1.0f;
 
+    TextButton groovesBtn;
     TextButton prevPreset, nextPreset, presetName, saveBtn, exchangeBtn, chainsBtn, mapBtn, settingsBtn, zoomOut, zoomPct, zoomIn, keysBtn, playModeBtn;
     Label keyInfo; int lastInSerialSeen = -1;
     KeyStrip strip, bigStrip;
@@ -583,7 +587,7 @@ private:
             owner->repaintRoll();
         }
     } scrollRelay;
-    QuantizePage quantPage; HumanizePage humPage; ChainPage chainPage; SettingsPage setPage; PresetPage presetPage; MapPage mapPage; RecordPage recPage;
+    QuantizePage quantPage; HumanizePage humPage; ChainPage chainPage; SettingsPage setPage; PresetPage presetPage; MapPage mapPage; RecordPage recPage; GroovePage groovePage;
     Component exchange;
     Page* openPage = nullptr; TextButton* openPageBtn = nullptr;
     TextButton pageClose;                    // the X in the corner of an open page
@@ -612,9 +616,9 @@ private:
         headerTitle = h.removeFromLeft (170);
         RowPlacer hp (h, 5);
         hp.place (prevPreset, 24); hp.place (presetName, 200); hp.place (nextPreset, 24); hp.skip (4); hp.place (saveBtn); hp.skip (12);
-        hp.place (keysBtn); hp.place (playModeBtn); hp.skip (6); hp.place (keyInfo, jmax (60, h.getRight() - 455 - hp.x));
-        RowPlacer hr (h.withTrimmedLeft (h.getWidth() - 450), 5);
-        hr.place (exchangeBtn); hr.place (chainsBtn); hr.place (mapBtn); hr.place (settingsBtn); hr.skip (8);
+        hp.place (keysBtn); hp.place (playModeBtn); hp.skip (6); hp.place (keyInfo, jmax (60, h.getRight() - 525 - hp.x));
+        RowPlacer hr (h.withTrimmedLeft (h.getWidth() - 520), 5);
+        hr.place (groovesBtn); hr.place (exchangeBtn); hr.place (chainsBtn); hr.place (mapBtn); hr.place (settingsBtn); hr.skip (8);
         hr.place (zoomOut, 24); hr.place (zoomPct, 48); hr.place (zoomIn, 24);
         a.removeFromTop (6);
         // keyboard + tray
@@ -676,6 +680,7 @@ private:
         for (Page* pg : { (Page*) &quantPage, (Page*) &humPage, (Page*) &chainPage, (Page*) &setPage, (Page*) &recPage }) pg->setBounds (pageArea);
         mapPage.setBounds (rollArea.withTrimmedLeft (jmax (0, rollArea.getWidth() - 520)));
         presetPage.setBounds (rollArea.withTrimmedLeft (jmax (0, rollArea.getWidth() - 600)));
+        groovePage.setBounds (rollArea.withTrimmedLeft (jmax (0, rollArea.getWidth() - 900)));
         exchange.setBounds (rollArea.withTrimmedTop (-90));
         auto ex = exchange.getLocalBounds().reduced (12);
         exchangeHelp.setBounds (ex.removeFromTop (24));

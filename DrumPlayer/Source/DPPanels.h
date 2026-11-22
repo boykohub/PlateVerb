@@ -229,7 +229,7 @@ public:
     }
 
     // ------------------------------------------------------------ internal drag (swap / unpark)
-    bool isInterestedInDragSource (const SourceDetails& d) override { const auto s = d.description.toString(); return s.startsWith ("key:") || s.startsWith ("park:"); }
+    bool isInterestedInDragSource (const SourceDetails& d) override { const auto s = d.description.toString(); return s.startsWith ("key:") || s.startsWith ("park:") || s.startsWith ("groove:"); }
     void itemDragMove (const SourceDetails& d) override { dropHover = keyAt (d.localPosition.toFloat()); repaint(); }
     void itemDragExit (const SourceDetails&) override { dropHover = -1; repaint(); }
     void itemDropped (const SourceDetails& d) override
@@ -238,6 +238,7 @@ public:
         dropHover = -1;
         if (to < 0 || ! isPatternKey (to)) { repaint(); return; }
         const auto s = d.description.toString();
+        if (s.startsWith ("groove:")) { if (onFiles) onFiles ({ s.fromFirstOccurrenceOf ("groove:", false, false) }, to); repaint(); return; }
         if (s.startsWith ("key:")) {
             const int from = s.fromFirstOccurrenceOf ("key:", false, false).getIntValue();
             if (from == to) return;
