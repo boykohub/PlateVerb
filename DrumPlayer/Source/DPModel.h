@@ -145,6 +145,11 @@ struct Settings
         if (playChannel != 0 && playChannel != triggerChannel && ch == playChannel) return -1;
         if (n >= zoneLow && n <= zoneHigh) return n;
         if (! mirrorOctaves) return -1;
+        const int width = zoneHigh - zoneLow + 1;
+        if (width % 12 == 0) {                         // whole octaves: the zone repeats up the keyboard, C plays the C pattern
+            int k = zoneLow + ((n - zoneLow) % width + width) % width;
+            return k;
+        }
         int k = n;
         while (k > zoneHigh) k -= 12;
         while (k < zoneLow) k += 12;

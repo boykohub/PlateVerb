@@ -198,6 +198,7 @@ public:
     std::atomic<int> recStateUi { 0 };               // 0 off, 1 counting in, 2 recording
     std::atomic<int> recSession { 0 };
     std::array<std::atomic<uint32>, 128> outHits {}, inHits {};   // per note, for the lane lights
+    std::atomic<int> lastInNote { -1 }, lastInKey { -1 }, lastInSerial { 0 };   // the last key pressed and the pattern key it hit
 
     // ---------------------------------------------------------------- display (read by the editor)
     std::atomic<int> playingKey { -1 }, queuedKey { -2 }, chainPlaying { -1 }, chainStep { -1 };
@@ -553,6 +554,7 @@ private:
                 if (S->chains[(size_t) c].triggerNote == nn) { if (m.isNoteOn()) startChain (c, ppq); return; }
             const int key = st.keyForNote (nn, m.getChannel());
             const int stop = st.resolveStop();
+            if (m.isNoteOn()) { lastInNote = nn; lastInKey = key; lastInSerial++; }
             if (stop >= 0 && (key == stop || (key < 0 && nn == stop && st.keyForNote (nn, m.getChannel()) < 0 && stop > st.zoneHigh))) {
                 if (m.isNoteOn()) { stopNow (out, sample); chain = -1; }
                 return;

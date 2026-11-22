@@ -40,6 +40,10 @@ public:
         setupButton (body, presetName, "Presets", true, "Preset browser");
         setupButton (body, saveBtn, "Save", false, "Save the current preset (or name a new one in the browser)");
         setupButton (body, exchangeBtn, "Exchange", true, "Big keyboard for moving patterns between keys");
+        setupButton (body, keysBtn, "Keys play patterns", true, "On: every key on your keyboard plays the pattern keys, in any octave (C plays the C pattern). Off: only the pattern keys do, the rest play drums");
+        keysBtn.onClick = [this] { const bool on = keysBtn.getToggleState(); st.applySong ("Keys play patterns", [on] (Song& s) { s.settings.mirrorOctaves = on; }); showToast (on ? "Every key now plays patterns" : "Keys outside the pattern keys play drums"); };
+        body.addAndMakeVisible (keyInfo); keyInfo.setFont (font (11.5f, 2)); keyInfo.setColour (Label::textColourId, th::dim);
+        keyInfo.setComponentID ("Pressed key"); keyInfo.setText ("Press a key...", dontSendNotification); keyInfo.setJustificationType (Justification::centredLeft);
         setupButton (body, chainsBtn, "Chains", true);
         setupButton (body, mapBtn, "Drum Map", true, "Which drum plugin you're playing, and where dropped MIDI comes from");
         mapBtn.onClick = [this] { togglePage (mapPage, mapBtn); };
@@ -268,7 +272,8 @@ private:
     Body body;
     float scale = 1.0f;
 
-    TextButton prevPreset, nextPreset, presetName, saveBtn, exchangeBtn, chainsBtn, mapBtn, settingsBtn, zoomOut, zoomPct, zoomIn;
+    TextButton prevPreset, nextPreset, presetName, saveBtn, exchangeBtn, chainsBtn, mapBtn, settingsBtn, zoomOut, zoomPct, zoomIn, keysBtn;
+    Label keyInfo; int lastInSerialSeen = -1;
     KeyStrip strip, bigStrip;
     ParkTray tray, bigTray;
     TextEditor nameEd, barsEd;
@@ -319,7 +324,8 @@ private:
         headerArea = h;
         headerTitle = h.removeFromLeft (170);
         RowPlacer hp (h, 5);
-        hp.place (prevPreset, 24); hp.place (presetName, 230); hp.place (nextPreset, 24); hp.skip (4); hp.place (saveBtn);
+        hp.place (prevPreset, 24); hp.place (presetName, 200); hp.place (nextPreset, 24); hp.skip (4); hp.place (saveBtn); hp.skip (12);
+        hp.place (keysBtn); hp.skip (6); hp.place (keyInfo, jmax (60, h.getRight() - 455 - hp.x));
         RowPlacer hr (h.withTrimmedLeft (h.getWidth() - 450), 5);
         hr.place (exchangeBtn); hr.place (chainsBtn); hr.place (mapBtn); hr.place (settingsBtn); hr.skip (8);
         hr.place (zoomOut, 24); hr.place (zoomPct, 48); hr.place (zoomIn, 24);
@@ -421,6 +427,7 @@ private:
         presetName.setButtonText (proc.presetName.isNotEmpty() ? proc.presetName : String ("Presets"));
         undoBtn.setEnabled (proc.undo.canUndo()); redoBtn.setEnabled (proc.undo.canRedo());
         zoomPct.setButtonText (String ((int) std::round (scale * 100)) + "%");
+        keysBtn.setToggleState (st.song().settings.mirrorOctaves, dontSendNotification);
         syncSwingPreset();
         status.setText (keyName (st.song().editKey) + "   " + (p.name.isNotEmpty() ? p.name : String ("(empty key)")) + "   |   "
                         + String ((int) p.notes.size()) + " notes   |   " + String (p.bars) + " x " + String (p.beatsPerBar) + "/4"
@@ -464,6 +471,15 @@ private:
             if (lit != recBtn.getToggleState()) recBtn.setToggleState (lit, dontSendNotification);
         }
         if (headers.pollHits()) headers.repaint();
+        if (const int ser = proc.lastInSerial.load(); ser != lastInSerialSeen) {     // which key was pressed, and what it did
+            lastInSerialSeen = ser;
+            const int n = proc.lastInNote.load(), k = proc.lastInKey.load();
+            String t = "Key " + keyName (n) + " (" + String (n) + ")";
+            if (k >= 0 && k == st.song().settings.resolveStop()) t << "  ->  STOP";
+            else if (k >= 0) t << "  ->  pattern " + keyName (k) + (st.song().keys[(size_t) k].notes.empty() ? String ("  (empty key)") : "  " + st.song().keys[(size_t) k].name);
+            else t << "  ->  drum: " << st.song().laneName (n);
+            keyInfo.setText (t, dontSendNotification);
+        }
         {   // new drums arriving from the keyboard or pads get their own lane straight away
             bool added = false;
             for (int nn = 0; nn < 128; ++nn) {
