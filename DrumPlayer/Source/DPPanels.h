@@ -312,6 +312,217 @@ private:
     bool dragging = false;
 };
 
+
+// ---------------------------------------------------------------- chain strip on the main window
+class ChainStrip : public Component, public DragAndDropTarget, public SettableTooltipClient
+{
+public:
+    explicit ChainStrip (EditState& e) : st (e)
+    {
+        setTooltip ("Drag keys here to chain them. Drag a tile to reorder, right-click it for repeats. Click a tile to edit its pattern");
+        setupCombo (*this, sel, {}, 1, "Which chain");
+        sel.onChange = [this] {
+            const int i = sel.getSelectedItemIndex();
+            if (i == (int) st.song().chains.size()) {                       // "+ New chain"
+                st.applySong ("New chain", [] (Song& s) { s.chains.push_back ({ "Chain " + String ((int) s.chains.size() + 1), {}, -1, true }); });
+                st.currentChain = (int) st.song().chains.size() - 1;
+            } else if (i >= 0) st.currentChain = i;
+            refresh(); if (st.changed) st.changed();
+        };
+        setupButton (*this, play, "Play", false, "Play this chain"); play.onClick = [this] { st.proc.uiPlayChain (cur()); };
+        setupButton (*this, loop, "Loop", true); loop.onClick = [this] { const bool on = loop.getToggleState(); edit ("Chain loop", [on] (Chain& c) { c.loop = on; }); };
+        setupButton (*this, keyBtn, "Key: none", false, "Start this chain from a key on your keyboard");
+        keyBtn.onClick = [this] { keyMenu(); };
+        dragOut.setButtonText ("MIDI"); dragOut.setSize (fitW ("MIDI"), btnH); dragOut.setComponentID ("Chain MIDI"); addAndMakeVisible (dragOut);
+        dragOut.setTooltip ("Drag the whole chain out as one MIDI file");
+        dragOut.getParts = [this] {
+            std::vector<const Pattern*> v;
+            for (auto& s2 : chain().steps) if (s2.key >= 0) for (int r = 0; r < s2.repeats; ++r) v.push_back (&st.song().keys[(size_t) s2.key]);
+            return v;
+        };
+        dragOut.getChannel = [this] { return st.song().settings.outChannel; };
+    }
+    void refresh()
+    {
+        auto& chains = st.song().chains;
+        st.currentChain = cur();
+        sel.clear (dontSendNotification);
+        for (int i = 0; i < (int) chains.size(); ++i) sel.addItem (chains[(size_t) i].name.isNotEmpty() ? chains[(size_t) i].name : "Chain " + String (i + 1), i + 1);
+        sel.addItem ("+ New chain", (int) chains.size() + 1);
+        sel.setSelectedItemIndex (st.currentChain, dontSendNotification);
+        loop.setToggleState (chain().loop, dontSendNotification);
+        const int tn = chain().triggerNote;
+        keyBtn.setButtonText (tn >= 0 ? "Key: " + keyName (tn) : String ("Key: none"));
+        repaint();
+    }
+    void paint (Graphics& g) override
+    {
+        drawCard (g, getLocalBounds().toFloat().reduced (1), th::panel, 8, "Chain strip");
+        g.setFont (font (9.5f, 3)); g.setColour (th::faint);
+        g.drawText ("CHAIN", 10, 0, 44, getHeight(), Justification::centredLeft);
+        const auto& c = chain();
+        const bool playingThis = st.proc.chainPlaying.load() == cur();
+        const int playStep = st.proc.chainStep.load();
+        g.saveState(); g.reduceClipRegion (tilesArea());
+        for (int i = 0; i <= (int) c.steps.size(); ++i) {
+            auto r = tileRect (i);
+            if (i == (int) c.steps.size()) {                                 // the drop hint at the end
+                float dash[] = { 4, 3 };
+                g.setColour (dropAt == i ? th::green : th::faint);
+                Path p; p.addRoundedRectangle (r, 5);
+                PathStrokeType (1.2f).createDashedStroke (p, p, dash, 2);
+                g.fillPath (p);
+                g.setFont (font (10.5f, 2)); g.drawText (c.steps.empty() ? "drag keys here" : "+", r.toNearestInt(), Justification::centred);
+                break;
+            }
+            const auto& step = c.steps[(size_t) i];
+            const auto& p = st.song().keys[(size_t) jlimit (0, 127, step.key)];
+            const bool on = playingThis && playStep == i;
+            g.setColour (Colours::black.withAlpha (0.35f)); g.fillRoundedRectangle (r.translated (0, 1), 5);
+            g.setColour (th::typeColour (p.type).withAlpha (p.notes.empty() ? 0.35f : 0.9f)); g.fillRoundedRectangle (r, 5);
+            if (on) { g.setColour (th::amber); g.drawRoundedRectangle (r.expanded (1), 5, 2.2f); }
+            if (i == dragStep) { g.setColour (Colours::black.withAlpha (0.4f)); g.fillRoundedRectangle (r, 5); }
+            g.setColour (th::ink); g.setFont (font (10.5f, 2));
+            g.drawFittedText ((p.name.isNotEmpty() ? p.name : keyName (step.key)), r.reduced (6, 1).withTrimmedRight (22).toNearestInt(), Justification::centredLeft, 1, 0.8f);
+            g.setFont (font (10.5f, 3));
+            g.drawText ("x" + String (step.repeats), r.reduced (5, 0).toNearestInt(), Justification::centredRight);
+            if (dropAt == i) { g.setColour (th::green); g.fillRect (r.getX() - 3.0f, r.getY(), 2.0f, r.getHeight()); }
+        }
+        g.restoreState();
+    }
+    void resized() override
+    {
+        RowPlacer rp (getLocalBounds().withTrimmedLeft (52), 5);
+        rp.place (sel, 120); rp.place (play); rp.place (loop); rp.place (keyBtn, 86); rp.place (dragOut);
+        tilesX = rp.x + 6;
+    }
+    void mouseDown (const MouseEvent& e) override
+    {
+        const int i = stepAt (e.position);
+        downStep = i;
+        if (i < 0) return;
+        if (e.mods.isPopupMenu()) { stepMenu (i); return; }
+        st.song().editKey = chain().steps[(size_t) i].key;
+        if (st.changed) st.changed();
+    }
+    void mouseDrag (const MouseEvent& e) override
+    {
+        if (downStep < 0 || e.getDistanceFromDragStart() < 6) return;
+        if (auto* c = DragAndDropContainer::findParentDragContainerFor (this))
+            if (! c->isDragAndDropActive()) {
+                const auto r = tileRect (downStep).toNearestInt();
+                const auto img = createComponentSnapshot (r, true);
+                const Point<int> off = r.getPosition() - e.getMouseDownPosition();
+                dragStep = downStep;
+                c->startDragging ("chainstep:" + String (downStep), this, ScaledImage (img), false, &off);
+            }
+    }
+    void mouseUp (const MouseEvent&) override { downStep = -1; dragStep = -1; repaint(); }
+    void mouseWheelMove (const MouseEvent&, const MouseWheelDetails& w) override
+    {
+        scroll = jlimit (0, jmax (0, ((int) chain().steps.size() + 1) * (tileW + gap) - tilesArea().getWidth()), scroll - (int) ((w.deltaY + w.deltaX) * 300));
+        repaint();
+    }
+
+    bool isInterestedInDragSource (const SourceDetails& d) override { const auto s2 = d.description.toString(); return s2.startsWith ("key:") || s2.startsWith ("chainstep:"); }
+    void itemDragMove (const SourceDetails& d) override { dropAt = insertAt (d.localPosition.toFloat()); repaint(); }
+    void itemDragExit (const SourceDetails&) override { dropAt = -1; repaint(); }
+    void itemDropped (const SourceDetails& d) override
+    {
+        const int at = insertAt (d.localPosition.toFloat());
+        dropAt = -1; dragStep = -1;
+        const auto s2 = d.description.toString();
+        if (s2.startsWith ("key:")) {
+            const int k = s2.fromFirstOccurrenceOf ("key:", false, false).getIntValue();
+            edit ("Add to chain", [k, at] (Chain& c) { c.steps.insert (c.steps.begin() + jlimit (0, (int) c.steps.size(), at), ChainStep { k, 1 }); });
+        } else {
+            const int from = s2.fromFirstOccurrenceOf ("chainstep:", false, false).getIntValue();
+            edit ("Move chain step", [from, at] (Chain& c) {
+                if (from < 0 || from >= (int) c.steps.size()) return;
+                auto step = c.steps[(size_t) from];
+                c.steps.erase (c.steps.begin() + from);
+                const int to = jlimit (0, (int) c.steps.size(), at > from ? at - 1 : at);
+                c.steps.insert (c.steps.begin() + to, step);
+            });
+        }
+    }
+private:
+    EditState& st;
+    ComboBox sel; TextButton play, loop, keyBtn; DragMidiButton dragOut;
+    int tilesX = 400, scroll = 0, dropAt = -1, downStep = -1, dragStep = -1;
+    static constexpr int tileW = 104, gap = 5;
+
+    int cur() const { return jlimit (0, jmax (0, (int) st.song().chains.size() - 1), st.currentChain); }
+    Chain& chain() { if (st.song().chains.empty()) st.song().chains.push_back ({ "Chain 1", {}, -1, true }); return st.song().chains[(size_t) cur()]; }
+    Rectangle<int> tilesArea() const { return getLocalBounds().withTrimmedLeft (tilesX).reduced (0, 4).withTrimmedRight (6); }
+    Rectangle<float> tileRect (int i) const
+    {
+        const auto a = tilesArea();
+        return { (float) (a.getX() + i * (tileW + gap) - scroll), (float) a.getY() + 1, (float) tileW, (float) a.getHeight() - 2 };
+    }
+    int stepAt (Point<float> p)
+    {
+        if (! tilesArea().toFloat().contains (p)) return -1;
+        for (int i = 0; i < (int) chain().steps.size(); ++i) if (tileRect (i).contains (p)) return i;
+        return -1;
+    }
+    int insertAt (Point<float> p)
+    {
+        const int n = (int) chain().steps.size();
+        const float rel = p.x - tilesArea().getX() + scroll + tileW * 0.5f;
+        return jlimit (0, n, (int) (rel / (tileW + gap)));
+    }
+    void edit (const String& name, std::function<void (Chain&)> f)
+    {
+        const int c = cur();
+        st.applySong (name, [c, f] (Song& s) { if (c < (int) s.chains.size()) f (s.chains[(size_t) c]); });
+        refresh();
+    }
+    void stepMenu (int i)
+    {
+        PopupMenu m;
+        PopupMenu reps; for (int r : { 1, 2, 3, 4, 6, 8, 12, 16, 32 }) reps.addItem (100 + r, String (r) + (r == 1 ? " time" : " times"), true, chain().steps[(size_t) i].repeats == r);
+        m.addSubMenu ("Repeats", reps);
+        m.addItem (1, "Move left", i > 0); m.addItem (2, "Move right", i < (int) chain().steps.size() - 1);
+        m.addItem (3, "Duplicate"); m.addItem (4, "Remove");
+        m.addSeparator(); m.addItem (5, "Edit this pattern");
+        m.showMenuAsync (PopupMenu::Options().withMousePosition(), [this, i] (int r) {
+            if (r >= 100) { const int n = r - 100; edit ("Chain repeats", [i, n] (Chain& c) { c.steps[(size_t) i].repeats = n; }); }
+            else if (r == 1) edit ("Move chain step", [i] (Chain& c) { std::swap (c.steps[(size_t) i], c.steps[(size_t) i - 1]); });
+            else if (r == 2) edit ("Move chain step", [i] (Chain& c) { std::swap (c.steps[(size_t) i], c.steps[(size_t) i + 1]); });
+            else if (r == 3) edit ("Duplicate chain step", [i] (Chain& c) { auto s2 = c.steps[(size_t) i]; c.steps.insert (c.steps.begin() + i + 1, s2); });
+            else if (r == 4) edit ("Remove chain step", [i] (Chain& c) { c.steps.erase (c.steps.begin() + i); });
+            else if (r == 5) { st.song().editKey = chain().steps[(size_t) i].key; if (st.changed) st.changed(); }
+        });
+    }
+    void keyMenu()
+    {
+        PopupMenu m;
+        m.addItem (1, "None (Play button only)", true, chain().triggerNote < 0);
+        PopupMenu keys;
+        for (int n = 0; n < 128; ++n) keys.addItem (1000 + n, keyName (n) + "  (" + String (n) + ")", true, chain().triggerNote == n);
+        m.addSubMenu ("Start from key", keys);
+        m.addSeparator();
+        m.addItem (2, "Rename this chain...");
+        m.addItem (3, "Delete this chain", st.song().chains.size() > 1);
+        m.showMenuAsync (PopupMenu::Options().withTargetComponent (&keyBtn), [this] (int r) {
+            if (r == 1) edit ("Chain key", [] (Chain& c) { c.triggerNote = -1; });
+            else if (r >= 1000) { const int n = r - 1000; edit ("Chain key", [n] (Chain& c) { c.triggerNote = n; }); }
+            else if (r == 2) {
+                auto* aw = new AlertWindow ("Rename chain", "", MessageBoxIconType::NoIcon);
+                aw->addTextEditor ("n", chain().name);
+                aw->addButton ("OK", 1, KeyPress (KeyPress::returnKey)); aw->addButton ("Cancel", 0, KeyPress (KeyPress::escapeKey));
+                aw->enterModalState (true, ModalCallbackFunction::create ([this, aw] (int res) { if (res == 1) { const auto t = aw->getTextEditorContents ("n"); edit ("Rename chain", [t] (Chain& c) { c.name = t; }); } }), true);
+            }
+            else if (r == 3) {
+                const int c = cur();
+                st.applySong ("Delete chain", [c] (Song& s) { if (c < (int) s.chains.size()) s.chains.erase (s.chains.begin() + c); if (s.chains.empty()) s.chains.push_back ({ "Chain 1", {}, -1, true }); });
+                st.currentChain = jmax (0, c - 1); refresh();
+            }
+        });
+    }
+};
+
 // ---------------------------------------------------------------- quantize page
 class QuantizePage : public Page
 {
@@ -445,13 +656,23 @@ class ChainPage : public Page
 public:
     ChainPage (EditState& e) : Page ("CHAINS"), st (e)
     {
-        for (int i = 0; i < 4; ++i) {
-            auto* b = chainBtns.add (new TextButton());
-            setupButton (*this, *b, "Chain " + String::charToString ((juce_wchar) ('A' + i)), false);
-            b->setRadioGroupId (77); b->setClickingTogglesState (true);
-            b->onClick = [this, i] { current = i; refresh(); };
-        }
-        chainBtns[0]->setToggleState (true, dontSendNotification);
+        setupCombo (*this, chainSel, {}, 1, "Which chain");
+        chainSel.onChange = [this] { const int i = chainSel.getSelectedItemIndex(); if (i >= 0) { st.currentChain = i; refresh(); if (st.changed) st.changed(); } };
+        setupButton (*this, newChain, "+ New chain");
+        newChain.onClick = [this] { st.applySong ("New chain", [] (Song& s) { s.chains.push_back ({ "Chain " + String ((int) s.chains.size() + 1), {}, -1, true }); }); st.currentChain = (int) st.song().chains.size() - 1; refresh(); };
+        setupButton (*this, renameChain, "Rename");
+        renameChain.onClick = [this] {
+            auto* aw = new AlertWindow ("Rename chain", "", MessageBoxIconType::NoIcon);
+            aw->addTextEditor ("n", st.song().chains[(size_t) current].name);
+            aw->addButton ("OK", 1, KeyPress (KeyPress::returnKey)); aw->addButton ("Cancel", 0, KeyPress (KeyPress::escapeKey));
+            aw->enterModalState (true, ModalCallbackFunction::create ([this, aw] (int r) { if (r == 1) { const auto t = aw->getTextEditorContents ("n"); edit ([t] (Chain& c) { c.name = t; }); } }), true);
+        };
+        setupButton (*this, delChain, "Delete chain");
+        delChain.onClick = [this] {
+            const int c = current;
+            st.applySong ("Delete chain", [c] (Song& s) { if (c < (int) s.chains.size()) s.chains.erase (s.chains.begin() + c); if (s.chains.empty()) s.chains.push_back ({ "Chain 1", {}, -1, true }); });
+            st.currentChain = jmax (0, c - 1); refresh();
+        };
         setupButton (*this, add, "+ Add the edited key"); add.onClick = [this] {
             const int k = st.song().editKey;
             edit ([k] (Chain& c) { c.steps.push_back ({ k, 1 }); });
@@ -478,7 +699,12 @@ public:
     }
     void refresh() override
     {
-        auto& c = st.song().chains[(size_t) current];
+        auto& chains = st.song().chains;
+        current = jlimit (0, (int) chains.size() - 1, st.currentChain);
+        chainSel.clear (dontSendNotification);
+        for (int i = 0; i < (int) chains.size(); ++i) chainSel.addItem (chains[(size_t) i].name.isNotEmpty() ? chains[(size_t) i].name : "Chain " + String (i + 1), i + 1);
+        chainSel.setSelectedItemIndex (current, dontSendNotification);
+        auto& c = chains[(size_t) current];
         loop.setToggleState (c.loop, dontSendNotification);
         trig.setSelectedItemIndex (c.triggerNote + 1, dontSendNotification);
         rows.clear();
@@ -493,7 +719,8 @@ public:
     {
         auto a = content();
         auto r = a.removeFromTop (28);
-        for (auto* b : chainBtns) { b->setBounds (r.removeFromLeft (b->getWidth()).reduced (0, 3)); r.removeFromLeft (5); }
+        chainSel.setBounds (r.removeFromLeft (150).reduced (0, 3)); r.removeFromLeft (6);
+        for (auto* b : { &newChain, &renameChain, &delChain }) { b->setBounds (r.removeFromLeft (b->getWidth()).reduced (0, 3)); r.removeFromLeft (5); }
         a.removeFromTop (4);
         r = a.removeFromTop (28);
         for (Component* b : { (Component*) &add, (Component*) &clear, (Component*) &loop, (Component*) &play, (Component*) &stop, (Component*) &dragOut }) { b->setBounds (r.removeFromLeft (b->getWidth()).reduced (0, 3)); r.removeFromLeft (5); }
@@ -554,7 +781,7 @@ private:
         refresh();
     }
     EditState& st;
-    OwnedArray<TextButton> chainBtns;
+    ComboBox chainSel; TextButton newChain, renameChain, delChain;
     TextButton add, clear, loop, play, stop;
     DragMidiButton dragOut;
     Label lTrig, help; ComboBox trig;

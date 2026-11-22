@@ -166,7 +166,7 @@ struct Song
     std::array<int, aCount> customNotes {};        // Custom map: note per articulation (-1 = none)
     std::array<Pattern, numKeys> keys;
     std::vector<Lane> lanes;
-    std::array<Chain, 4> chains;
+    std::vector<Chain> chains { Chain { "Chain 1", {}, -1, true } };      // as many as you like
     std::array<Pattern, 8> park;
     Settings settings;
     int editKey = 0;
@@ -211,7 +211,6 @@ struct Song
         Song s;
         s.customNotes = defaultCustom();
         for (int n : { 36, 37, 38, 39, 40, 42, 44, 46, 41, 43, 45, 47, 48, 50, 49, 57, 51, 53, 55, 52, 54, 56 }) s.ensureLane (n);
-        for (int c = 0; c < 4; ++c) s.chains[(size_t) c].name = String::charToString ((juce_wchar) ('A' + c));
         // a starter groove and fill so the plugin makes a sound straight away
         auto& g = s.keys[0]; g.name = "Basic Rock"; g.bars = 1;
         for (int i = 0; i < 8; ++i) g.notes.push_back ({ i * 480, 60, 42, i % 2 == 0 ? 100 : 72 });
@@ -663,7 +662,6 @@ inline std::unique_ptr<XmlElement> songToXml (const Song& s)
 inline Song songFromXml (const XmlElement& x)
 {
     Song s;
-    for (int c = 0; c < 4; ++c) s.chains[(size_t) c].name = String::charToString ((juce_wchar) ('A' + c));
     s.editKey = jlimit (0, 127, x.getIntAttribute ("editKey", 0));
     s.playMap = jlimit (0, (int) numMaps - 1, x.getIntAttribute ("playMap", mapGM));
     s.importMap = jlimit (-1, (int) numMaps - 1, x.getIntAttribute ("importMap", -1));
@@ -682,16 +680,19 @@ inline Song songFromXml (const XmlElement& x)
             s.lanes.push_back (l);
         }
     if (auto* cs = x.getChildByName ("Chains")) {
-        int i = 0;
+        s.chains.clear();
         for (auto* e : cs->getChildIterator()) {
-            if (i >= 4) break;
-            auto& c = s.chains[(size_t) i++];
-            c.name = e->getStringAttribute ("name", c.name); c.triggerNote = e->getIntAttribute ("trigger", -1); c.loop = e->getBoolAttribute ("loop", true);
+            s.chains.push_back ({});
+            auto& c = s.chains.back();
+            c.name = e->getStringAttribute ("name", "Chain " + String ((int) s.chains.size())); c.triggerNote = e->getIntAttribute ("trigger", -1); c.loop = e->getBoolAttribute ("loop", true);
             for (auto& tok : StringArray::fromTokens (e->getStringAttribute ("steps"), ";", "")) {
                 auto f = StringArray::fromTokens (tok, ":", ""); if (f.size() == 2) c.steps.push_back ({ f[0].getIntValue(), jmax (1, f[1].getIntValue()) });
             }
         }
     }
+    // older saves had four fixed chains: keep only the ones in use
+    s.chains.erase (std::remove_if (s.chains.begin(), s.chains.end(), [] (const Chain& c) { return c.steps.empty() && c.triggerNote < 0; }), s.chains.end());
+    if (s.chains.empty()) s.chains.push_back ({ "Chain 1", {}, -1, true });
     if (auto* st = x.getChildByName ("Settings")) {
         auto& o = s.settings;
         o.outChannel = jlimit (1, 16, st->getIntAttribute ("out", 10));

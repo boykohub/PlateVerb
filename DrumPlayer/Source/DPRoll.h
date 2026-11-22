@@ -32,6 +32,7 @@ struct EditState
     float pxPerBeat = 80.0f;
     int scrollX = 0, scrollY = 0;
     int cursorTick = 0;              // where Paste goes
+    int currentChain = 0;            // the chain shown on the chain strip and page
     int defaultVel = 100;
     std::vector<Note> clipboard;
     static constexpr int laneH = 22;

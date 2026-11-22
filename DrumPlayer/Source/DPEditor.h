@@ -19,7 +19,7 @@ class DrumPlayerEditor : public AudioProcessorEditor, public DragAndDropContaine
 public:
     explicit DrumPlayerEditor (DrumPlayerProcessor& p)
         : AudioProcessorEditor (p), proc (p), st (p),
-          strip (st, false), bigStrip (st, true), tray (st), bigTray (st), ruler (st), headers (st), grid (st), vel (st),
+          strip (st, false), bigStrip (st, true), tray (st), bigTray (st), chainStrip (st), ruler (st), headers (st), grid (st), vel (st),
           quantPage (st), humPage (st), chainPage (st), setPage (st), presetPage (st), mapPage (st), recPage (st)
     {
         setLookAndFeel (&lnf);
@@ -61,7 +61,7 @@ public:
         zoomPct.onClick = [this] { zoomMenu(); };
 
         // ---------------- keyboard strip
-        body.addAndMakeVisible (strip); body.addAndMakeVisible (tray);
+        body.addAndMakeVisible (strip); body.addAndMakeVisible (tray); body.addAndMakeVisible (chainStrip);
         strip.onFiles = [this] (const StringArray& f, int k) { importFiles (f, k); };
         strip.onKeyMenu = [this] (int k) { keyMenu (k); };
         bigStrip.onFiles = strip.onFiles; bigStrip.onKeyMenu = strip.onKeyMenu;
@@ -276,6 +276,7 @@ private:
     Label keyInfo; int lastInSerialSeen = -1;
     KeyStrip strip, bigStrip;
     ParkTray tray, bigTray;
+    ChainStrip chainStrip;
     TextEditor nameEd, barsEd;
     ComboBox typeBox, bpbBox, gridBox, swingPreset, swingValue, velBox;
     Label lLen, lGrid, lSwing, lVel, exchangeHelp, status;
@@ -331,11 +332,13 @@ private:
         hr.place (zoomOut, 24); hr.place (zoomPct, 48); hr.place (zoomIn, 24);
         a.removeFromTop (6);
         // keyboard + tray
-        auto ks = a.removeFromTop (78);
+        auto ks = a.removeFromTop (72);
         tray.setBounds (ks.removeFromRight (250));
         ks.removeFromRight (8);
         strip.setBounds (ks);
-        a.removeFromTop (8);
+        a.removeFromTop (5);
+        chainStrip.setBounds (a.removeFromTop (32));
+        a.removeFromTop (7);
         // toolbar 1
         auto t1 = a.removeFromTop (28);
         toolArea = t1;
@@ -411,6 +414,7 @@ private:
     {
         refreshControls();
         if (openPage != nullptr) openPage->refresh();
+        chainStrip.refresh();
         clampScroll();
         strip.repaint(); bigStrip.repaint(); tray.repaint(); bigTray.repaint();
         repaintRoll();
@@ -489,9 +493,9 @@ private:
             if (added) { proc.publish(); repaintRoll(); }
         }
         if (Time::getMillisecondCounter() > toast.until && toast.text.isNotEmpty()) { toast.text = {}; toast.repaint(); }
-        if (openPage == &chainPage && proc.chainPlaying.load() >= 0) {
-            const int cs = proc.chainStep.load() * 10 + proc.chainPlaying.load();
-            if (cs != lastChainState) { lastChainState = cs; chainPage.refresh(); }
+        {
+            const int cs = proc.chainStep.load() * 1000 + proc.chainPlaying.load();
+            if (cs != lastChainState) { lastChainState = cs; chainStrip.repaint(); if (openPage == &chainPage) chainPage.refresh(); }
         }
     }
     int lastChainState = -1;
@@ -803,7 +807,8 @@ private:
         m.addItem (5, "Duplicate to the next free key", ! p.isEmpty());
         m.addItem (6, "Export as MIDI file...", ! p.notes.empty());
         m.addItem (7, "Clear", ! p.isEmpty());
-        PopupMenu chain; for (int c = 0; c < 4; ++c) chain.addItem (20 + c, "Add to chain " + String::charToString ((juce_wchar) ('A' + c)), ! p.notes.empty());
+        PopupMenu chain;
+        for (int c = 0; c < (int) s.chains.size() && c < 200; ++c) chain.addItem (2000 + c, "Add to " + (s.chains[(size_t) c].name.isNotEmpty() ? s.chains[(size_t) c].name : "Chain " + String (c + 1)), ! p.notes.empty());
         m.addSubMenu ("Chains", chain);
         m.showMenuAsync (PopupMenu::Options().withMousePosition(), [this, k] (int r) {
             switch (r) {
@@ -817,7 +822,7 @@ private:
                 case 7: st.applySong ("Clear key", [k] (Song& s2) { s2.keys[(size_t) k] = Pattern(); }); break;
                 default:
                     if (r >= 10 && r < 14) { const int t = r - 10; st.applySong ("Pattern type", [k, t] (Song& s2) { s2.keys[(size_t) k].type = (PatternType) t; }); }
-                    else if (r >= 20 && r < 24) { const int c = r - 20; st.applySong ("Add to chain", [k, c] (Song& s2) { s2.chains[(size_t) c].steps.push_back ({ k, 1 }); }); showToast ("Added to chain " + String::charToString ((juce_wchar) ('A' + c))); }
+                    else if (r >= 2000 && r < 2200) { const int c = r - 2000; st.applySong ("Add to chain", [k, c] (Song& s2) { if (c < (int) s2.chains.size()) s2.chains[(size_t) c].steps.push_back ({ k, 1 }); }); showToast ("Added to the chain"); }
                     break;
             }
         });

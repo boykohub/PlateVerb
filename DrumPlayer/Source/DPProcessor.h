@@ -522,6 +522,7 @@ private:
 
     void startChain (int c, double now)
     {
+        if (c < 0 || c >= (int) S->chains.size()) return;
         const auto& ch = S->chains[(size_t) c];
         if (ch.steps.empty()) return;
         chain = c; chainIdx = 0; pendingChainIdx = 0;
@@ -535,7 +536,7 @@ private:
         else if (c.type == CmdStop) { stopNow (out, 0); chain = -1; }
         else if (c.type == CmdRecStart) startRecording (c.value, now);
         else if (c.type == CmdRecStop) { if (recState == 1) { queued = {}; } recState = 0; }
-        else if (c.type == CmdChain) { if (c.value >= 0 && c.value < 4) startChain (c.value, now); }
+        else if (c.type == CmdChain) { if (c.value >= 0 && c.value < (int) S->chains.size()) startChain (c.value, now); }
         else if (c.type == CmdPreview) {
             const auto* l = S->lane (c.value);
             const int ch = (l != nullptr && l->channel > 0) ? l->channel : S->settings.outChannel;
@@ -550,7 +551,7 @@ private:
         const auto& st = S->settings;
         if (m.isNoteOnOrOff()) {
             const int nn = m.getNoteNumber();
-            for (int c = 0; c < 4; ++c)
+            for (int c = 0; c < (int) S->chains.size(); ++c)
                 if (S->chains[(size_t) c].triggerNote == nn) { if (m.isNoteOn()) startChain (c, ppq); return; }
             const int key = st.keyForNote (nn, m.getChannel());
             const int stop = st.resolveStop();
@@ -586,6 +587,7 @@ private:
         if (q.force && recState == 1 && q.key == recKey) { recState = 2; recStartPpq = q.ppq; }
         const auto& p = S->keys[(size_t) cur.key];
         const double len = p.lengthTicks() / (double) PPQ;
+        if (chain >= (int) S->chains.size()) chain = -1;
         if (chain >= 0) {
             const auto& ch = S->chains[(size_t) chain];
             const int reps = (chainIdx >= 0 && chainIdx < (int) ch.steps.size()) ? jmax (1, ch.steps[(size_t) chainIdx].repeats) : 1;
