@@ -304,14 +304,14 @@ private:
         lastBpm = bpm;
 
         if (playing && ! wasPlaying) {               // transport started: lock running pattern to the bar grid
-            if (cur.key >= 0) { const int bpb = S->keys[(size_t) cur.key].beatsPerBar; cur.start = std::floor (ppq / bpb + 1e-6) * bpb; queued.active = false; }
+            if (cur.key >= 0) { const int bpb = S->keys[(size_t) cur.key].beatsPerBar; cur.start = cur.anchor = std::floor (ppq / bpb + 1e-6) * bpb; queued.active = false; }
             flushOffs (out, 0, true);
         } else if (! playing && wasPlaying) {
             if (S->settings.stopWithHost) { stopNow (out, 0); chain = -1; }
             internalPpq = ppq = lastPpqEnd;
         } else if (playing && std::abs (ppq - lastPpqEnd) > 0.02) {   // locate / loop jump
             flushOffs (out, 0, true);
-            if (cur.key >= 0 && ppq < cur.start) { const int bpb = S->keys[(size_t) cur.key].beatsPerBar; cur.start = std::floor (ppq / bpb + 1e-6) * bpb; }
+            if (cur.key >= 0 && ppq < cur.start) { const int bpb = S->keys[(size_t) cur.key].beatsPerBar; cur.start = cur.anchor = std::floor (ppq / bpb + 1e-6) * bpb; }
             if (queued.active && queued.ppq < ppq) queued.ppq = ppq;
         }
         wasPlaying = playing; hostPlaying = playing;
@@ -361,8 +361,17 @@ private:
     }
 
     // ---------------------------------------------------------------- engine
-    struct Play { int key = -1; double start = 0; int returnKey = -1; };
-    struct Queue { bool active = false; double ppq = 0; int key = -1; int returnKey = -1; bool fromChain = false; bool force = false; };
+    struct Play { int key = -1; double start = 0; int returnKey = -1; double anchor = 0; };   // anchor: bar 1 of the running groove's grid
+    struct Queue { bool active = false; double ppq = 0; int key = -1; int returnKey = -1; bool fromChain = false; bool force = false; double virtStart = -1; double anchor = -1; };
+
+    // "in time": the new pattern joins at the spot it would be at had it been playing from the grid's bar 1
+    double alignedStart (int key, double t, double anchor) const
+    {
+        const double len = S->keys[(size_t) key].lengthTicks() / (double) PPQ;
+        if (len <= 0) return t;
+        return anchor + std::floor ((t - anchor) / len + 1e-9) * len;
+    }
+    bool inTime() const { return S->settings.startQuant == StartQuant::InTime; }
     struct Off { double ppq; int note, ch; };
     enum CmdType { CmdNoteOn = 1, CmdNoteOff, CmdStop, CmdChain, CmdPreview, CmdRecStart, CmdRecStop };
     struct Cmd { int type = 0, value = 0; };
@@ -493,6 +502,7 @@ private:
             case StartQuant::Beat: return std::ceil (now - 1e-6);
             case StartQuant::Bar: return cur.start + std::ceil ((now - cur.start) / bar - 1e-6) * bar;
             case StartQuant::PatternEnd: return cur.start + std::ceil ((now - cur.start) / len - 1e-6) * len;
+            case StartQuant::InTime: return now;
         }
         return now;
     }
@@ -516,8 +526,9 @@ private:
         }
         double at = now;
         if (cur.key >= 0) at = boundary (now);
-        else if (wasPlaying && S->settings.startQuant != StartQuant::Immediate) at = std::ceil (now - 0.02);   // host running: next beat
+        else if (wasPlaying && S->settings.startQuant != StartQuant::Immediate && S->settings.startQuant != StartQuant::InTime) at = std::ceil (now - 0.02);   // host running: next beat
         queued = { true, at, k, ret, fromChain };
+        if (inTime() && cur.key >= 0 && ! fromChain) { queued.anchor = cur.anchor; queued.virtStart = alignedStart (k, at, cur.anchor); }
     }
 
     void startChain (int c, double now)
@@ -583,7 +594,7 @@ private:
     {
         const auto q = queued; queued = {};
         if (q.key < 0) { stopNow (out, sampleAt (q.ppq)); chain = -1; return; }
-        cur = { q.key, q.ppq, q.returnKey };
+        cur = { q.key, q.virtStart >= 0 ? q.virtStart : q.ppq, q.returnKey, q.anchor >= 0 ? q.anchor : q.ppq };
         if (q.force && recState == 1 && q.key == recKey) { recState = 2; recStartPpq = q.ppq; }
         const auto& p = S->keys[(size_t) cur.key];
         const double len = p.lengthTicks() / (double) PPQ;
@@ -597,8 +608,12 @@ private:
             else queued = { true, cur.start + reps * len, -1, -1, true };
             return;
         }
-        if (p.type == PatternType::Fill || p.type == PatternType::Intro)
-            queued = { true, cur.start + len, keyHasPattern (cur.returnKey) ? cur.returnKey : -1, -1, false };
+        if (p.type == PatternType::Fill || p.type == PatternType::Intro) {
+            const double end = cur.start + len;               // in time, this is the end of the fill's own bar(s), never later
+            const int back = keyHasPattern (cur.returnKey) ? cur.returnKey : -1;
+            queued = { true, end, back, -1, false };
+            if (inTime() && back >= 0) { queued.anchor = cur.anchor; queued.virtStart = alignedStart (back, end, cur.anchor); }   // the groove carries on where it would be
+        }
         else if (p.type == PatternType::Ending)
             queued = { true, cur.start + len, -1, -1, false };
     }

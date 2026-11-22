@@ -68,7 +68,8 @@ public:
     void paint (Graphics& g) override
     {
         auto& s = st.song();
-        const int lo = s.settings.zoneLow, hi = s.settings.zoneHigh;
+        updateView();
+        const int lo = viewLow, hi = viewEnd;
         const int play = st.proc.playingKey.load(), queued = st.proc.queuedKey.load();
         const bool blink = (Time::getMillisecondCounter() / 250) % 2 == 0;
         fillArea (g, getLocalBounds(), "Keyboard strip", th::bg);
@@ -77,7 +78,9 @@ public:
             if (isBlackKey (k)) continue;
             auto r = keyRect (k);
             const auto& p = s.keys[(size_t) k];
-            g.setGradientFill (ColourGradient (Colour (0xffe9eaee), r.getTopLeft(), Colour (0xffb9bcc4), r.getBottomLeft(), false));
+            const bool usable = isPatternKey (k) || k == s.settings.resolveStop();
+            g.setGradientFill (ColourGradient (Colour (0xffe9eaee).withMultipliedBrightness (usable ? 1.0f : 0.55f), r.getTopLeft(),
+                                               Colour (0xffb9bcc4).withMultipliedBrightness (usable ? 1.0f : 0.55f), r.getBottomLeft(), false));
             g.fillRoundedRectangle (r.reduced (0.5f, 0), 3);
             g.setColour (Colours::black.withAlpha (0.55f)); g.drawRoundedRectangle (r.reduced (0.5f, 0), 3, 1.0f);
             drawTile (g, r.withTrimmedTop (r.getHeight() * 0.56f).reduced (2.5f, 3), k, p, false);
@@ -87,6 +90,7 @@ public:
         for (int k = lo; k <= hi; ++k) {
             if (! isBlackKey (k)) continue;
             auto r = keyRect (k);
+            if (r.isEmpty()) continue;
             const auto& p = s.keys[(size_t) k];
             g.setColour (Colours::black.withAlpha (0.5f)); g.fillRoundedRectangle (r.translated (1.5f, 2), 3);
             g.setGradientFill (ColourGradient (Colour (0xff3a3e46), r.getTopLeft(), Colour (0xff101114), r.getBottomLeft(), false));
@@ -97,31 +101,81 @@ public:
         // octave labels
         g.setFont (font (9.0f, 2)); g.setColour (Colours::black.withAlpha (0.55f));
         for (int k = lo; k <= hi; ++k) if (k % 12 == 0) { auto r = keyRect (k); g.drawText (keyName (k), r.withHeight (14).translated (0, (int) (r.getHeight() * 0.42f)), Justification::centred); }
+        // scroll arrows: the whole keyboard is there, an octave per click
+        drawArrow (g, leftArrow(), true, viewLow > firstKey());
+        drawArrow (g, rightArrow(), false, viewEnd < s.settings.zoneHigh);
     }
 
-    // ------------------------------------------------------------ geometry
-    int numWhite() const { int n = 0; for (int k = st.song().settings.zoneLow; k <= st.song().settings.zoneHigh; ++k) if (! isBlackKey (k)) ++n; return jmax (1, n); }
+    // ------------------------------------------------------------ geometry (a scrolling window onto the whole keyboard)
+    int firstKey() const
+    {
+        const auto& o = st.song().settings;
+        const int stop = o.resolveStop();
+        int f = (stop >= 0 && stop < o.zoneLow) ? stop : o.zoneLow;
+        while (f > 0 && isBlackKey (f)) --f;
+        return f;
+    }
+    bool isPatternKey (int k) const { const auto& o = st.song().settings; return k >= o.zoneLow && k <= o.zoneHigh && k != o.resolveStop(); }
+    int visibleWhites() const { return jmax (7, (getWidth() - 2 * arrowW) / (large ? 30 : 24)); }
+    void updateView()
+    {
+        const int hi = st.song().settings.zoneHigh;
+        if (viewLow < 0) viewLow = firstKey();
+        viewLow = jlimit (firstKey(), jmax (firstKey(), hi), viewLow);
+        while (viewLow > firstKey() && isBlackKey (viewLow)) --viewLow;
+        // pull back if the window runs past the top
+        auto endFor = [this, hi] (int from) { int w = 0, k = from; for (; k <= hi; ++k) { if (! isBlackKey (k)) { if (w == visibleWhites()) break; ++w; } } return k - 1; };
+        viewEnd = endFor (viewLow);
+        while (viewEnd >= hi && viewLow - 12 >= firstKey() && endFor (viewLow - 12) >= hi) { viewLow -= 12; viewEnd = endFor (viewLow); }
+    }
+    void scrollOctaves (int n) { viewLow += 12 * n; updateView(); repaint(); }
+    void ensureVisible (int k)
+    {
+        updateView();
+        if (k < viewLow) { while (k < viewLow && viewLow > firstKey()) viewLow -= 12; }
+        else if (k > viewEnd) { while (k > viewEnd && viewEnd < st.song().settings.zoneHigh) { viewLow += 12; updateView(); } }
+        updateView(); repaint();
+    }
     Rectangle<float> keyRect (int k) const
     {
-        const int lo = st.song().settings.zoneLow;
-        const float ww = (float) getWidth() / numWhite();
-        int wi = 0; for (int i = lo; i < k; ++i) if (! isBlackKey (i)) ++wi;
-        if (! isBlackKey (k)) return { wi * ww, 0.0f, ww, (float) getHeight() };
-        return { wi * ww - ww * 0.31f, 0.0f, ww * 0.62f, getHeight() * 0.58f };
+        if (k < viewLow || k > viewEnd) return {};
+        const float ww = (float) (getWidth() - 2 * arrowW) / visibleWhites();
+        int wi = 0; for (int i = viewLow; i < k; ++i) if (! isBlackKey (i)) ++wi;
+        const float x0 = (float) arrowW;
+        if (! isBlackKey (k)) return { x0 + wi * ww, 0.0f, ww, (float) getHeight() };
+        return { x0 + wi * ww - ww * 0.31f, 0.0f, ww * 0.62f, getHeight() * 0.58f };
     }
     int keyAt (Point<float> pt) const
     {
-        const auto& s = st.song().settings;
-        for (int k = s.zoneLow; k <= s.zoneHigh; ++k) if (isBlackKey (k) && keyRect (k).contains (pt)) return k;
-        for (int k = s.zoneLow; k <= s.zoneHigh; ++k) if (! isBlackKey (k) && keyRect (k).contains (pt)) return k;
+        for (int k = viewLow; k <= viewEnd; ++k) if (isBlackKey (k) && keyRect (k).contains (pt)) return k;
+        for (int k = viewLow; k <= viewEnd; ++k) if (! isBlackKey (k) && keyRect (k).contains (pt)) return k;
         return -1;
+    }
+    Rectangle<float> leftArrow() const { return { 0, 0, (float) arrowW - 2, (float) getHeight() }; }
+    Rectangle<float> rightArrow() const { return { (float) getWidth() - arrowW + 2, 0, (float) arrowW - 2, (float) getHeight() }; }
+    static void drawArrow (Graphics& g, Rectangle<float> r, bool left, bool enabled)
+    {
+        g.setColour (th::surface.withAlpha (enabled ? 1.0f : 0.4f)); g.fillRoundedRectangle (r, 4);
+        Path p; const auto c = r.getCentre();
+        if (left) p.addTriangle (c.x + 4, c.y - 7, c.x + 4, c.y + 7, c.x - 4, c.y);
+        else p.addTriangle (c.x - 4, c.y - 7, c.x - 4, c.y + 7, c.x + 4, c.y);
+        g.setColour (enabled ? th::text : th::faint); g.fillPath (p);
+    }
+    void mouseWheelMove (const MouseEvent&, const MouseWheelDetails& w) override
+    {
+        const float d = std::abs (w.deltaX) > std::abs (w.deltaY) ? w.deltaX : w.deltaY;
+        wheelAcc += d;
+        if (std::abs (wheelAcc) > 0.12f) { scrollOctaves (wheelAcc > 0 ? -1 : 1); wheelAcc = 0; }
     }
 
     // ------------------------------------------------------------ mouse
     void mouseDown (const MouseEvent& e) override
     {
+        if (leftArrow().contains (e.position)) { scrollOctaves (-1); return; }
+        if (rightArrow().contains (e.position)) { scrollOctaves (1); return; }
         const int k = keyAt (e.position);
         if (k < 0) return;
+        if (! isPatternKey (k) && k != st.song().settings.resolveStop()) return;
         if (e.mods.isPopupMenu()) { if (onKeyMenu) onKeyMenu (k); return; }
         if (! large && k == st.song().settings.resolveStop()) { st.proc.uiStop(); pressedStop = true; repaint(); return; }
         st.song().editKey = k;
@@ -159,7 +213,7 @@ public:
     {
         const int to = keyAt (d.localPosition.toFloat());
         dropHover = -1;
-        if (to < 0) { repaint(); return; }
+        if (to < 0 || ! isPatternKey (to)) { repaint(); return; }
         const auto s = d.description.toString();
         if (s.startsWith ("key:")) {
             const int from = s.fromFirstOccurrenceOf ("key:", false, false).getIntValue();
@@ -195,6 +249,8 @@ private:
     EditState& st;
     bool large;
     int dragKey = -1, playedKey = -1;
+    int viewLow = -1, viewEnd = 0; float wheelAcc = 0;
+    static constexpr int arrowW = 18;
     bool pressedStop = false;
 
     void drawTile (Graphics& g, Rectangle<float> r, int k, const Pattern& p, bool black)
@@ -942,9 +998,9 @@ public:
         setupLabel (*this, lOut, "MIDI out"); setupCombo (*this, out, ch);
         StringArray keys; for (int n = 0; n < 128; ++n) keys.add (keyName (n) + "  (" + String (n) + ")");
         setupLabel (*this, lZone, "Pattern keys"); setupCombo (*this, zLo, keys); setupCombo (*this, zHi, keys);
-        setupLabel (*this, lStart, "Start / switch on"); setupCombo (*this, start, { "Immediately", "Next beat", "Next bar", "End of pattern" });
+        setupLabel (*this, lStart, "Start / switch on"); setupCombo (*this, start, { "Immediately", "Next beat", "Next bar", "End of pattern", "At once, in time (keeps the bar)" });
         setupLabel (*this, lMode, "Keys"); setupCombo (*this, mode, { "Latch (press again to stop)", "Hold (release to stop)" });
-        StringArray stopKeys { "None", "The last pattern key" }; stopKeys.addArray (keys);
+        StringArray stopKeys { "None" }; for (int n = 0; n < 12; ++n) stopKeys.add (keyName (n) + "  (" + String (n) + ")");
         StringArray chans { "Any channel" }; for (int c = 1; c <= 16; ++c) chans.add ("Channel " + String (c));
         setupLabel (*this, lTrig, "Pattern keys listen on"); setupCombo (*this, trigCh, chans, 1, "Give a second controller its own channel to use it only for patterns");
         setupLabel (*this, lPlayCh, "Drum pads / live notes on"); setupCombo (*this, playCh, chans, 1, "Notes on this channel are always played and recorded, never pattern keys");
@@ -970,7 +1026,7 @@ public:
                 o.outChannel = out.getSelectedItemIndex() + 1;
                 o.zoneLow = zLo.getSelectedItemIndex(); o.zoneHigh = jmax (o.zoneLow, zHi.getSelectedItemIndex());
                 o.startQuant = (StartQuant) start.getSelectedItemIndex(); o.latch = mode.getSelectedItemIndex() == 0;
-                { const int si = stopKey.getSelectedItemIndex(); o.stopNote = si == 0 ? -1 : si == 1 ? -2 : si - 2; }
+                { const int si = stopKey.getSelectedItemIndex(); o.stopNote = si <= 0 ? -1 : si - 1; }
                 o.triggerChannel = trigCh.getSelectedItemIndex(); o.playChannel = playCh.getSelectedItemIndex();
                 o.mirrorOctaves = mirror.getToggleState();
                 static const int sb[] = { 0, 1, 2, 4, 8, 16 }; o.splitBars = sb[jlimit (0, 5, split.getSelectedItemIndex())];
@@ -1000,7 +1056,7 @@ public:
         out.setSelectedItemIndex (o.outChannel - 1, dontSendNotification);
         zLo.setSelectedItemIndex (o.zoneLow, dontSendNotification); zHi.setSelectedItemIndex (o.zoneHigh, dontSendNotification);
         start.setSelectedItemIndex ((int) o.startQuant, dontSendNotification); mode.setSelectedItemIndex (o.latch ? 0 : 1, dontSendNotification);
-        stopKey.setSelectedItemIndex (o.stopNote == -1 ? 0 : o.stopNote == -2 ? 1 : o.stopNote + 2, dontSendNotification);
+        stopKey.setSelectedItemIndex (o.stopNote >= 0 && o.stopNote < 12 ? o.stopNote + 1 : 0, dontSendNotification);
         trigCh.setSelectedItemIndex (o.triggerChannel, dontSendNotification); playCh.setSelectedItemIndex (o.playChannel, dontSendNotification);
         mirror.setToggleState (o.mirrorOctaves, dontSendNotification);
         const int sb = o.splitBars; split.setSelectedItemIndex (sb <= 0 ? 0 : sb == 1 ? 1 : sb == 2 ? 2 : sb <= 4 ? 3 : sb <= 8 ? 4 : 5, dontSendNotification);
@@ -1026,7 +1082,8 @@ public:
         playCh.setBounds (row (a, lPlayCh, lw).removeFromLeft (130));
         split.setBounds (row (a, lSplit, lw).removeFromLeft (120));
         a.removeFromTop (4);
-        for (auto* b : { &mirror, &hostStop, &thru, &fills, &remember }) { b->setBounds (a.removeFromTop (26).removeFromLeft (b->getWidth()).reduced (0, 2)); a.removeFromTop (4); }
+        mirror.setVisible (false);
+        for (auto* b : { &hostStop, &thru, &fills, &remember }) { b->setBounds (a.removeFromTop (26).removeFromLeft (b->getWidth()).reduced (0, 2)); a.removeFromTop (4); }
         help.setBounds (a.removeFromTop (40));
     }
 private:

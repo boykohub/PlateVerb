@@ -113,19 +113,20 @@ struct Lane
 struct ChainStep { int key = -1, repeats = 1; };
 struct Chain { String name; std::vector<ChainStep> steps; int triggerNote = -1; bool loop = true; };
 
-enum class StartQuant { Immediate = 0, Beat, Bar, PatternEnd };
+enum class StartQuant { Immediate = 0, Beat, Bar, PatternEnd, InTime };   // InTime: switch at once, keeping the bar position
 
 struct Settings
 {
     int outChannel = 10;
-    int zoneLow = 0, zoneHigh = 35;                // trigger keys (C-2 … B0 in Studio One names)
-    StartQuant startQuant = StartQuant::Bar;
+    int zoneLow = 12, zoneHigh = 127;              // pattern keys: C-1 (12) up the whole keyboard (Studio One names)
+    int keyMode = 0;                               // 0 = Pattern mode (keys play patterns), 1 = Play mode (keys play drums)
+    StartQuant startQuant = StartQuant::InTime;
     bool latch = true;                             // false = hold (release stops)
     bool stopWithHost = true;
     bool passThrough = true;
     bool fillsToBlack = false;                     // multi-file import: names containing "fill" go to black keys
     bool rememberLast = true;
-    int stopNote = -2;                             // -1 none, -2 the last pattern key, else a note
+    int stopNote = 11;                             // B-2, just below the patterns; any key under C-1 (-1 none, -2 the last pattern key)
     int triggerChannel = 0;                        // pattern keys listen on this channel (0 = any)
     int playChannel = 0;                           // drum pads / live notes come on this channel (0 = any)
     bool mirrorOctaves = false;                    // pattern keys repeat in every octave
@@ -141,6 +142,7 @@ struct Settings
     // the pattern key an incoming note triggers, or -1 (stop key included)
     int keyForNote (int n, int ch) const
     {
+        if (keyMode == 1) return -1;                   // Play mode: every key plays drums
         if (triggerChannel != 0 && ch != triggerChannel) return -1;
         if (playChannel != 0 && playChannel != triggerChannel && ch == playChannel) return -1;
         if (n >= zoneLow && n <= zoneHigh) return n;
@@ -169,7 +171,7 @@ struct Song
     std::vector<Chain> chains { Chain { "Chain 1", {}, -1, true } };      // as many as you like
     std::array<Pattern, 8> park;
     Settings settings;
-    int editKey = 0;
+    int editKey = 12;
 
     const Lane* lane (int note) const { for (auto& l : lanes) if (l.note == note) return &l; return nullptr; }
     Lane* lane (int note) { for (auto& l : lanes) if (l.note == note) return &l; return nullptr; }
@@ -212,12 +214,12 @@ struct Song
         s.customNotes = defaultCustom();
         for (int n : { 36, 37, 38, 39, 40, 42, 44, 46, 41, 43, 45, 47, 48, 50, 49, 57, 51, 53, 55, 52, 54, 56 }) s.ensureLane (n);
         // a starter groove and fill so the plugin makes a sound straight away
-        auto& g = s.keys[0]; g.name = "Basic Rock"; g.bars = 1;
+        auto& g = s.keys[12]; g.name = "Basic Rock"; g.bars = 1;
         for (int i = 0; i < 8; ++i) g.notes.push_back ({ i * 480, 60, 42, i % 2 == 0 ? 100 : 72 });
         g.notes.push_back ({ 0, 60, 36, 112 }); g.notes.push_back ({ 1440, 60, 36, 104 }); g.notes.push_back ({ 1920, 60, 36, 96 });
         g.notes.push_back ({ 960, 60, 38, 110 }); g.notes.push_back ({ 2880, 60, 38, 112 });
         g.sort();
-        auto& f = s.keys[1]; f.name = "Basic Fill"; f.type = PatternType::Fill;
+        auto& f = s.keys[13]; f.name = "Basic Fill"; f.type = PatternType::Fill;
         for (int i = 0; i < 8; ++i) f.notes.push_back ({ 1920 + i * 240, 60, i < 4 ? 38 : 45, 80 + i * 5 });
         for (int i = 0; i < 4; ++i) f.notes.push_back ({ i * 480, 60, 42, 96 });
         f.notes.push_back ({ 0, 60, 36, 110 }); f.notes.push_back ({ 960, 60, 38, 108 });
@@ -627,7 +629,7 @@ inline Pattern patternFromXml (const XmlElement& x)
 inline std::unique_ptr<XmlElement> songToXml (const Song& s)
 {
     auto x = std::make_unique<XmlElement> ("DrumPlayerSong");
-    x->setAttribute ("version", 2); x->setAttribute ("editKey", s.editKey);
+    x->setAttribute ("version", 3); x->setAttribute ("editKey", s.editKey);
     x->setAttribute ("playMap", s.playMap); x->setAttribute ("importMap", s.importMap);
     String cn; for (int v : s.customNotes) cn << v << ','; x->setAttribute ("customMap", cn);
     auto* ks = x->createNewChildElement ("Keys");
@@ -655,6 +657,7 @@ inline std::unique_ptr<XmlElement> songToXml (const Song& s)
     st->setAttribute ("stop", o.stopNote); st->setAttribute ("recq", o.recQuantize); st->setAttribute ("split", o.splitBars);
     st->setAttribute ("trigch", o.triggerChannel); st->setAttribute ("playch", o.playChannel); st->setAttribute ("mirror", o.mirrorOctaves);
     st->setAttribute ("countin", o.countInBars); st->setAttribute ("metro", o.metroMode); st->setAttribute ("metrolvl", o.metroLevel);
+    st->setAttribute ("keymode", o.keyMode);
     st->setAttribute ("recmode", o.recMode); st->setAttribute ("recstop", o.recStopAfter); st->setAttribute ("recvel", o.recFixedVel);
     return x;
 }
@@ -697,7 +700,7 @@ inline Song songFromXml (const XmlElement& x)
         auto& o = s.settings;
         o.outChannel = jlimit (1, 16, st->getIntAttribute ("out", 10));
         o.zoneLow = jlimit (0, 127, st->getIntAttribute ("zlo", 0)); o.zoneHigh = jlimit (o.zoneLow, 127, st->getIntAttribute ("zhi", 35));
-        o.startQuant = (StartQuant) jlimit (0, 3, st->getIntAttribute ("sq", 2));
+        o.startQuant = (StartQuant) jlimit (0, 4, st->getIntAttribute ("sq", 4));
         o.latch = st->getBoolAttribute ("latch", true); o.stopWithHost = st->getBoolAttribute ("hoststop", true);
         o.passThrough = st->getBoolAttribute ("thru", true); o.fillsToBlack = st->getBoolAttribute ("fillsblack", false);
         o.rememberLast = st->getBoolAttribute ("remember", true); o.stopNote = jlimit (-2, 127, st->getIntAttribute ("stop", -2));
@@ -707,7 +710,13 @@ inline Song songFromXml (const XmlElement& x)
         o.metroLevel = (float) jlimit (0.0, 1.0, st->getDoubleAttribute ("metrolvl", 0.5));
         o.recMode = jlimit (0, 1, st->getIntAttribute ("recmode", 0)); o.recStopAfter = jlimit (0, 64, st->getIntAttribute ("recstop", 0));
         o.recFixedVel = jlimit (0, 127, st->getIntAttribute ("recvel", 0));
-        if (x.getIntAttribute ("version", 1) < 2 && o.stopNote == -1) o.stopNote = -2;   // older saves: give them the stop key
+        o.keyMode = jlimit (0, 1, st->getIntAttribute ("keymode", 0));
+        if (x.getIntAttribute ("version", 1) < 3) {     // older saves: patterns move up an octave to start at C-1, stop on B-2
+            o.zoneLow = 12; o.zoneHigh = 127; o.stopNote = 11; o.mirrorOctaves = false; o.startQuant = StartQuant::InTime;
+            for (int k = 127; k >= 12; --k) if (s.keys[(size_t) (k - 12)].isEmpty() == false && s.keys[(size_t) k].isEmpty()) std::swap (s.keys[(size_t) k], s.keys[(size_t) (k - 12)]);
+            for (auto& c : s.chains) for (auto& step : c.steps) if (step.key >= 0 && step.key < 116) step.key += 12;
+            s.editKey = jlimit (12, 127, s.editKey + 12);
+        }
         o.recQuantize = st->getIntAttribute ("recq", 0); o.splitBars = jlimit (0, maxBars, st->getIntAttribute ("split", 4));
     }
     if (s.lanes.empty()) s.lanes = Song::makeDefault().lanes;

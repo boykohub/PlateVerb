@@ -40,8 +40,11 @@ public:
         setupButton (body, presetName, "Presets", true, "Preset browser");
         setupButton (body, saveBtn, "Save", false, "Save the current preset (or name a new one in the browser)");
         setupButton (body, exchangeBtn, "Exchange", true, "Big keyboard for moving patterns between keys");
-        setupButton (body, keysBtn, "Keys play patterns", true, "On: every key on your keyboard plays the pattern keys, in any octave (C plays the C pattern). Off: only the pattern keys do, the rest play drums");
-        keysBtn.onClick = [this] { const bool on = keysBtn.getToggleState(); st.applySong ("Keys play patterns", [on] (Song& s) { s.settings.mirrorOctaves = on; }); showToast (on ? "Every key now plays patterns" : "Keys outside the pattern keys play drums"); };
+        setupButton (body, keysBtn, "Pattern mode", true, "Your keyboard plays patterns: one per key from C-1 up. The stop key sits below C-1");
+        setupButton (body, playModeBtn, "Play mode", true, "Your keyboard plays the drums, for playing live and recording");
+        keysBtn.setRadioGroupId (61); playModeBtn.setRadioGroupId (61);
+        keysBtn.onClick = [this] { setKeyMode (0); };
+        playModeBtn.onClick = [this] { setKeyMode (1); };
         body.addAndMakeVisible (keyInfo); keyInfo.setFont (font (11.5f, 2)); keyInfo.setColour (Label::textColourId, th::dim);
         keyInfo.setComponentID ("Pressed key"); keyInfo.setText ("Press a key...", dontSendNotification); keyInfo.setJustificationType (Justification::centredLeft);
         setupButton (body, chainsBtn, "Chains", true);
@@ -123,7 +126,13 @@ public:
         velBox.setSelectedItemIndex (3, dontSendNotification);
         velBox.onChange = [this] { st.defaultVel = velBox.getText().getIntValue(); };
         setupButton (body, recBtn, "Rec", false, "Record into the key you're editing (it starts playing, after a count-in). Press again to stop recording");
-        recBtn.onClick = [this] { proc.uiRecord (proc.recStateUi.load() == 0, st.song().editKey); };
+        recBtn.onClick = [this] {
+            const bool start = proc.recStateUi.load() == 0;
+            const auto& o = st.song().settings;
+            // recording needs keys that play drums: switch to Play mode unless a pad has its own channel
+            if (start && o.keyMode == 0 && ! (o.playChannel != 0 && o.playChannel != o.triggerChannel)) { setKeyMode (1); showToast ("Play mode on: your keys now play drums for recording"); }
+            proc.uiRecord (start, st.song().editKey);
+        };
         setupButton (body, recOptBtn, "Record...", true, "Count-in, click, overdub or replace, quantize and more");
         recOptBtn.onClick = [this] { togglePage (recPage, recOptBtn); };
         StringArray guides { "Lines: off", "Lines every 8", "Lines every 16", "Lines every 20", "Lines every 32" };
@@ -272,7 +281,7 @@ private:
     Body body;
     float scale = 1.0f;
 
-    TextButton prevPreset, nextPreset, presetName, saveBtn, exchangeBtn, chainsBtn, mapBtn, settingsBtn, zoomOut, zoomPct, zoomIn, keysBtn;
+    TextButton prevPreset, nextPreset, presetName, saveBtn, exchangeBtn, chainsBtn, mapBtn, settingsBtn, zoomOut, zoomPct, zoomIn, keysBtn, playModeBtn;
     Label keyInfo; int lastInSerialSeen = -1;
     KeyStrip strip, bigStrip;
     ParkTray tray, bigTray;
@@ -326,7 +335,7 @@ private:
         headerTitle = h.removeFromLeft (170);
         RowPlacer hp (h, 5);
         hp.place (prevPreset, 24); hp.place (presetName, 200); hp.place (nextPreset, 24); hp.skip (4); hp.place (saveBtn); hp.skip (12);
-        hp.place (keysBtn); hp.skip (6); hp.place (keyInfo, jmax (60, h.getRight() - 455 - hp.x));
+        hp.place (keysBtn); hp.place (playModeBtn); hp.skip (6); hp.place (keyInfo, jmax (60, h.getRight() - 455 - hp.x));
         RowPlacer hr (h.withTrimmedLeft (h.getWidth() - 450), 5);
         hr.place (exchangeBtn); hr.place (chainsBtn); hr.place (mapBtn); hr.place (settingsBtn); hr.skip (8);
         hr.place (zoomOut, 24); hr.place (zoomPct, 48); hr.place (zoomIn, 24);
@@ -431,7 +440,9 @@ private:
         presetName.setButtonText (proc.presetName.isNotEmpty() ? proc.presetName : String ("Presets"));
         undoBtn.setEnabled (proc.undo.canUndo()); redoBtn.setEnabled (proc.undo.canRedo());
         zoomPct.setButtonText (String ((int) std::round (scale * 100)) + "%");
-        keysBtn.setToggleState (st.song().settings.mirrorOctaves, dontSendNotification);
+        keysBtn.setToggleState (st.song().settings.keyMode == 0, dontSendNotification);
+        playModeBtn.setToggleState (st.song().settings.keyMode == 1, dontSendNotification);
+        strip.ensureVisible (st.song().editKey); bigStrip.ensureVisible (st.song().editKey);
         syncSwingPreset();
         status.setText (keyName (st.song().editKey) + "   " + (p.name.isNotEmpty() ? p.name : String ("(empty key)")) + "   |   "
                         + String ((int) p.notes.size()) + " notes   |   " + String (p.bars) + " x " + String (p.beatsPerBar) + "/4"
@@ -526,6 +537,12 @@ private:
         if (show) { exchange.setVisible (true); exchange.toFront (false); exchangeBtn.setToggleState (true, dontSendNotification); }
     }
 
+    void setKeyMode (int m)
+    {
+        st.applySong (m == 0 ? "Pattern mode" : "Play mode", [m] (Song& s) { s.settings.keyMode = m; });
+        if (m == 0) showToast ("Pattern mode: keys from C-1 up play patterns");
+        refreshControls();
+    }
     void setTool (Tool t) { st.tool = t; st.stamping = false; for (int i = 0; i < toolBtns.size(); ++i) toolBtns[i]->setToggleState (i == (int) t, dontSendNotification); grid.repaint(); }
 
     void setScale (float s)
