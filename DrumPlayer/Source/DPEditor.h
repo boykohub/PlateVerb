@@ -1157,7 +1157,7 @@ private:
             case 31: st.apply ("Randomize timing", [] (Pattern& q) { std::mt19937 g ((uint32) Time::getMillisecondCounter()); randomizeTiming (q, 12, g); }); break;
             case 32: st.apply ("Randomize chance", [] (Pattern& q) { std::mt19937 g ((uint32) Time::getMillisecondCounter()); randomizeProbability (q, 40, 100, g); }); break;
             case 33: st.apply ("Thin out", [] (Pattern& q) { std::mt19937 g ((uint32) Time::getMillisecondCounter()); thinOut (q, 25, g); }); break;
-            case 34: { const int gi = st.grid >= 0 ? st.grid : 3; st.apply ("Add ghosts", [gi] (Pattern& q) { std::mt19937 g ((uint32) Time::getMillisecondCounter()); addGhosts (q, gi, 30, g); }); break; }
+            case 34: CallOutBox::launchAsynchronously (std::make_unique<GhostPanel> (st), getLocalArea (&funcBtn, funcBtn.getLocalBounds()), this); break;
             case 40: patternClip = p; hasPatternClip = true; showToast ("Pattern copied"); break;
             case 41: { auto c = patternClip; st.apply ("Paste pattern", [c] (Pattern& q) { q = c; }); break; }
             case 42: st.apply ("Clear pattern", [] (Pattern& q) { q = Pattern(); }); break;

@@ -1112,10 +1112,86 @@ private:
     TextButton keepSwing, selOnly, apply;
 };
 
+
+// ---------------------------------------------------------------- ghost notes: which drums, how many, how soft
+class GhostPanel : public Component
+{
+public:
+    explicit GhostPanel (EditState& e) : st (e)
+    {
+        setupLabel (*this, title, "Add ghost notes", 12.5f, th::amber);
+        setupLabel (*this, lDrums, "On these drums");
+        auto& s = st.song(); auto& p = st.pat();
+        std::set<int> used; for (auto& n : p.notes) used.insert (n.note);
+        for (auto& l : s.lanes) {
+            if (! used.count (l.note) && ! isSnare (l)) continue;           // the drums this pattern plays, plus the snares
+            auto* b = drums.add (new TextButton());
+            setupButton (*this, *b, l.name, true);
+            b->getProperties().set ("note", l.note);
+            b->setToggleState (isSnare (l) && l.note == firstSnare(), dontSendNotification);
+        }
+        setupLabel (*this, lAmt, "How many"); setupSlider (*this, amount, th::amber); amount.setRange (5, 100, 1); amount.setValue (30, dontSendNotification); amount.setTextValueSuffix (" %");
+        setupLabel (*this, lLo, "Softest"); setupSlider (*this, lo); lo.setRange (1, 90, 1); lo.setValue (15, dontSendNotification);
+        setupLabel (*this, lHi, "Loudest"); setupSlider (*this, hi); hi.setRange (1, 110, 1); hi.setValue (42, dontSendNotification);
+        setupLabel (*this, lGrid, "On the grid of");
+        StringArray vals; for (auto& v : noteValues) vals.add (v.name);
+        setupCombo (*this, grid, vals); grid.setSelectedItemIndex (st.grid >= 0 && st.grid > 1 ? st.grid : 3, dontSendNotification);
+        setupButton (*this, between, "Only between the 8th notes", true); between.setToggleState (true, dontSendNotification);
+        setupButton (*this, apply, "Add them"); apply.onClick = [this] { run(); };
+        setupButton (*this, again, "Undo and try again"); again.onClick = [this] { if (added) { st.proc.undo.undo(); if (st.changed) st.changed(); } run(); };
+        setupLabel (*this, help, "Ghost notes are quiet in-between hits, usually on the snare. Each try is different; Ctrl+Z takes them out.", 10.5f, th::faint);
+        help.setJustificationType (Justification::topLeft);
+        setSize (420, 230 + ((drums.size() + 2) / 3) * 28);
+    }
+    void paint (Graphics& g) override { g.fillAll (th::panel); }
+    void resized() override
+    {
+        auto a = getLocalBounds().reduced (12, 8);
+        title.setBounds (a.removeFromTop (22)); a.removeFromTop (4);
+        lDrums.setBounds (a.removeFromTop (20));
+        const int w = (a.getWidth() - 8) / 3;
+        for (int i = 0; i < drums.size(); i += 3) {
+            auto r = a.removeFromTop (26); a.removeFromTop (2);
+            for (int k = i; k < jmin (i + 3, drums.size()); ++k) { drums[k]->setBounds (r.removeFromLeft (w).reduced (0, 2)); r.removeFromLeft (4); }
+        }
+        a.removeFromTop (6);
+        auto rowOf = [&a] (Label& l, Component& c) { auto r = a.removeFromTop (26); a.removeFromTop (3); l.setBounds (r.removeFromLeft (100)); c.setBounds (r); };
+        rowOf (lAmt, amount); rowOf (lLo, lo); rowOf (lHi, hi);
+        { auto r = a.removeFromTop (26); a.removeFromTop (3); lGrid.setBounds (r.removeFromLeft (100)); grid.setBounds (r.removeFromLeft (80)); r.removeFromLeft (8); between.setBounds (r.removeFromLeft (between.getWidth()).reduced (0, 2)); }
+        { auto r = a.removeFromTop (28); apply.setBounds (r.removeFromLeft (apply.getWidth()).reduced (0, 2)); r.removeFromLeft (6); again.setBounds (r.removeFromLeft (again.getWidth()).reduced (0, 2)); }
+        help.setBounds (a.removeFromTop (34));
+    }
+private:
+    EditState& st;
+    Label title, lDrums, lAmt, lLo, lHi, lGrid, help;
+    OwnedArray<TextButton> drums;
+    FineSlider amount, lo, hi; ComboBox grid; TextButton between, apply, again;
+    bool added = false;
+    static bool isSnare (const Lane& l) { return l.name.containsIgnoreCase ("snare") || l.name.containsIgnoreCase ("side stick") || l.note == 38 || l.note == 40 || l.note == 37; }
+    int firstSnare() const { for (auto& l : st.song().lanes) if (l.name.containsIgnoreCase ("snare") || l.note == 38) return l.note; return 38; }
+    void run()
+    {
+        std::set<int> lanes;
+        for (auto* b : drums) if (b->getToggleState()) lanes.insert ((int) b->getProperties()["note"]);
+        if (lanes.empty()) { if (st.toast) st.toast ("Choose at least one drum"); return; }
+        const int gi = grid.getSelectedItemIndex(), pct = (int) amount.getValue(), vl = (int) lo.getValue(), vh = (int) hi.getValue();
+        const bool btw = between.getToggleState();
+        const uint32 seed = Time::getMillisecondCounter();
+        st.apply ("Add ghost notes", [=] (Pattern& p) { std::mt19937 r (seed); for (auto& n : p.notes) n.selected = false; addGhosts (p, gi, pct, r, lanes, vl, vh, btw); });
+        added = true;
+    }
+};
+
 // ---------------------------------------------------------------- humanize page
 class HumanizePage : public Page
 {
 public:
+    // the ghost-note options open over this page, inside the plugin window
+    void openGhosts (Component& near)
+    {
+        auto* top = near.getTopLevelComponent();
+        CallOutBox::launchAsynchronously (std::make_unique<GhostPanel> (st), top->getLocalArea (&near, near.getLocalBounds()), top);
+    }
     HumanizePage (EditState& e) : Page ("HUMANIZE & FEEL"), st (e)
     {
         auto& ap = st.proc.apvts;
@@ -1152,7 +1228,8 @@ public:
         rTime.onClick = [this] { st.apply ("Randomize timing", [] (Pattern& p) { std::mt19937 r ((uint32) Time::getMillisecondCounter()); randomizeTiming (p, 12, r); }); };
         rProb.onClick = [this] { st.apply ("Randomize chance", [] (Pattern& p) { std::mt19937 r ((uint32) Time::getMillisecondCounter()); randomizeProbability (p, 40, 100, r); }); };
         rThin.onClick = [this] { st.apply ("Thin out", [] (Pattern& p) { std::mt19937 r ((uint32) Time::getMillisecondCounter()); thinOut (p, 25, r); }); };
-        rGhost.onClick = [this] { const int g = st.grid >= 0 ? st.grid : 3; st.apply ("Add ghosts", [g] (Pattern& p) { std::mt19937 r ((uint32) Time::getMillisecondCounter()); addGhosts (p, g, 30, r); }); };
+        setupButton (*this, rGhost, "Add ghosts...", false, "Choose the drums (usually the snare), how many and how soft");
+        rGhost.onClick = [this] { openGhosts (rGhost); };
     }
     void resized() override
     {

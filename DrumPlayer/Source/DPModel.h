@@ -362,17 +362,22 @@ inline void thinOut (Pattern& p, int pct, std::mt19937& rng)
         return (! anySel || n.selected) && d (rng) < pct; }), p.notes.end());
 }
 // add quiet ghost notes on free grid steps of the lanes that already play
-inline void addGhosts (Pattern& p, int valueIndex, int pct, std::mt19937& rng)
+// ghost notes: quiet extra hits on free grid steps of the chosen drums (usually the snare)
+inline void addGhosts (Pattern& p, int valueIndex, int pct, std::mt19937& rng,
+                       std::set<int> lanes = {}, int velLo = 18, int velHi = 42, bool betweenOnly = false)
 {
     const int g = noteValues[jlimit (0, numNoteValues - 1, valueIndex)].ticks;
-    std::set<int> lanes; bool anySel = false;
-    for (auto& n : p.notes) anySel |= n.selected;
-    for (auto& n : p.notes) if (! anySel || n.selected) lanes.insert (n.note);
-    std::uniform_int_distribution<int> d (0, 99), v (18, 42);
+    if (lanes.empty()) {
+        bool anySel = false;
+        for (auto& n : p.notes) anySel |= n.selected;
+        for (auto& n : p.notes) if (! anySel || n.selected) lanes.insert (n.note);
+    }
+    std::uniform_int_distribution<int> d (0, 99), v (jmin (velLo, velHi), jmax (velLo, velHi));
     std::vector<Note> add;
     for (int ln : lanes) {
         const int len = p.laneLen (ln);
         for (int t = 0; t < len; t += g) {
+            if (betweenOnly && t % (PPQ / 2) == 0) continue;                   // keep the 8th-note positions clear
             bool used = false;
             for (auto& n : p.notes) if (n.note == ln && std::abs (n.tick - t) < g / 2) { used = true; break; }
             if (! used && d (rng) < pct) add.push_back ({ t, jmin (60, g), ln, v (rng) });
