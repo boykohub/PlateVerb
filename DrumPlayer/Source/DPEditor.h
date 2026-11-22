@@ -11,7 +11,7 @@ public:
     std::function<void()> onResized;
     std::function<void (Graphics&)> onPaint;
     void resized() override { if (onResized) onResized(); }
-    void paint (Graphics& g) override { g.fillAll (th::bg); if (onPaint) onPaint (g); }
+    void paint (Graphics& g) override { fillArea (g, getLocalBounds(), "Window background", th::bg); if (onPaint) onPaint (g); }
 };
 
 class DrumPlayerEditor : public AudioProcessorEditor, public DragAndDropContainer, public FileDragAndDropTarget, private Timer
@@ -32,6 +32,7 @@ public:
         st.changed = [this] { refreshAll(); };
         st.toast = [this] (const String& t) { showToast (t); };
         st.splitAt = [this] (int t) { splitMenu (t); };
+        st.chooseTool = [this] (Tool t) { setTool (t); };
 
         // ---------------- header
         setupButton (body, prevPreset, "<", false, "Previous preset");
@@ -85,7 +86,7 @@ public:
                 "Paint brush (5): drag to paint repeated notes with accents", "Mute (6): click notes to mute or unmute", "Line (7): draw velocity ramps in the velocity lane" };
             setupButton (body, *b, toolName ((Tool) i), true, tips[i]);
             b->setRadioGroupId (11);
-            b->onClick = [this, i] { st.tool = (Tool) i; grid.repaint(); };
+            b->onClick = [this, i] { st.tool = (Tool) i; st.stamping = false; grid.repaint(); };
         }
         toolBtns[0]->setToggleState (true, dontSendNotification);
         setupButton (body, undoBtn, "Undo", false, "Ctrl+Z"); setupButton (body, redoBtn, "Redo", false, "Ctrl+Shift+Z");
@@ -159,6 +160,22 @@ public:
         // ---------------- pages
         for (Page* pg : { (Page*) &quantPage, (Page*) &humPage, (Page*) &chainPage, (Page*) &setPage, (Page*) &presetPage, (Page*) &mapPage, (Page*) &recPage }) body.addChildComponent (pg);
         presetPage.onLoaded = [this] { refreshAll(); };
+        setPage.look.collectIds = [this] {
+            StringArray out;
+            std::function<void (Component&)> walk = [&] (Component& c) {
+                for (auto* ch : c.getChildren()) {
+                    const auto id = ch->getComponentID();
+                    if (id.isNotEmpty()) {
+                        if (dynamic_cast<TextButton*> (ch) != nullptr) out.addIfNotAlreadyThere ("btn:" + id);
+                        else if (dynamic_cast<Label*> (ch) != nullptr) out.addIfNotAlreadyThere ("txt:" + id);
+                    }
+                    walk (*ch);
+                }
+            };
+            walk (body);
+            return out;
+        };
+        setPage.look.onChanged = [this] { repaintEverything (body); };
         presetPage.onImport = [this] { importDialog(); };
         body.addChildComponent (exchange);
         exchange.addAndMakeVisible (bigStrip); exchange.addAndMakeVisible (bigTray);
@@ -216,12 +233,14 @@ public:
         auto& p = st.pat();
         if (m.isCommandDown() && code == 'Z') { if (m.isShiftDown()) proc.undo.redo(); else proc.undo.undo(); refreshAll(); return true; }
         if (m.isCommandDown() && code == 'Y') { proc.undo.redo(); refreshAll(); return true; }
+        if (m.isCommandDown() && code == 'R') { st.repeatLast(); return true; }
         if (m.isCommandDown() && code == 'A') { selectAll (p, true); st.publish(); return true; }
         if (m.isCommandDown() && code == 'D') { st.apply ("Duplicate", [] (Pattern& q) { duplicateSelection (q); }); return true; }
         if (m.isCommandDown() && code == 'C') { copySel(); return true; }
         if (m.isCommandDown() && code == 'X') { copySel(); st.apply ("Cut", [] (Pattern& q) { deleteSelected (q); }); return true; }
         if (m.isCommandDown() && code == 'V') { paste(); return true; }
         if (code == KeyPress::deleteKey || code == KeyPress::backspaceKey) { st.apply ("Delete", [] (Pattern& q) { deleteSelected (q); }); return true; }
+        if (code == KeyPress::escapeKey && st.stamping) { st.stamping = false; showToast ("Stopped"); return true; }
         if (code == KeyPress::escapeKey) { if (openPage != nullptr || exchange.isVisible()) closePages(); else { selectAll (p, false); st.publish(); } return true; }
         if (! m.isAnyModifierKeyDown() && code >= '1' && code <= '7') { setTool ((Tool) (code - '1')); return true; }
         if (! m.isAnyModifierKeyDown() && (code == 'Q' || code == 'q')) { quantPage.run(); return true; }
@@ -283,7 +302,7 @@ private:
         void paint (Graphics& g) override
         {
             if (Time::getMillisecondCounter() > until || text.isEmpty()) return;
-            drawCard (g, getLocalBounds().toFloat().reduced (1), th::raised, 8);
+            drawCard (g, getLocalBounds().toFloat().reduced (1), th::raised, 8, "Messages");
             g.setFont (font (12.5f * getHeight() / 34.0f, 2)); g.setColour (th::text);
             g.drawFittedText (text, getLocalBounds().reduced (10, 2), Justification::centred, 2);
         }
@@ -297,6 +316,7 @@ private:
         auto a = body.getLocalBounds().reduced (10, 8);
         // header
         auto h = a.removeFromTop (30);
+        headerArea = h;
         headerTitle = h.removeFromLeft (170);
         RowPlacer hp (h, 5);
         hp.place (prevPreset, 24); hp.place (presetName, 230); hp.place (nextPreset, 24); hp.skip (4); hp.place (saveBtn);
@@ -312,6 +332,7 @@ private:
         a.removeFromTop (8);
         // toolbar 1
         auto t1 = a.removeFromTop (28);
+        toolArea = t1;
         RowPlacer r1 (t1, 5);
         r1.place (nameEd, 150); r1.place (typeBox, 84); r1.skip (6);
         r1.place (lLen, 44); r1.place (barsEd, 40); r1.place (lenMenuBtn); r1.place (bpbBox, 58); r1.skip (6);
@@ -321,6 +342,7 @@ private:
         a.removeFromTop (4);
         // toolbar 2
         auto t2 = a.removeFromTop (28);
+        toolArea = toolArea.getUnion (t2);
         RowPlacer r2 (t2, 5);
         r2.place (lSwing, 40); r2.place (swingPreset, 104); r2.place (swingSlider, 190); r2.place (swingValue, 66); r2.skip (10);
         r2.place (quantBtn); r2.place (humBtn); r2.place (funcBtn); r2.skip (10);
@@ -359,18 +381,20 @@ private:
         clampScroll();
         body.repaint();
     }
-    Rectangle<int> headerTitle, rollArea, velLabelArea;
+    Rectangle<int> headerTitle, rollArea, velLabelArea, headerArea, toolArea;
 
     void paintBody (Graphics& g)
     {
         // title: two-tone wordmark like the practice app
-        g.setFont (font (17.0f, 3)); g.setColour (th::text);
+        g.setFont (font (Theme::get().fontFor ("txt:Title", "", 17.0f), 3)); g.setColour (th::text);
         g.drawText ("DRUM", headerTitle.withWidth (60), Justification::centredLeft);
         g.setColour (th::amber);
         g.drawText ("PLAYER", headerTitle.withTrimmedLeft (58), Justification::centredLeft);
         // cards behind the roll and the keyboard
-        drawCard (g, rollArea.toFloat().expanded (2), th::panel, 10);
-        drawCard (g, velLabelArea.toFloat(), th::panel, 6);
+        if (themed ("Header")) drawCard (g, headerArea.toFloat().expanded (4, 3), th::panel, 8, "Header");
+        if (themed ("Toolbars")) drawCard (g, toolArea.toFloat().expanded (4, 3), th::panel, 8, "Toolbars");
+        drawCard (g, rollArea.toFloat().expanded (2), th::panel, 10, "Roll card");
+        drawCard (g, velLabelArea.toFloat(), th::panel, 6, "Roll card");
         g.setFont (font (10.5f, 1)); g.setColour (th::faint);
         const auto focus = st.focusLane >= 0 && st.song().lane (st.focusLane) ? st.song().lane (st.focusLane)->name : String ("all lanes");
         g.drawFittedText ("Showing: " + focus, velLabelArea.reduced (10, 6).withTrimmedTop (60), Justification::topLeft, 2);
@@ -457,6 +481,7 @@ private:
     int lastChainState = -1;
     std::array<uint32, 128> lastIn {};
 
+    static void repaintEverything (Component& c) { c.repaint(); for (auto* ch : c.getChildren()) repaintEverything (*ch); }
     void showToast (const String& t) { toast.text = t; toast.until = Time::getMillisecondCounter() + 2600; toast.toFront (false); toast.repaint(); }
 
     // ------------------------------------------------------------ pages
@@ -481,7 +506,7 @@ private:
         if (show) { exchange.setVisible (true); exchange.toFront (false); exchangeBtn.setToggleState (true, dontSendNotification); }
     }
 
-    void setTool (Tool t) { st.tool = t; for (int i = 0; i < toolBtns.size(); ++i) toolBtns[i]->setToggleState (i == (int) t, dontSendNotification); grid.repaint(); }
+    void setTool (Tool t) { st.tool = t; st.stamping = false; for (int i = 0; i < toolBtns.size(); ++i) toolBtns[i]->setToggleState (i == (int) t, dontSendNotification); grid.repaint(); }
 
     void setScale (float s)
     {

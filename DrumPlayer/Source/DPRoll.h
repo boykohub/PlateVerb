@@ -37,6 +37,11 @@ struct EditState
     static constexpr int laneH = 22;
 
     std::function<void()> changed;                    // repaint + refresh controls
+    std::function<void (Tool)> chooseTool;            // so menus can switch the toolbar's tool
+    // the last note action from a menu: repeat it (Ctrl+R) or click notes to stamp it on them
+    std::function<void (Pattern&)> lastAction; String lastName; bool stamping = false;
+    void remember (const String& name, std::function<void (Pattern&)> f) { lastName = name; lastAction = std::move (f); }
+    void repeatLast() { if (lastAction) apply (lastName, lastAction); }
     std::function<void (const String&)> toast;
     std::function<void (int)> splitAt;
 
@@ -92,7 +97,7 @@ public:
     explicit Ruler (EditState& e) : st (e) { setTooltip ("Drag the amber end marker to set the pattern length in bars"); }
     void paint (Graphics& g) override
     {
-        g.fillAll (th::panel);
+        fillArea (g, getLocalBounds(), "Ruler", th::panel);
         auto& p = st.pat();
         const int bpb = p.beatsPerBar;
         const int total = st.contentTicks() / PPQ + 1;
@@ -140,7 +145,7 @@ public:
 
     void paint (Graphics& g) override
     {
-        g.fillAll (th::panel);
+        fillArea (g, getLocalBounds(), "Lane names", th::panel);
         auto lanes = st.lanes();
         auto& p = st.pat();
         bool anySolo = false; for (auto& l : st.song().lanes) anySolo |= l.solo;
@@ -152,7 +157,7 @@ public:
             auto r = Rectangle<int> (0, y, getWidth(), EditState::laneH);
             const bool focus = note == st.focusLane;
             const bool muted = p.laneMute.count (note) > 0 || (anySolo && (lane == nullptr || ! lane->solo));
-            g.setColour (focus ? th::blue.withAlpha (0.16f) : (i % 2 ? th::panel : th::surface.withAlpha (0.55f)));
+            g.setColour (focus ? th::blue.withAlpha (0.16f) : themed ("Lane names") ? Colours::white.withAlpha (i % 2 ? 0.0f : 0.04f) : (i % 2 ? th::panel : th::surface.withAlpha (0.55f)));
             g.fillRect (r);
             g.setColour (st.laneColour (note).withAlpha (muted ? 0.3f : 1.0f));
             g.fillRoundedRectangle (Rectangle<float> ((float) pianoW + 4, (float) y + 4, 5, EditState::laneH - 8.0f), 2);
@@ -351,7 +356,7 @@ public:
 
     void paint (Graphics& g) override
     {
-        g.fillAll (th::bg);
+        fillArea (g, getLocalBounds(), "Note grid", th::bg);
         auto& p = st.pat();
         auto lanes = st.lanes();
         const int L = p.lengthTicks();
@@ -365,7 +370,7 @@ public:
         for (int i = 0; i < rows; ++i) {
             const int y = i * EditState::laneH - st.scrollY;
             if (y < -EditState::laneH || y > getHeight()) continue;
-            g.setColour (lanes[(size_t) i] == st.focusLane ? th::blue.withAlpha (0.07f) : (i % 2 ? th::bg : th::panel.withAlpha (0.7f)));
+            g.setColour (lanes[(size_t) i] == st.focusLane ? th::blue.withAlpha (0.07f) : themed ("Note grid") ? Colours::white.withAlpha (i % 2 ? 0.0f : 0.035f) : (i % 2 ? th::bg : th::panel.withAlpha (0.7f)));
             g.fillRect (0, y, getWidth(), EditState::laneH);
         }
         // base grid
@@ -495,6 +500,14 @@ public:
 
         if (e.mods.isPopupMenu()) { contextMenu (e); return; }
 
+        if (st.stamping && st.lastAction) {                     // stamp the remembered action on the clicked note
+            if (auto* n = hit (e.position)) {
+                const int i = indexOfNote (*n);
+                auto f = st.lastAction;
+                st.apply (st.lastName, [i, f] (Pattern& q) { for (auto& x : q.notes) x.selected = false; q.notes[(size_t) i].selected = true; f (q); });
+            }
+            return;
+        }
         const Tool tool = (e.mods.isAltDown() && st.tool == Tool::Draw) ? Tool::Erase : st.tool;
         switch (tool) {
             case Tool::Split:
@@ -711,30 +724,90 @@ private:
     void contextMenu (const MouseEvent& e)
     {
         auto& p = st.pat();
-        if (auto* n = hit (e.position)) { if (! n->selected) { selectAll (p, false); n->selected = true; st.publish(); } }
+        const auto lanes = st.lanes();
+        const int row = (e.y + st.scrollY) / EditState::laneH;
+        const int laneNote = (row >= 0 && row < (int) lanes.size()) ? lanes[(size_t) row] : -1;
+        int clickedVel = -1;
+        if (auto* n = hit (e.position)) { clickedVel = n->velocity; if (! n->selected) { selectAll (p, false); n->selected = true; st.publish(); } }
+        const bool sel = anySelected (p);
         PopupMenu m;
-        m.addItem (1, "Delete", anySelected (p));
-        m.addItem (2, "Duplicate", anySelected (p));
-        m.addItem (3, "Copy", anySelected (p));
-        m.addItem (4, "Paste here", ! st.clipboard.empty());
-        m.addSeparator();
-        PopupMenu prob;
-        for (int v : { 100, 90, 75, 50, 33, 25, 10, 0 }) prob.addItem (100 + v, String (v) + "%" + (v == 0 ? "  (muted)" : ""));
-        m.addSubMenu ("Chance to play", prob, anySelected (p));
-        PopupMenu vel;
-        for (int v : { 127, 112, 100, 90, 80, 64, 48, 32 }) vel.addItem (300 + v, String (v));
-        m.addSubMenu ("Velocity", vel, anySelected (p));
-        m.addItem (5, "Split pattern here");
+        m.addSectionHeader ("TOOL");
+        static const char* tn[] = { "Select (arrow)", "Draw (pencil)", "Erase", "Split (scissors)", "Paint brush", "Mute", "Line (velocity ramps)" };
+        for (int t = 0; t < 7; ++t) m.addItem (900 + t, tn[t], true, (int) st.tool == t && ! st.stamping);
+        if (st.lastAction) {
+            m.addSeparator();
+            m.addItem (950, "Repeat \"" + st.lastName + "\" on the selection  (Ctrl+R)", sel);
+            m.addItem (951, "Click notes to apply \"" + st.lastName + "\"  (Esc ends)", true, st.stamping);
+        }
+        m.addSectionHeader ("NOTES");
+        m.addItem (1, "Delete", sel); m.addItem (2, "Duplicate", sel); m.addItem (3, "Copy", sel); m.addItem (4, "Paste here", ! st.clipboard.empty());
+        m.addItem (6, "Mute / unmute", sel);
+        PopupMenu vel; for (int v : { 127, 112, 100, 90, 80, 64, 48, 32 }) vel.addItem (300 + v, String (v));
+        vel.addSeparator(); vel.addItem (10, "Louder +10"); vel.addItem (11, "Softer -10"); vel.addItem (12, "Ramp up"); vel.addItem (13, "Ramp down");
+        vel.addItem (14, "Accent the beats"); vel.addItem (15, "Randomize");
+        m.addSubMenu ("Velocity", vel, sel);
+        PopupMenu prob; for (int v : { 100, 90, 75, 50, 33, 25, 10, 0 }) prob.addItem (100 + v, String (v) + "%" + (v == 0 ? "  (muted)" : ""));
+        m.addSubMenu ("Chance to play", prob, sel);
+        PopupMenu len; for (int vi : { 0, 1, 3, 5, 7, 9 }) len.addItem (700 + vi, noteValues[vi].name);
+        m.addSubMenu ("Note length", len, sel);
+        PopupMenu tm;
+        tm.addItem (20, String ("Quantize to ") + (st.grid >= 0 ? noteValues[st.grid].name : "1/16"));
+        tm.addItem (21, "Humanize"); tm.addItem (22, "Reverse"); tm.addItem (23, "Nudge left"); tm.addItem (24, "Nudge right");
+        tm.addItem (25, "Double speed"); tm.addItem (26, "Half speed");
+        m.addSubMenu ("Timing", tm, sel);
+        PopupMenu drums; for (auto& l : st.song().lanes) drums.addItem (1000 + l.note, l.name + "  (" + String (l.note) + ")");
+        m.addSubMenu ("Move to drum", drums, sel);
+        PopupMenu se;
+        se.addItem (30, "All"); se.addItem (31, "None"); se.addItem (32, "Invert");
+        se.addItem (33, "All in this lane", laneNote >= 0); se.addItem (34, "All with this velocity", clickedVel > 0);
+        se.addItem (35, "Every 2nd note in this lane", laneNote >= 0);
+        m.addSubMenu ("Select", se);
+        m.addSectionHeader ("PATTERN");
+        m.addItem (5, "Split pattern here (scissors)");
         st.cursorTick = st.snapFloor (st.xToTick ((float) e.x));
         const int splitTick = st.snapRound (st.xToTick ((float) e.x));
-        m.showMenuAsync (PopupMenu::Options().withMousePosition(), [this, splitTick] (int r) {
-            if (r == 1) st.apply ("Delete", [] (Pattern& q) { deleteSelected (q); });
-            else if (r == 2) st.apply ("Duplicate", [] (Pattern& q) { duplicateSelection (q); });
-            else if (r == 3) { st.clipboard.clear(); int lo = INT_MAX; for (auto& n : st.pat().notes) if (n.selected) { st.clipboard.push_back (n); lo = jmin (lo, n.tick); } for (auto& n : st.clipboard) n.tick -= lo; }
-            else if (r == 4) { const int at = st.cursorTick; auto clip = st.clipboard; st.apply ("Paste", [at, clip] (Pattern& q) { selectAll (q, false); for (auto n : clip) { n.tick += at; n.selected = true; q.notes.push_back (n); } q.sort(); }); }
-            else if (r == 5) { if (st.splitAt) st.splitAt (splitTick); }
-            else if (r >= 100 && r <= 200) { const int v = r - 100; st.apply ("Chance", [v] (Pattern& q) { for (auto& n : q.notes) if (n.selected) n.probability = v; }); }
-            else if (r >= 300) { const int v = r - 300; st.apply ("Velocity", [v] (Pattern& q) { for (auto& n : q.notes) if (n.selected) n.velocity = v; }); }
+        const int g = st.gridTicks() > 1 ? st.gridTicks() : 240;
+        const int gi = st.grid >= 0 ? st.grid : 3;
+        m.showMenuAsync (PopupMenu::Options().withMousePosition(), [this, splitTick, laneNote, clickedVel, g, gi] (int r) {
+            if (r <= 0) return;
+            // note actions are remembered so they can be repeated or stamped
+            auto act = [this] (const String& name, std::function<void (Pattern&)> f) { st.remember (name, f); st.apply (name, f); };
+            if (r >= 900 && r < 907) { st.stamping = false; if (st.chooseTool) st.chooseTool ((Tool) (r - 900)); return; }
+            if (r == 950) { st.repeatLast(); return; }
+            if (r == 951) { st.stamping = ! st.stamping; if (st.toast) st.toast (st.stamping ? "Click notes to apply \"" + st.lastName + "\". Esc ends." : "Stopped"); return; }
+            switch (r) {
+                case 1: act ("Delete", [] (Pattern& q) { deleteSelected (q); }); break;
+                case 2: st.apply ("Duplicate", [] (Pattern& q) { duplicateSelection (q); }); break;
+                case 3: { st.clipboard.clear(); int lo = INT_MAX; for (auto& n : st.pat().notes) if (n.selected) { st.clipboard.push_back (n); lo = jmin (lo, n.tick); } for (auto& n : st.clipboard) { n.tick -= lo; n.selected = false; } break; }
+                case 4: { const int at = st.cursorTick; auto clip = st.clipboard; st.apply ("Paste", [at, clip] (Pattern& q) { selectAll (q, false); for (auto n : clip) { n.tick += at; n.selected = true; q.notes.push_back (n); } q.sort(); }); break; }
+                case 5: if (st.splitAt) st.splitAt (splitTick); break;
+                case 6: act ("Mute / unmute", [] (Pattern& q) { for (auto& n : q.notes) if (n.selected) n.probability = n.probability == 0 ? 100 : 0; }); break;
+                case 10: act ("Louder +10", [] (Pattern& q) { velocityAdd (q, 10); }); break;
+                case 11: act ("Softer -10", [] (Pattern& q) { velocityAdd (q, -10); }); break;
+                case 12: st.apply ("Ramp up", [] (Pattern& q) { velocityRamp (q, 40, 120, 0.0); }); break;
+                case 13: st.apply ("Ramp down", [] (Pattern& q) { velocityRamp (q, 120, 40, 0.0); }); break;
+                case 14: act ("Accent the beats", [] (Pattern& q) { for (auto* n : targetNotes (q)) n->velocity = n->tick % PPQ == 0 ? 116 : (n->tick % (PPQ / 2) == 0 ? 88 : 66); }); break;
+                case 15: act ("Randomize velocity", [] (Pattern& q) { std::mt19937 rr ((uint32) Time::getMillisecondCounter()); randomizeVelocity (q, 60, 120, rr); }); break;
+                case 20: act (String ("Quantize ") + noteValues[gi].name, [gi] (Pattern& q) { QuantOptions o; o.valueIndex = gi; quantize (q, o); }); break;
+                case 21: act ("Humanize", [] (Pattern& q) { std::mt19937 rr ((uint32) Time::getMillisecondCounter()); humanizeBake (q, 12, 12, rr); }); break;
+                case 22: st.apply ("Reverse", [] (Pattern& q) { reverseNotes (q); }); break;
+                case 23: act ("Nudge left", [g] (Pattern& q) { nudge (q, -g); }); break;
+                case 24: act ("Nudge right", [g] (Pattern& q) { nudge (q, g); }); break;
+                case 25: st.apply ("Double speed", [] (Pattern& q) { scaleTime (q, 2.0); }); break;
+                case 26: st.apply ("Half speed", [] (Pattern& q) { scaleTime (q, 0.5); }); break;
+                case 30: selectAll (st.pat(), true); st.publish(); break;
+                case 31: selectAll (st.pat(), false); st.publish(); break;
+                case 32: for (auto& n : st.pat().notes) n.selected = ! n.selected; st.publish(); break;
+                case 33: for (auto& n : st.pat().notes) n.selected = n.note == laneNote; st.publish(); break;
+                case 34: for (auto& n : st.pat().notes) n.selected = n.velocity == clickedVel; st.publish(); break;
+                case 35: { int c = 0; for (auto& n : st.pat().notes) { n.selected = false; if (n.note == laneNote) n.selected = (c++ % 2) == 1; } st.publish(); break; }
+                default:
+                    if (r >= 100 && r <= 200) { const int v = r - 100; act ("Chance " + String (v) + "%", [v] (Pattern& q) { for (auto& n : q.notes) if (n.selected) n.probability = v; }); }
+                    else if (r >= 300 && r < 500) { const int v = r - 300; act ("Velocity " + String (v), [v] (Pattern& q) { for (auto& n : q.notes) if (n.selected) n.velocity = v; }); }
+                    else if (r >= 700 && r < 720) { const int t = noteValues[r - 700].ticks; act (String ("Length ") + noteValues[r - 700].name, [t] (Pattern& q) { for (auto& n : q.notes) if (n.selected) n.length = t; }); }
+                    else if (r >= 1000) { const int to = r - 1000; act ("Move to " + st.song().laneName (to), [to] (Pattern& q) { moveToLane (q, to); }); }
+                    break;
+            }
         });
     }
 };
@@ -749,7 +822,7 @@ public:
     }
     void paint (Graphics& g) override
     {
-        g.fillAll (th::panel);
+        fillArea (g, getLocalBounds(), "Velocity lane", th::panel);
         const float h = (float) getHeight() - 8.0f;
         {   // guide lines: values snap to these
             const int step = st.probMode ? (st.velGuide > 0 ? 25 : 0) : st.velGuide;

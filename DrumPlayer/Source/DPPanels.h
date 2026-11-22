@@ -33,7 +33,7 @@ public:
     explicit Page (String t) : title (std::move (t)) {}
     void paint (Graphics& g) override
     {
-        drawCard (g, getLocalBounds().toFloat().reduced (2), th::panel, 12);
+        drawCard (g, getLocalBounds().toFloat().reduced (2), th::panel, 12, "Pages");
         g.setFont (font (13.0f, 3)); g.setColour (th::amber);
         g.drawText (title, 16, 8, getWidth() - 32, 22, Justification::centredLeft);
         g.setFont (font (10.5f, 1)); g.setColour (th::faint);
@@ -71,7 +71,7 @@ public:
         const int lo = s.settings.zoneLow, hi = s.settings.zoneHigh;
         const int play = st.proc.playingKey.load(), queued = st.proc.queuedKey.load();
         const bool blink = (Time::getMillisecondCounter() / 250) % 2 == 0;
-        g.fillAll (th::bg);
+        fillArea (g, getLocalBounds(), "Keyboard strip", th::bg);
         // white keys
         for (int k = lo; k <= hi; ++k) {
             if (isBlackKey (k)) continue;
@@ -135,7 +135,13 @@ public:
         if (dragKey < 0 || e.getDistanceFromDragStart() < 6) return;
         if (st.song().keys[(size_t) dragKey].isEmpty()) return;
         if (auto* c = DragAndDropContainer::findParentDragContainerFor (this))
-            if (! c->isDragAndDropActive()) c->startDragging ("key:" + String (dragKey), this);
+            if (! c->isDragAndDropActive()) {
+                // only the key being dragged travels under the mouse
+                const auto r = keyRect (dragKey).toNearestInt();
+                const auto img = createComponentSnapshot (r, true);
+                const Point<int> off = r.getPosition() - e.getMouseDownPosition();
+                c->startDragging ("key:" + String (dragKey), this, ScaledImage (img), false, &off);
+            }
     }
     void mouseUp (const MouseEvent& e) override
     {
@@ -230,7 +236,7 @@ public:
     explicit ParkTray (EditState& e) : st (e) { setTooltip ("Parking tray: drag a key here to set its pattern aside, drag it back onto any key"); }
     void paint (Graphics& g) override
     {
-        drawCard (g, getLocalBounds().toFloat().reduced (1), th::panel, 8);
+        drawCard (g, getLocalBounds().toFloat().reduced (1), th::panel, 8, "Parking tray");
         g.setFont (font (9.5f, 3)); g.setColour (th::faint);
         g.drawText ("PARKED", 8, 2, 60, 12, Justification::centredLeft);
         for (int i = 0; i < 8; ++i) {
@@ -254,7 +260,13 @@ public:
     void mouseDrag (const MouseEvent& e) override
     {
         if (dragSlot < 0 || e.getDistanceFromDragStart() < 6 || st.song().park[(size_t) dragSlot].isEmpty()) return;
-        if (auto* c = DragAndDropContainer::findParentDragContainerFor (this)) if (! c->isDragAndDropActive()) c->startDragging ("park:" + String (dragSlot), this);
+        if (auto* c = DragAndDropContainer::findParentDragContainerFor (this))
+            if (! c->isDragAndDropActive()) {
+                const auto r = slotRect (dragSlot).toNearestInt();
+                const auto img = createComponentSnapshot (r, true);
+                const Point<int> off = r.getPosition() - e.getMouseDownPosition();
+                c->startDragging ("park:" + String (dragSlot), this, ScaledImage (img), false, &off);
+            }
     }
     bool isInterestedInDragSource (const SourceDetails& d) override { const auto s = d.description.toString(); return s.startsWith ("key:") || s.startsWith ("park:"); }
     void itemDragMove (const SourceDetails& d) override { hover = slotAt (d.localPosition.toFloat()); repaint(); }
@@ -549,6 +561,150 @@ private:
     Viewport view; Component list; OwnedArray<StepRow> rows;
 };
 
+
+// ---------------------------------------------------------------- Look editor (a tab of Settings)
+class LookEditor : public Component, private ListBoxModel
+{
+public:
+    std::function<StringArray()> collectIds;      // buttons and texts found on screen
+    std::function<void()> onChanged;
+
+    LookEditor()
+    {
+        addAndMakeVisible (list); list.setModel (this); list.setRowHeight (22);
+        list.setColour (ListBox::backgroundColourId, Colours::black.withAlpha (0.2f));
+        setupLabel (*this, name, "", 13.0f, th::amber);
+        setupButton (*this, useMine, "Use my colours", true);
+        useMine.onClick = [this] { auto& e = el(); if (useMine.getToggleState() && ! e.custom) seed (e); e.custom = useMine.getToggleState(); changed(); };
+        for (int i = 0; i < 3; ++i) {
+            auto* sw = swatches.add (new Swatch (i == 0 ? "Top" : i == 1 ? "Middle" : "Bottom"));
+            addAndMakeVisible (sw);
+            sw->onClick = [this, i, sw] { pick (i, sw); };
+        }
+        setupButton (*this, d3, "3D", true);
+        d3.onClick = [this] { el().threeD = d3.getToggleState(); changed(); };
+        setupLabel (*this, lDepth, "Depth"); setupSlider (*this, depth, th::amber); depth.setRange (0.0, 2.0, 0.05);
+        depth.onValueChange = [this] { if (! loading) { el().depth = (float) depth.getValue(); changed(); } };
+        setupLabel (*this, lFont, "Text size"); setupSlider (*this, fontSz, th::blue); fontSz.setRange (0.0, 28.0, 0.5);
+        fontSz.setTextValueSuffix (" pt"); fontSz.setTooltip ("0 = as designed");
+        fontSz.onValueChange = [this] { if (! loading) { el().fontSize = (float) fontSz.getValue(); changed(); } };
+        setupButton (*this, resetOne, "Reset this"); resetOne.onClick = [this] { Theme::get().reset (currentId()); show(); if (onChanged) onChanged(); };
+        setupButton (*this, resetAll, "Reset every look"); resetAll.onClick = [this] {
+            AlertWindow::showOkCancelBox (MessageBoxIconType::QuestionIcon, "Reset every look", "Go back to the designed look everywhere?", "Reset", "Cancel", this,
+                ModalCallbackFunction::create ([this] (int r) { if (r == 1) { Theme::get().resetAll(); show(); if (onChanged) onChanged(); } }));
+        };
+        setupLabel (*this, help, "Pick a part on the left. Its own settings win over \"Buttons\" and \"Labels\", which style all of them at once.", 10.5f, th::faint);
+        help.setJustificationType (Justification::topLeft);
+    }
+    void refreshList()
+    {
+        items.clear(); ids.clear();
+        for (auto& p : themePanels()) { items.add (p); ids.add (p); }
+        items.add ("Text: Title (DRUM PLAYER)"); ids.add ("txt:Title");
+        if (collectIds)
+            for (auto& id : collectIds()) {
+                if (id.startsWith ("btn:")) { items.add ("Button: " + id.substring (4)); ids.add (id); }
+                else if (id.startsWith ("txt:")) { items.add ("Text: " + id.substring (4)); ids.add (id); }
+            }
+        list.updateContent();
+        if (list.getSelectedRow() < 0) list.selectRow (0);
+        show();
+    }
+    void resized() override
+    {
+        auto a = getLocalBounds();
+        list.setBounds (a.removeFromLeft (200)); a.removeFromLeft (12);
+        name.setBounds (a.removeFromTop (24)); a.removeFromTop (2);
+        useMine.setBounds (a.removeFromTop (26).removeFromLeft (useMine.getWidth()).reduced (0, 2)); a.removeFromTop (6);
+        auto sw = a.removeFromTop (54);
+        for (auto* s2 : swatches) { s2->setBounds (sw.removeFromLeft (62)); sw.removeFromLeft (8); }
+        a.removeFromTop (8);
+        auto r = a.removeFromTop (26); d3.setBounds (r.removeFromLeft (d3.getWidth()).reduced (0, 2)); r.removeFromLeft (10);
+        lDepth.setBounds (r.removeFromLeft (44)); depth.setBounds (r);
+        a.removeFromTop (6);
+        r = a.removeFromTop (26); lFont.setBounds (r.removeFromLeft (62)); fontSz.setBounds (r);
+        a.removeFromTop (10);
+        r = a.removeFromTop (26); resetOne.setBounds (r.removeFromLeft (resetOne.getWidth()).reduced (0, 2)); r.removeFromLeft (8); resetAll.setBounds (r.removeFromLeft (resetAll.getWidth()).reduced (0, 2));
+        a.removeFromTop (8); help.setBounds (a.removeFromTop (44));
+    }
+private:
+    struct Swatch : public Component
+    {
+        explicit Swatch (String t) : title (std::move (t)) {}
+        std::function<void()> onClick; Colour colour; bool enabled = true; String title;
+        void paint (Graphics& g) override
+        {
+            auto r = getLocalBounds().toFloat().reduced (1).withTrimmedBottom (16);
+            g.setColour (colour.withMultipliedAlpha (enabled ? 1.0f : 0.3f)); g.fillRoundedRectangle (r, 5);
+            g.setColour (th::line); g.drawRoundedRectangle (r, 5, 1.0f);
+            g.setFont (font (10.5f, 2)); g.setColour (th::dim);
+            g.drawText (title, getLocalBounds().removeFromBottom (14), Justification::centred);
+        }
+        void mouseUp (const MouseEvent&) override { if (enabled && onClick) onClick(); }
+    };
+    struct Picker : public ColourSelector, private ChangeListener
+    {
+        std::function<void (Colour)> onColour;
+        Picker() : ColourSelector (ColourSelector::showColourAtTop | ColourSelector::showSliders | ColourSelector::showColourspace | ColourSelector::showAlphaChannel)
+        { setSize (300, 320); addChangeListener (this); }
+        void changeListenerCallback (ChangeBroadcaster*) override { if (onColour) onColour (getCurrentColour()); }
+    };
+
+    ListBox list; Label name, lDepth, lFont, help;
+    TextButton useMine, d3, resetOne, resetAll;
+    OwnedArray<Swatch> swatches;
+    FineSlider depth, fontSz;
+    StringArray items, ids;
+    bool loading = false;
+
+    String currentId() const { const int r = list.getSelectedRow(); return (r >= 0 && r < ids.size()) ? ids[r] : String ("Buttons"); }
+    ThemeEl& el() { return Theme::get().edit (currentId()); }
+    void changed() { Theme::get().changed(); show(); if (onChanged) onChanged(); }
+
+    // first time a part gets its own colours, start from what it looks like now
+    void seed (ThemeEl& e)
+    {
+        const auto id = currentId();
+        Colour base = th::panel;
+        if (id == "Window background" || id == "Note grid" || id == "Keyboard strip") base = th::bg;
+        if (id == "Buttons" || id.startsWith ("btn:") || id == "Boxes and menus") base = th::surface;
+        if (id == "Messages") base = th::raised;
+        if (id == "Lit buttons") { e.c0 = th::amber.brighter (0.15f); e.c1 = th::amber; e.c2 = th::amber.darker (0.25f); return; }
+        e.c0 = base.brighter (0.25f); e.c1 = base; e.c2 = base.darker (0.2f);
+    }
+    void show()
+    {
+        loading = true;
+        const auto* e = Theme::get().find (currentId());
+        ThemeEl d; if (e == nullptr) e = &d;
+        const int r = list.getSelectedRow();
+        name.setText (r >= 0 && r < items.size() ? items[r] : String(), dontSendNotification);
+        useMine.setToggleState (e->custom, dontSendNotification);
+        const Colour c[3] = { e->c0, e->c1, e->c2 };
+        for (int i = 0; i < 3; ++i) { swatches[i]->colour = c[i]; swatches[i]->enabled = e->custom; swatches[i]->repaint(); }
+        d3.setToggleState (e->threeD, dontSendNotification);
+        depth.setValue (e->depth, dontSendNotification); fontSz.setValue (e->fontSize, dontSendNotification);
+        loading = false;
+    }
+    void pick (int i, Swatch* sw)
+    {
+        auto p = std::make_unique<Picker>();
+        p->setCurrentColour (sw->colour, dontSendNotification);
+        p->onColour = [this, i] (Colour c) { auto& e = el(); (i == 0 ? e.c0 : i == 1 ? e.c1 : e.c2) = c; changed(); };
+        CallOutBox::launchAsynchronously (std::move (p), sw->getScreenBounds(), nullptr);
+    }
+    int getNumRows() override { return items.size(); }
+    void paintListBoxItem (int row, Graphics& g, int w, int h, bool sel) override
+    {
+        if (row >= items.size()) return;
+        if (sel) { g.setColour (th::blue.withAlpha (0.22f)); g.fillRoundedRectangle (2, 1, w - 4.0f, h - 2.0f, 4); }
+        const bool custom = Theme::get().findCustom (ids[row]) != nullptr || (Theme::get().find (ids[row]) && Theme::get().find (ids[row])->fontSize > 0);
+        g.setFont (font (11.5f, custom ? 3 : 1)); g.setColour (custom ? th::amber : th::text);
+        g.drawText (items[row], 8, 0, w - 12, h, Justification::centredLeft, true);
+    }
+    void selectedRowsChanged (int) override { show(); }
+};
+
 // ---------------------------------------------------------------- settings page
 class SettingsPage : public Page
 {
@@ -575,6 +731,11 @@ public:
         setupButton (*this, remember, "Open the way I left it", true, "New Drum Player instances start with your last patterns and settings");
         setupLabel (*this, help, "In Studio One: put Drum Player on an instrument track, then on the drum plugin's track choose Drum Player as the input.", 10.5f, th::faint);
         help.setJustificationType (Justification::topLeft);
+        setupButton (*this, tabGeneral, "General", true); setupButton (*this, tabLook, "Look", true);
+        tabGeneral.setRadioGroupId (91); tabLook.setRadioGroupId (91); tabGeneral.setToggleState (true, dontSendNotification);
+        tabGeneral.onClick = [this] { showTab (false); };
+        tabLook.onClick = [this] { showTab (true); };
+        addChildComponent (look);
         auto commit = [this] {
             if (loading) return;
             st.applySong ("Settings", [this] (Song& s) {
@@ -592,6 +753,18 @@ public:
         };
         for (auto* c : { &out, &zLo, &zHi, &start, &mode, &stopKey, &split, &trigCh, &playCh }) c->onChange = commit;
         for (auto* b : { &hostStop, &thru, &fills, &remember, &mirror }) b->onClick = commit;
+    }
+    LookEditor look;
+    void showTab (bool lookTab)
+    {
+        for (int i = 0; i < getNumChildComponents(); ++i) {
+            auto* c = getChildComponent (i);
+            if (c == &tabGeneral || c == &tabLook) continue;
+            c->setVisible (c == &look ? lookTab : ! lookTab);
+        }
+        if (lookTab) look.refreshList();
+        title = lookTab ? "SETTINGS  ·  LOOK" : "SETTINGS";
+        repaint();
     }
     void refresh() override
     {
@@ -611,6 +784,11 @@ public:
     void resized() override
     {
         auto a = content();
+        auto tabs = a.removeFromTop (26);
+        tabGeneral.setBounds (tabs.removeFromLeft (tabGeneral.getWidth()).reduced (0, 2)); tabs.removeFromLeft (6);
+        tabLook.setBounds (tabs.removeFromLeft (tabLook.getWidth()).reduced (0, 2));
+        a.removeFromTop (8);
+        look.setBounds (a);
         const int lw = 170;
         out.setBounds (row (a, lOut, lw).removeFromLeft (170));
         auto z = row (a, lZone, lw); zLo.setBounds (z.removeFromLeft (110)); z.removeFromLeft (8); zHi.setBounds (z.removeFromLeft (110));
@@ -628,7 +806,7 @@ private:
     EditState& st; bool loading = false;
     Label lOut, lZone, lStart, lMode, lStop, lSplit, help, lTrig, lPlayCh;
     ComboBox out, zLo, zHi, start, mode, stopKey, split, trigCh, playCh;
-    TextButton hostStop, thru, fills, remember, mirror;
+    TextButton hostStop, thru, fills, remember, mirror, tabGeneral, tabLook;
 };
 
 // ---------------------------------------------------------------- preset browser

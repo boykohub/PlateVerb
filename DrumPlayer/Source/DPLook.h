@@ -3,6 +3,7 @@
 #pragma once
 #include "DPProcessor.h"
 #include "FlexFonts.h"
+#include "DPTheme.h"
 
 namespace dp {
 namespace th {
@@ -97,6 +98,19 @@ public:
         auto r = b.getLocalBounds().toFloat().reduced (0.5f);
         const bool on = b.getToggleState();
         const float cr = 5.0f;
+        {   // the user's look, if set: this button's own style, else the lit / all-buttons style
+            auto& T = Theme::get();
+            const ThemeEl* e = on ? T.findCustom ("Lit buttons") : nullptr;
+            if (e == nullptr) e = T.findCustom ("btn:" + b.getComponentID());
+            if (e == nullptr && ! on) e = T.findCustom ("Buttons");
+            if (e != nullptr) {
+                fillThemed (g, r, *e, cr);
+                if (on && T.findCustom ("Lit buttons") == nullptr) { g.setColour (th::amber.withAlpha (0.55f)); g.fillRoundedRectangle (r, cr); }
+                if (over || down) { g.setColour (Colours::white.withAlpha (down ? 0.14f : 0.06f)); g.fillRoundedRectangle (r, cr); }
+                if (! b.isEnabled()) { g.setColour (Colours::black.withAlpha (0.45f)); g.fillRoundedRectangle (r, cr); }
+                return;
+            }
+        }
         // soft drop shadow so the key looks raised
         g.setColour (Colours::black.withAlpha (0.35f)); g.fillRoundedRectangle (r.translated (0, 1.0f), cr);
         Colour top = on ? th::amber.brighter (0.15f) : th::raised.brighter (0.06f);
@@ -114,13 +128,20 @@ public:
     Font getTextButtonFont (TextButton&, int) override { return font (12.0f, 2); }
     void drawButtonText (Graphics& g, TextButton& b, bool, bool) override
     {
-        g.setFont (font (12.0f, 2));
+        g.setFont (font (Theme::get().fontFor ("btn:" + b.getComponentID(), "Buttons", 12.0f), 2));
         g.setColour (b.getToggleState() ? th::ink : (b.isEnabled() ? th::text : th::faint));
         g.drawFittedText (b.getButtonText(), b.getLocalBounds().reduced (4, 0), Justification::centred, 1);
     }
     void drawComboBox (Graphics& g, int w, int h, bool, int, int, int, int, ComboBox& box) override
     {
         auto r = Rectangle<float> (0, 0, (float) w, (float) h).reduced (0.5f);
+        if (auto* e = Theme::get().findCustom ("Boxes and menus")) {
+            fillThemed (g, r, *e, 5);
+            Path p; const float ax = (float) w - 10.0f, ay = (float) h * 0.5f;
+            p.startNewSubPath (ax - 3.5f, ay - 1.8f); p.lineTo (ax, ay + 1.8f); p.lineTo (ax + 3.5f, ay - 1.8f);
+            g.setColour (th::dim); g.strokePath (p, PathStrokeType (1.5f, PathStrokeType::curved, PathStrokeType::rounded));
+            return;
+        }
         g.setColour (Colours::black.withAlpha (0.35f)); g.fillRoundedRectangle (r.translated (0, 1.0f), 5);
         g.setGradientFill (ColourGradient (th::raised, r.getTopLeft(), th::surface, r.getBottomLeft(), false));
         g.fillRoundedRectangle (r, 5);
@@ -129,13 +150,19 @@ public:
         p.startNewSubPath (ax - 3.5f, ay - 1.8f); p.lineTo (ax, ay + 1.8f); p.lineTo (ax + 3.5f, ay - 1.8f);
         g.setColour (box.isEnabled() ? th::dim : th::faint); g.strokePath (p, PathStrokeType (1.5f, PathStrokeType::curved, PathStrokeType::rounded));
     }
-    Font getComboBoxFont (ComboBox&) override { return font (12.0f, 1); }
+    Font getComboBoxFont (ComboBox&) override { return font (Theme::get().fontFor ("", "Boxes and menus", 12.0f), 1); }
+    Font getLabelFont (Label& l) override
+    {
+        auto f = l.getFont();
+        const float h = Theme::get().fontFor ("txt:" + l.getComponentID(), "Labels", 0.0f);
+        return h > 0 ? f.withHeight (h) : f;
+    }
     void positionComboBoxText (ComboBox& b, Label& l) override
     {
         l.setBounds (6, 0, b.getWidth() - 20, b.getHeight());
         l.setFont (getComboBoxFont (b)); l.setJustificationType (Justification::centredLeft);
     }
-    Font getPopupMenuFont() override { return font (13.0f, 1); }
+    Font getPopupMenuFont() override { return font (Theme::get().fontFor ("", "Boxes and menus", 12.0f) + 1.0f, 1); }
     void drawPopupMenuBackground (Graphics& g, int w, int h) override
     {
         g.fillAll (th::panel);
@@ -187,6 +214,7 @@ inline int fitW (const String& t, int minW = 0) { return jmax (minW, (int) std::
 inline void setupButton (Component& parent, TextButton& b, const String& text, bool toggle = false, const String& tip = {})
 {
     b.setButtonText (text);
+    if (b.getComponentID().isEmpty()) b.setComponentID (text);       // the name the Look editor knows it by
     b.setClickingTogglesState (toggle);
     if (tip.isNotEmpty()) b.setTooltip (tip);
     b.setSize (fitW (text), btnH);
@@ -204,6 +232,7 @@ inline void setupCombo (Component& parent, ComboBox& c, const StringArray& items
 inline void setupLabel (Component& parent, Label& l, const String& text, float size = 11.5f, Colour c = th::dim)
 {
     l.setText (text, dontSendNotification); l.setFont (font (size, 2)); l.setColour (Label::textColourId, c);
+    if (l.getComponentID().isEmpty()) l.setComponentID (text.upToFirstOccurrenceOf ("\n", false, false).substring (0, 40));
     l.setJustificationType (Justification::centredLeft); l.setInterceptsMouseClicks (false, false);
     parent.addAndMakeVisible (l);
 }
@@ -226,11 +255,21 @@ struct RowPlacer
 };
 
 // card background like the practice app: rounded charcoal panel with a hairline
-inline void drawCard (Graphics& g, Rectangle<float> r, Colour c = th::panel, float radius = 10.0f)
+inline void drawCard (Graphics& g, Rectangle<float> r, Colour c = th::panel, float radius = 10.0f, const String& themeId = {})
 {
+    if (themeId.isNotEmpty()) if (auto* e = Theme::get().findCustom (themeId)) { fillThemed (g, r, *e, radius); return; }
     g.setColour (Colours::black.withAlpha (0.35f)); g.fillRoundedRectangle (r.translated (0, 2), radius);
     g.setColour (c); g.fillRoundedRectangle (r, radius);
     g.setColour (th::line); g.drawRoundedRectangle (r.reduced (0.5f), radius, 1.0f);
 }
+
+
+// background of a styled area: the user's gradient if set, else the designed colour
+inline void fillArea (Graphics& g, Rectangle<int> r, const String& themeId, Colour designed)
+{
+    if (auto* e = Theme::get().findCustom (themeId)) { fillThemed (g, r.toFloat(), *e, 0.0f); return; }
+    g.setColour (designed); g.fillRect (r);
+}
+inline bool themed (const String& id) { return Theme::get().findCustom (id) != nullptr; }
 
 } // namespace dp
