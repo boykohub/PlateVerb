@@ -20,7 +20,7 @@ public:
     explicit DrumPlayerEditor (DrumPlayerProcessor& p)
         : AudioProcessorEditor (p), proc (p), st (p),
           strip (st, false), bigStrip (st, true), tray (st), bigTray (st), ruler (st), headers (st), grid (st), vel (st),
-          quantPage (st), humPage (st), chainPage (st), setPage (st), presetPage (st), mapPage (st)
+          quantPage (st), humPage (st), chainPage (st), setPage (st), presetPage (st), mapPage (st), recPage (st)
     {
         setLookAndFeel (&lnf);
         LookAndFeel::setDefaultLookAndFeel (&lnf);
@@ -117,8 +117,14 @@ public:
         setupCombo (body, velBox, vels, 1, "Velocity for new notes");
         velBox.setSelectedItemIndex (3, dontSendNotification);
         velBox.onChange = [this] { st.defaultVel = velBox.getText().getIntValue(); };
-        setupButton (body, recBtn, "Rec", true, "Record notes you play (outside the pattern keys) into the playing pattern, looping");
-        recBtn.onClick = [this] { proc.recArmed = recBtn.getToggleState(); };
+        setupButton (body, recBtn, "Rec", false, "Record into the key you're editing (it starts playing, after a count-in). Press again to stop recording");
+        recBtn.onClick = [this] { proc.uiRecord (proc.recStateUi.load() == 0, st.song().editKey); };
+        setupButton (body, recOptBtn, "Record...", true, "Count-in, click, overdub or replace, quantize and more");
+        recOptBtn.onClick = [this] { togglePage (recPage, recOptBtn); };
+        StringArray guides { "Lines: off", "Lines every 8", "Lines every 16", "Lines every 20", "Lines every 32" };
+        setupCombo (body, guideBox, guides, 1, "Guide lines in the velocity lane. Bars click onto them; hold Alt to move freely");
+        guideBox.setSelectedItemIndex (2, dontSendNotification);
+        guideBox.onChange = [this] { static const int g[] = { 0, 8, 16, 20, 32 }; st.velGuide = g[jlimit (0, 4, guideBox.getSelectedItemIndex())]; vel.repaint(); };
         setupButton (body, playBtn, "Play", false, "Play the pattern being edited");
         playBtn.onClick = [this] { proc.uiTrigger (st.song().editKey); };
         setupButton (body, stopBtn, "Stop"); stopBtn.onClick = [this] { proc.uiStop(); };
@@ -151,7 +157,7 @@ public:
         velMode.onClick = [this] { st.probMode = ! st.probMode; velMode.setButtonText (st.probMode ? "Chance" : "Velocity"); vel.repaint(); };
 
         // ---------------- pages
-        for (Page* pg : { (Page*) &quantPage, (Page*) &humPage, (Page*) &chainPage, (Page*) &setPage, (Page*) &presetPage, (Page*) &mapPage }) body.addChildComponent (pg);
+        for (Page* pg : { (Page*) &quantPage, (Page*) &humPage, (Page*) &chainPage, (Page*) &setPage, (Page*) &presetPage, (Page*) &mapPage, (Page*) &recPage }) body.addChildComponent (pg);
         presetPage.onLoaded = [this] { refreshAll(); };
         presetPage.onImport = [this] { importDialog(); };
         body.addChildComponent (exchange);
@@ -249,7 +255,8 @@ private:
     TextEditor nameEd, barsEd;
     ComboBox typeBox, bpbBox, gridBox, swingPreset, swingValue, velBox;
     Label lLen, lGrid, lSwing, lVel, exchangeHelp, status;
-    TextButton lenMenuBtn, undoBtn, redoBtn, quantBtn, humBtn, funcBtn, recBtn, playBtn, stopBtn, velMode;
+    TextButton lenMenuBtn, undoBtn, redoBtn, quantBtn, humBtn, funcBtn, recBtn, recOptBtn, playBtn, stopBtn, velMode;
+    ComboBox guideBox;
     OwnedArray<TextButton> toolBtns;
     FineSlider swingSlider;
     std::unique_ptr<AudioProcessorValueTreeState::SliderAttachment> swingAtt;
@@ -267,7 +274,7 @@ private:
             owner->repaintRoll();
         }
     } scrollRelay;
-    QuantizePage quantPage; HumanizePage humPage; ChainPage chainPage; SettingsPage setPage; PresetPage presetPage; MapPage mapPage;
+    QuantizePage quantPage; HumanizePage humPage; ChainPage chainPage; SettingsPage setPage; PresetPage presetPage; MapPage mapPage; RecordPage recPage;
     Component exchange;
     Page* openPage = nullptr; TextButton* openPageBtn = nullptr;
     struct Toast : public Component
@@ -318,7 +325,7 @@ private:
         r2.place (lSwing, 40); r2.place (swingPreset, 104); r2.place (swingSlider, 190); r2.place (swingValue, 66); r2.skip (10);
         r2.place (quantBtn); r2.place (humBtn); r2.place (funcBtn); r2.skip (10);
         r2.place (lVel, 24); r2.place (velBox, 56); r2.skip (10);
-        r2.place (recBtn); r2.place (playBtn); r2.place (stopBtn); r2.place (dragBtn);
+        r2.place (recBtn); r2.place (recOptBtn); r2.place (playBtn); r2.place (stopBtn); r2.place (dragBtn);
         a.removeFromTop (8);
         // status line
         status.setBounds (a.removeFromBottom (18));
@@ -334,12 +341,13 @@ private:
         headers.setBounds (a.removeFromLeft (headW)); top.removeFromLeft (headW);
         grid.setBounds (a); ruler.setBounds (top);
         velMode.setBounds (velRow.getX() + 8, velRow.getY() + 8, fitW ("Velocity"), btnH);
+        guideBox.setBounds (velRow.getX() + 8, velRow.getY() + 8 + btnH + 6, 130, btnH);
         velLabelArea = velRow.removeFromLeft (headW);
         velRow.removeFromRight (sb);
         vel.setBounds (velRow);
         // pages float over the roll's right side
         auto pageArea = rollArea.withTrimmedLeft (jmax (0, rollArea.getWidth() - 520)).withTrimmedBottom (velH / 2);
-        for (Page* pg : { (Page*) &quantPage, (Page*) &humPage, (Page*) &chainPage, (Page*) &setPage }) pg->setBounds (pageArea);
+        for (Page* pg : { (Page*) &quantPage, (Page*) &humPage, (Page*) &chainPage, (Page*) &setPage, (Page*) &recPage }) pg->setBounds (pageArea);
         mapPage.setBounds (rollArea.withTrimmedLeft (jmax (0, rollArea.getWidth() - 520)));
         presetPage.setBounds (rollArea.withTrimmedLeft (jmax (0, rollArea.getWidth() - 600)));
         exchange.setBounds (rollArea.withTrimmedTop (-90));
@@ -365,7 +373,7 @@ private:
         drawCard (g, velLabelArea.toFloat(), th::panel, 6);
         g.setFont (font (10.5f, 1)); g.setColour (th::faint);
         const auto focus = st.focusLane >= 0 && st.song().lane (st.focusLane) ? st.song().lane (st.focusLane)->name : String ("all lanes");
-        g.drawFittedText ("Showing: " + focus + "\nClick a lane name to show only that drum", velLabelArea.reduced (10, 6).withTrimmedTop (30), Justification::topLeft, 3);
+        g.drawFittedText ("Showing: " + focus, velLabelArea.reduced (10, 6).withTrimmedTop (60), Justification::topLeft, 2);
     }
 
     // ------------------------------------------------------------ refresh
@@ -388,7 +396,6 @@ private:
         gridBox.setSelectedItemIndex (st.grid < 0 ? numNoteValues : st.grid, dontSendNotification);
         presetName.setButtonText (proc.presetName.isNotEmpty() ? proc.presetName : String ("Presets"));
         undoBtn.setEnabled (proc.undo.canUndo()); redoBtn.setEnabled (proc.undo.canRedo());
-        recBtn.setToggleState (proc.recArmed.load(), dontSendNotification);
         zoomPct.setButtonText (String ((int) std::round (scale * 100)) + "%");
         syncSwingPreset();
         status.setText (keyName (st.song().editKey) + "   " + (p.name.isNotEmpty() ? p.name : String ("(empty key)")) + "   |   "
@@ -427,7 +434,20 @@ private:
         if (pk != lastPlayKey) { lastPlayKey = pk; strip.repaint(); bigStrip.repaint(); }
         if (pt != lastPlayTicks) { lastPlayTicks = pt; grid.playTicks = pt; grid.repaint(); }
         if (proc.queuedKey.load() != -2) { strip.repaint(); bigStrip.repaint(); }
-        if (proc.recArmed.load() != recBtn.getToggleState()) recBtn.setToggleState (proc.recArmed.load(), dontSendNotification);
+        {   // Rec lamp: steady while recording, blinking during the count-in
+            const int rs = proc.recStateUi.load();
+            const bool lit = rs == 2 || (rs == 1 && (Time::getMillisecondCounter() / 200) % 2 == 0);
+            if (lit != recBtn.getToggleState()) recBtn.setToggleState (lit, dontSendNotification);
+        }
+        if (headers.pollHits()) headers.repaint();
+        {   // new drums arriving from the keyboard or pads get their own lane straight away
+            bool added = false;
+            for (int nn = 0; nn < 128; ++nn) {
+                const uint32 h = proc.inHits[(size_t) nn].load();
+                if (h != lastIn[(size_t) nn]) { lastIn[(size_t) nn] = h; if (proc.edit.lane (nn) == nullptr) { proc.edit.ensureLane (nn); added = true; } }
+            }
+            if (added) { proc.publish(); repaintRoll(); }
+        }
         if (Time::getMillisecondCounter() > toast.until && toast.text.isNotEmpty()) { toast.text = {}; toast.repaint(); }
         if (openPage == &chainPage && proc.chainPlaying.load() >= 0) {
             const int cs = proc.chainStep.load() * 10 + proc.chainPlaying.load();
@@ -435,6 +455,7 @@ private:
         }
     }
     int lastChainState = -1;
+    std::array<uint32, 128> lastIn {};
 
     void showToast (const String& t) { toast.text = t; toast.until = Time::getMillisecondCounter() + 2600; toast.toFront (false); toast.repaint(); }
 

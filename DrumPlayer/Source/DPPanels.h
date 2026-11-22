@@ -58,7 +58,8 @@ class KeyStrip : public Component, public DragAndDropTarget, public FileDragAndD
 public:
     KeyStrip (EditState& e, bool big) : st (e), large (big)
     {
-        setTooltip ("Click: edit.  Double-click: play.  Drag onto another key: swap.  Drag to the tray: park.  Drag out of the window: MIDI file.  Drop MIDI files here.");
+        setTooltip (big ? "Drag a key onto another key to swap. Drag to the tray to park. Click to choose which key you edit."
+                        : "Click: play (and edit).  Ctrl+click: edit without playing.  Red key: stop.  Drag onto another key: swap.  Drag out of the window: MIDI file.  Drop MIDI files here.");
     }
     std::function<void (const StringArray&, int key)> onFiles;
     std::function<void (int key)> onKeyMenu;
@@ -122,9 +123,10 @@ public:
         const int k = keyAt (e.position);
         if (k < 0) return;
         if (e.mods.isPopupMenu()) { if (onKeyMenu) onKeyMenu (k); return; }
+        if (! large && k == st.song().settings.resolveStop()) { st.proc.uiStop(); pressedStop = true; repaint(); return; }
         st.song().editKey = k;
         st.focusLane = -1;
-        if (e.getNumberOfClicks() > 1 || e.mods.isAltDown()) st.proc.uiTrigger (k);
+        if (! large && ! e.mods.isCommandDown()) { st.proc.uiTrigger (k); playedKey = k; }
         if (st.changed) st.changed();
         dragKey = k;
     }
@@ -137,8 +139,10 @@ public:
     }
     void mouseUp (const MouseEvent& e) override
     {
-        if (! st.song().settings.latch && dragKey >= 0 && (e.getNumberOfClicks() > 1 || e.mods.isAltDown())) st.proc.uiRelease (dragKey);
-        dragKey = -1;
+        ignoreUnused (e);
+        if (! st.song().settings.latch && playedKey >= 0) st.proc.uiRelease (playedKey);
+        playedKey = -1; dragKey = -1;
+        if (pressedStop) { pressedStop = false; repaint(); }
     }
 
     // ------------------------------------------------------------ internal drag (swap / unpark)
@@ -184,10 +188,17 @@ public:
 private:
     EditState& st;
     bool large;
-    int dragKey = -1;
+    int dragKey = -1, playedKey = -1;
+    bool pressedStop = false;
 
     void drawTile (Graphics& g, Rectangle<float> r, int k, const Pattern& p, bool black)
     {
+        if (k == st.song().settings.resolveStop()) {             // the stop key
+            g.setColour (th::red.withAlpha (pressedStop ? 1.0f : 0.85f)); g.fillRoundedRectangle (r, 3);
+            g.setColour (th::ink); g.setFont (font (large ? 11.0f : 9.5f, 3));
+            g.drawFittedText ("STOP", r.reduced (1).toNearestInt(), Justification::centred, 1, 0.7f);
+            return;
+        }
         if (p.notes.empty() && p.name.isEmpty()) return;
         const auto c = th::typeColour (p.type);
         g.setColour (c.withAlpha (black ? 0.85f : 0.9f));
@@ -550,7 +561,11 @@ public:
         setupLabel (*this, lZone, "Pattern keys"); setupCombo (*this, zLo, keys); setupCombo (*this, zHi, keys);
         setupLabel (*this, lStart, "Start / switch on"); setupCombo (*this, start, { "Immediately", "Next beat", "Next bar", "End of pattern" });
         setupLabel (*this, lMode, "Keys"); setupCombo (*this, mode, { "Latch (press again to stop)", "Hold (release to stop)" });
-        StringArray stopKeys { "None" }; stopKeys.addArray (keys);
+        StringArray stopKeys { "None", "The last pattern key" }; stopKeys.addArray (keys);
+        StringArray chans { "Any channel" }; for (int c = 1; c <= 16; ++c) chans.add ("Channel " + String (c));
+        setupLabel (*this, lTrig, "Pattern keys listen on"); setupCombo (*this, trigCh, chans, 1, "Give a second controller its own channel to use it only for patterns");
+        setupLabel (*this, lPlayCh, "Drum pads / live notes on"); setupCombo (*this, playCh, chans, 1, "Notes on this channel are always played and recorded, never pattern keys");
+        setupButton (*this, mirror, "Pattern keys in every octave", true, "The pattern keys repeat up the whole keyboard, so any octave works. Use separate channels for live drums then");
         setupLabel (*this, lStop, "Stop key"); setupCombo (*this, stopKey, stopKeys);
         setupLabel (*this, lSplit, "Cut dropped grooves every");
         setupCombo (*this, split, { "Keep whole", "1 bar", "2 bars", "4 bars", "8 bars", "16 bars" });
@@ -567,14 +582,16 @@ public:
                 o.outChannel = out.getSelectedItemIndex() + 1;
                 o.zoneLow = zLo.getSelectedItemIndex(); o.zoneHigh = jmax (o.zoneLow, zHi.getSelectedItemIndex());
                 o.startQuant = (StartQuant) start.getSelectedItemIndex(); o.latch = mode.getSelectedItemIndex() == 0;
-                o.stopNote = stopKey.getSelectedItemIndex() - 1;
+                { const int si = stopKey.getSelectedItemIndex(); o.stopNote = si == 0 ? -1 : si == 1 ? -2 : si - 2; }
+                o.triggerChannel = trigCh.getSelectedItemIndex(); o.playChannel = playCh.getSelectedItemIndex();
+                o.mirrorOctaves = mirror.getToggleState();
                 static const int sb[] = { 0, 1, 2, 4, 8, 16 }; o.splitBars = sb[jlimit (0, 5, split.getSelectedItemIndex())];
                 o.stopWithHost = hostStop.getToggleState(); o.passThrough = thru.getToggleState();
                 o.fillsToBlack = fills.getToggleState(); o.rememberLast = remember.getToggleState();
             });
         };
-        for (auto* c : { &out, &zLo, &zHi, &start, &mode, &stopKey, &split }) c->onChange = commit;
-        for (auto* b : { &hostStop, &thru, &fills, &remember }) b->onClick = commit;
+        for (auto* c : { &out, &zLo, &zHi, &start, &mode, &stopKey, &split, &trigCh, &playCh }) c->onChange = commit;
+        for (auto* b : { &hostStop, &thru, &fills, &remember, &mirror }) b->onClick = commit;
     }
     void refresh() override
     {
@@ -583,7 +600,9 @@ public:
         out.setSelectedItemIndex (o.outChannel - 1, dontSendNotification);
         zLo.setSelectedItemIndex (o.zoneLow, dontSendNotification); zHi.setSelectedItemIndex (o.zoneHigh, dontSendNotification);
         start.setSelectedItemIndex ((int) o.startQuant, dontSendNotification); mode.setSelectedItemIndex (o.latch ? 0 : 1, dontSendNotification);
-        stopKey.setSelectedItemIndex (o.stopNote + 1, dontSendNotification);
+        stopKey.setSelectedItemIndex (o.stopNote == -1 ? 0 : o.stopNote == -2 ? 1 : o.stopNote + 2, dontSendNotification);
+        trigCh.setSelectedItemIndex (o.triggerChannel, dontSendNotification); playCh.setSelectedItemIndex (o.playChannel, dontSendNotification);
+        mirror.setToggleState (o.mirrorOctaves, dontSendNotification);
         const int sb = o.splitBars; split.setSelectedItemIndex (sb <= 0 ? 0 : sb == 1 ? 1 : sb == 2 ? 2 : sb <= 4 ? 3 : sb <= 8 ? 4 : 5, dontSendNotification);
         hostStop.setToggleState (o.stopWithHost, dontSendNotification); thru.setToggleState (o.passThrough, dontSendNotification);
         fills.setToggleState (o.fillsToBlack, dontSendNotification); remember.setToggleState (o.rememberLast, dontSendNotification);
@@ -597,17 +616,19 @@ public:
         auto z = row (a, lZone, lw); zLo.setBounds (z.removeFromLeft (110)); z.removeFromLeft (8); zHi.setBounds (z.removeFromLeft (110));
         start.setBounds (row (a, lStart, lw).removeFromLeft (170));
         mode.setBounds (row (a, lMode, lw).removeFromLeft (210));
-        stopKey.setBounds (row (a, lStop, lw).removeFromLeft (120));
+        stopKey.setBounds (row (a, lStop, lw).removeFromLeft (170));
+        trigCh.setBounds (row (a, lTrig, lw).removeFromLeft (130));
+        playCh.setBounds (row (a, lPlayCh, lw).removeFromLeft (130));
         split.setBounds (row (a, lSplit, lw).removeFromLeft (120));
         a.removeFromTop (4);
-        for (auto* b : { &hostStop, &thru, &fills, &remember }) { b->setBounds (a.removeFromTop (26).removeFromLeft (b->getWidth()).reduced (0, 2)); a.removeFromTop (4); }
+        for (auto* b : { &mirror, &hostStop, &thru, &fills, &remember }) { b->setBounds (a.removeFromTop (26).removeFromLeft (b->getWidth()).reduced (0, 2)); a.removeFromTop (4); }
         help.setBounds (a.removeFromTop (40));
     }
 private:
     EditState& st; bool loading = false;
-    Label lOut, lZone, lStart, lMode, lStop, lSplit, help;
-    ComboBox out, zLo, zHi, start, mode, stopKey, split;
-    TextButton hostStop, thru, fills, remember;
+    Label lOut, lZone, lStart, lMode, lStop, lSplit, help, lTrig, lPlayCh;
+    ComboBox out, zLo, zHi, start, mode, stopKey, split, trigCh, playCh;
+    TextButton hostStop, thru, fills, remember, mirror;
 };
 
 // ---------------------------------------------------------------- preset browser
@@ -833,6 +854,69 @@ private:
     TextButton convertBtn;
     Viewport view; Component list;
     OwnedArray<Label> labels; OwnedArray<ComboBox> combos;
+};
+
+
+// ---------------------------------------------------------------- recording page
+class RecordPage : public Page
+{
+public:
+    RecordPage (EditState& e) : Page ("RECORDING"), st (e)
+    {
+        setupLabel (*this, lCount, "Count-in"); setupCombo (*this, count, { "Off", "1 bar", "2 bars" });
+        setupLabel (*this, lMetro, "Click"); setupCombo (*this, metro, { "Off", "Count-in only", "While recording", "Whenever a pattern plays" });
+        setupLabel (*this, lLevel, "Click volume"); setupSlider (*this, level); level.setRange (0, 100, 1); level.setTextValueSuffix (" %");
+        setupLabel (*this, lMode, "Mode"); setupCombo (*this, mode, { "Overdub: add to the pattern", "Replace: a drum you play loses its old notes" });
+        setupLabel (*this, lStop, "Stop recording after"); setupCombo (*this, stopAfter, { "I press Rec again", "1 pass", "2 passes", "4 passes", "8 passes" });
+        setupLabel (*this, lQ, "Quantize while recording");
+        StringArray rq { "Off (as played)" }; for (auto& v : noteValues) rq.add (v.name);
+        setupCombo (*this, recQ, rq);
+        setupLabel (*this, lVel, "Velocity"); setupCombo (*this, vel, { "As played", "127", "110", "100", "80", "64" });
+        setupLabel (*this, help, "Press Rec: the key you're editing starts (after the count-in if nothing is playing) and every drum note you play goes into it, round and round. "
+                                 "It works on an empty key too. Rec again stops recording; the pattern keeps playing. The click comes out of Drum Player's own track.", 10.5f, th::faint);
+        help.setJustificationType (Justification::topLeft);
+        auto commit = [this] {
+            if (loading) return;
+            static const int stops[] = { 0, 1, 2, 4, 8 };
+            static const int vels[] = { 0, 127, 110, 100, 80, 64 };
+            auto& o = st.song().settings;                       // small settings: no undo step needed
+            o.countInBars = count.getSelectedItemIndex(); o.metroMode = metro.getSelectedItemIndex();
+            o.metroLevel = (float) level.getValue() / 100.0f; o.recMode = mode.getSelectedItemIndex();
+            o.recStopAfter = stops[jlimit (0, 4, stopAfter.getSelectedItemIndex())];
+            o.recQuantize = recQ.getSelectedItemIndex(); o.recFixedVel = vels[jlimit (0, 5, vel.getSelectedItemIndex())];
+            st.proc.publish();
+        };
+        for (auto* c : { &count, &metro, &mode, &stopAfter, &recQ, &vel }) c->onChange = commit;
+        level.onValueChange = commit;
+    }
+    void refresh() override
+    {
+        loading = true;
+        const auto& o = st.song().settings;
+        count.setSelectedItemIndex (o.countInBars, dontSendNotification); metro.setSelectedItemIndex (o.metroMode, dontSendNotification);
+        level.setValue (o.metroLevel * 100.0, dontSendNotification); mode.setSelectedItemIndex (o.recMode, dontSendNotification);
+        const int sa = o.recStopAfter; stopAfter.setSelectedItemIndex (sa <= 0 ? 0 : sa == 1 ? 1 : sa == 2 ? 2 : sa <= 4 ? 3 : 4, dontSendNotification);
+        recQ.setSelectedItemIndex (o.recQuantize, dontSendNotification);
+        const int v = o.recFixedVel; vel.setSelectedItemIndex (v == 0 ? 0 : v >= 127 ? 1 : v >= 110 ? 2 : v >= 100 ? 3 : v >= 80 ? 4 : 5, dontSendNotification);
+        loading = false;
+    }
+    void resized() override
+    {
+        auto a = content(); const int lw = 160;
+        count.setBounds (row (a, lCount, lw).removeFromLeft (110));
+        metro.setBounds (row (a, lMetro, lw).removeFromLeft (200));
+        level.setBounds (row (a, lLevel, lw));
+        mode.setBounds (row (a, lMode, lw));
+        stopAfter.setBounds (row (a, lStop, lw).removeFromLeft (170));
+        recQ.setBounds (row (a, lQ, lw).removeFromLeft (130));
+        vel.setBounds (row (a, lVel, lw).removeFromLeft (110));
+        help.setBounds (a.removeFromTop (70));
+    }
+private:
+    EditState& st; bool loading = false;
+    Label lCount, lMetro, lLevel, lMode, lStop, lQ, lVel, help;
+    ComboBox count, metro, mode, stopAfter, recQ, vel;
+    FineSlider level;
 };
 
 } // namespace dp

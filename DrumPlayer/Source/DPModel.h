@@ -125,7 +125,31 @@ struct Settings
     bool passThrough = true;
     bool fillsToBlack = false;                     // multi-file import: names containing "fill" go to black keys
     bool rememberLast = true;
-    int stopNote = -1;
+    int stopNote = -2;                             // -1 none, -2 the last pattern key, else a note
+    int triggerChannel = 0;                        // pattern keys listen on this channel (0 = any)
+    int playChannel = 0;                           // drum pads / live notes come on this channel (0 = any)
+    bool mirrorOctaves = false;                    // pattern keys repeat in every octave
+    // recording
+    int countInBars = 1;                           // 0, 1, 2
+    int metroMode = 2;                             // 0 off, 1 count-in only, 2 while recording, 3 whenever playing
+    float metroLevel = 0.5f;
+    int recMode = 0;                               // 0 overdub, 1 replace (a lane's old notes go when you play it)
+    int recStopAfter = 0;                          // passes, 0 = until stopped
+    int recFixedVel = 0;                           // 0 = as played
+
+    int resolveStop() const { return stopNote == -2 ? zoneHigh : stopNote; }
+    // the pattern key an incoming note triggers, or -1 (stop key included)
+    int keyForNote (int n, int ch) const
+    {
+        if (triggerChannel != 0 && ch != triggerChannel) return -1;
+        if (playChannel != 0 && playChannel != triggerChannel && ch == playChannel) return -1;
+        if (n >= zoneLow && n <= zoneHigh) return n;
+        if (! mirrorOctaves) return -1;
+        int k = n;
+        while (k > zoneHigh) k -= 12;
+        while (k < zoneLow) k += 12;
+        return (k >= zoneLow && k <= zoneHigh) ? k : -1;
+    }
     int recQuantize = 0;                           // 0 off, else note value index + 1
     int splitBars = 4;                             // dropped grooves are cut every N bars (0 = keep whole)
 };
@@ -599,7 +623,7 @@ inline Pattern patternFromXml (const XmlElement& x)
 inline std::unique_ptr<XmlElement> songToXml (const Song& s)
 {
     auto x = std::make_unique<XmlElement> ("DrumPlayerSong");
-    x->setAttribute ("version", 1); x->setAttribute ("editKey", s.editKey);
+    x->setAttribute ("version", 2); x->setAttribute ("editKey", s.editKey);
     x->setAttribute ("playMap", s.playMap); x->setAttribute ("importMap", s.importMap);
     String cn; for (int v : s.customNotes) cn << v << ','; x->setAttribute ("customMap", cn);
     auto* ks = x->createNewChildElement ("Keys");
@@ -625,6 +649,9 @@ inline std::unique_ptr<XmlElement> songToXml (const Song& s)
     st->setAttribute ("sq", (int) o.startQuant); st->setAttribute ("latch", o.latch); st->setAttribute ("hoststop", o.stopWithHost);
     st->setAttribute ("thru", o.passThrough); st->setAttribute ("fillsblack", o.fillsToBlack); st->setAttribute ("remember", o.rememberLast);
     st->setAttribute ("stop", o.stopNote); st->setAttribute ("recq", o.recQuantize); st->setAttribute ("split", o.splitBars);
+    st->setAttribute ("trigch", o.triggerChannel); st->setAttribute ("playch", o.playChannel); st->setAttribute ("mirror", o.mirrorOctaves);
+    st->setAttribute ("countin", o.countInBars); st->setAttribute ("metro", o.metroMode); st->setAttribute ("metrolvl", o.metroLevel);
+    st->setAttribute ("recmode", o.recMode); st->setAttribute ("recstop", o.recStopAfter); st->setAttribute ("recvel", o.recFixedVel);
     return x;
 }
 
@@ -667,7 +694,14 @@ inline Song songFromXml (const XmlElement& x)
         o.startQuant = (StartQuant) jlimit (0, 3, st->getIntAttribute ("sq", 2));
         o.latch = st->getBoolAttribute ("latch", true); o.stopWithHost = st->getBoolAttribute ("hoststop", true);
         o.passThrough = st->getBoolAttribute ("thru", true); o.fillsToBlack = st->getBoolAttribute ("fillsblack", false);
-        o.rememberLast = st->getBoolAttribute ("remember", true); o.stopNote = st->getIntAttribute ("stop", -1);
+        o.rememberLast = st->getBoolAttribute ("remember", true); o.stopNote = jlimit (-2, 127, st->getIntAttribute ("stop", -2));
+        o.triggerChannel = jlimit (0, 16, st->getIntAttribute ("trigch", 0)); o.playChannel = jlimit (0, 16, st->getIntAttribute ("playch", 0));
+        o.mirrorOctaves = st->getBoolAttribute ("mirror", false);
+        o.countInBars = jlimit (0, 2, st->getIntAttribute ("countin", 1)); o.metroMode = jlimit (0, 3, st->getIntAttribute ("metro", 2));
+        o.metroLevel = (float) jlimit (0.0, 1.0, st->getDoubleAttribute ("metrolvl", 0.5));
+        o.recMode = jlimit (0, 1, st->getIntAttribute ("recmode", 0)); o.recStopAfter = jlimit (0, 64, st->getIntAttribute ("recstop", 0));
+        o.recFixedVel = jlimit (0, 127, st->getIntAttribute ("recvel", 0));
+        if (x.getIntAttribute ("version", 1) < 2 && o.stopNote == -1) o.stopNote = -2;   // older saves: give them the stop key
         o.recQuantize = st->getIntAttribute ("recq", 0); o.splitBars = jlimit (0, maxBars, st->getIntAttribute ("split", 4));
     }
     if (s.lanes.empty()) s.lanes = Song::makeDefault().lanes;

@@ -18,6 +18,17 @@ struct EditState
     int focusLane = -1;              // note number shown in the velocity lane (-1 = all)
     bool usedOnly = false;
     bool probMode = false;           // velocity lane shows probability
+    int velGuide = 16;               // velocity lane guide lines every N (0 = off); values snap to them
+    int snapGuide (int v, bool prob, bool free) const
+    {
+        const int step = prob ? (velGuide > 0 ? 25 : 0) : velGuide;
+        if (free || step <= 0) return v;
+        const int top = prob ? 100 : 127;
+        int best = v, dist = 5;
+        for (int g = step; g <= top; g += step) if (std::abs (v - g) < dist) { dist = std::abs (v - g); best = g; }
+        if (std::abs (v - top) < dist) best = top;
+        return best;
+    }
     float pxPerBeat = 80.0f;
     int scrollX = 0, scrollY = 0;
     int cursorTick = 0;              // where Paste goes
@@ -144,11 +155,12 @@ public:
             g.setColour (focus ? th::blue.withAlpha (0.16f) : (i % 2 ? th::panel : th::surface.withAlpha (0.55f)));
             g.fillRect (r);
             g.setColour (st.laneColour (note).withAlpha (muted ? 0.3f : 1.0f));
-            g.fillRoundedRectangle (Rectangle<float> (4, (float) y + 4, 5, EditState::laneH - 8.0f), 2);
+            g.fillRoundedRectangle (Rectangle<float> ((float) pianoW + 4, (float) y + 4, 5, EditState::laneH - 8.0f), 2);
+            drawPianoKey (g, note, y);
             // name + note number
             g.setFont (font (12.0f, focus ? 2 : 1));
             g.setColour (muted ? th::faint : th::text);
-            g.drawText (lane != nullptr ? lane->name : gmDrumName (note), 14, y, getWidth() - 120, EditState::laneH, Justification::centredLeft, true);
+            g.drawText (lane != nullptr ? lane->name : gmDrumName (note), pianoW + 14, y, getWidth() - 120 - pianoW, EditState::laneH, Justification::centredLeft, true);
             g.setFont (font (10.0f, 1)); g.setColour (th::faint);
             g.drawText (keyName (note), getWidth() - 116, y, 30, EditState::laneH, Justification::centredRight);
             // level bar
@@ -193,7 +205,7 @@ public:
             return;
         }
         if (levelRect (y).expanded (2, 4).contains (e.getPosition())) { levelNote = note; levelX0 = levelRect (y).getX(); st.proc.beginEdit(); setLevel (e.x); return; }
-        if (e.x < 12) { if (preview) preview (note); return; }
+        if (e.x < pianoW + 12) { if (preview) preview (note); return; }
         st.focusLane = st.focusLane == note ? -1 : note;
         if (preview && e.getNumberOfClicks() > 1) preview (note);
         if (st.changed) st.changed();
@@ -202,10 +214,41 @@ public:
     void mouseUp (const MouseEvent&) override { if (levelNote >= 0) st.proc.endEdit ("Lane level"); levelNote = -1; }
     void mouseWheelMove (const MouseEvent&, const MouseWheelDetails& w) override { if (onWheel) onWheel (w); }
     std::function<void (const MouseWheelDetails&)> onWheel;
+    static constexpr int pianoW = 34;
+
+    // lights a lane's piano key when its note plays or comes in; returns true if a repaint is due
+    bool pollHits()
+    {
+        const auto now = Time::getMillisecondCounter();
+        bool any = false;
+        for (int n = 0; n < 128; ++n) {
+            const uint32 h = st.proc.outHits[(size_t) n].load() + st.proc.inHits[(size_t) n].load();
+            if (h != seen[(size_t) n]) { seen[(size_t) n] = h; litUntil[(size_t) n] = now + 160; any = true; }
+            if (litUntil[(size_t) n] != 0) { any = true; if (now > litUntil[(size_t) n]) litUntil[(size_t) n] = 0; }
+        }
+        return any;
+    }
 
 private:
     EditState& st;
     int levelNote = -1, levelX0 = 0;
+    std::array<uint32, 128> seen {}, litUntil {};
+
+    // a little piano key on each lane, like the keyboard beside a DAW piano roll
+    void drawPianoKey (Graphics& g, int note, int y)
+    {
+        const bool black = isBlackKey (note);
+        auto r = Rectangle<float> (1, (float) y + 1, (float) pianoW - 3, EditState::laneH - 2.0f);
+        const bool lit = litUntil[(size_t) note] != 0;
+        if (black) g.setGradientFill (ColourGradient (Colour (0xff3a3e46), r.getTopLeft(), Colour (0xff101114), r.getTopRight(), false));
+        else g.setGradientFill (ColourGradient (Colour (0xffe9eaee), r.getTopLeft(), Colour (0xffb9bcc4), r.getTopRight(), false));
+        g.fillRoundedRectangle (r, 2.5f);
+        if (lit) { g.setColour (th::amber.withAlpha (0.85f)); g.fillRoundedRectangle (r, 2.5f); }
+        g.setColour (Colours::black.withAlpha (0.5f)); g.drawRoundedRectangle (r, 2.5f, 0.8f);
+        g.setFont (font (9.0f, 2));
+        g.setColour (lit ? th::ink : (black ? th::text.withAlpha (0.8f) : Colour (0xff30333a)));
+        g.drawText (keyName (note), r.toNearestInt().withTrimmedLeft (2), Justification::centredLeft);
+    }
     Rectangle<int> levelRect (int y) const { return { getWidth() - 56, y + 8, 22, 6 }; }
     Rectangle<int> mRect (int y) const { return { getWidth() - 31, y + 3, 14, 16 }; }
     Rectangle<int> sRect (int y) const { return { getWidth() - 16, y + 3, 14, 16 }; }
@@ -702,13 +745,24 @@ class VelocityLane : public Component, public SettableTooltipClient
 public:
     explicit VelocityLane (EditState& e) : st (e)
     {
-        setTooltip ("Drag to draw values. Line tool (or Shift+drag): draw a straight line or ramp. Right-click: ramps, curves, accents");
+        setTooltip ("Grab a bar and drag it up or down (it clicks onto the guide lines; hold Alt to move freely). Drag over empty space to draw. Line tool or Shift+drag: ramps. Right-click: shapes");
     }
     void paint (Graphics& g) override
     {
         g.fillAll (th::panel);
         const float h = (float) getHeight() - 8.0f;
-        for (int q = 1; q < 4; ++q) { g.setColour (th::line); g.drawHorizontalLine ((int) (4 + h * q / 4), 0, (float) getWidth()); }
+        {   // guide lines: values snap to these
+            const int step = st.probMode ? (st.velGuide > 0 ? 25 : 0) : st.velGuide;
+            const int top = st.probMode ? 100 : 127;
+            g.setFont (font (9.0f, 1));
+            if (step > 0)
+                for (int v = step; v < top; v += step) {
+                    const float y = 4 + h * (1.0f - (float) v / top);
+                    g.setColour (th::blue.withAlpha (0.16f)); g.drawHorizontalLine ((int) y, 0, (float) getWidth());
+                    g.setColour (th::faint); g.drawText (String (v), getWidth() - 30, (int) y - 11, 26, 10, Justification::centredRight);
+                }
+            else for (int q = 1; q < 4; ++q) { g.setColour (th::line); g.drawHorizontalLine ((int) (4 + h * q / 4), 0, (float) getWidth()); }
+        }
         auto& p = st.pat();
         const float ex = st.tickToX (p.lengthTicks());
         g.setColour (Colours::black.withAlpha (0.4f)); g.fillRect (ex, 0.0f, (float) getWidth() - ex, (float) getHeight());
@@ -734,16 +788,38 @@ public:
         dragging = true;
         st.proc.beginEdit();
         lineA = lineB = e.position; last = e.position;
-        if (! lineMode) setRange (e.position, e.position);
+        grabbed.clear();
+        if (! lineMode) {
+            // grab the bar under the mouse (and the rest of the selection with it)
+            auto& p = st.pat();
+            int best = -1; float bestD = 7.0f;
+            for (int i = 0; i < (int) p.notes.size(); ++i) {
+                const auto& n = p.notes[(size_t) i];
+                if (! shown (n)) continue;
+                const float d = std::abs (st.tickToX (n.tick) + 2.0f - e.position.x);
+                if (d < bestD) { bestD = d; best = i; }
+            }
+            if (best >= 0) {
+                const bool withSel = p.notes[(size_t) best].selected;
+                for (int i = 0; i < (int) p.notes.size(); ++i) {
+                    const auto& n = p.notes[(size_t) i];
+                    if (i == best || (withSel && n.selected && shown (n))) grabbed.push_back ({ i, value (n) });
+                }
+                grabbedIdx = best; grabStartVal = value (p.notes[(size_t) best]);
+                dragGrab (e);
+            } else setRange (e.position, e.position, e.mods.isAltDown());
+        }
     }
     void mouseDrag (const MouseEvent& e) override
     {
         if (lineMode) { lineB = e.position; repaint(); return; }
-        setRange (last, e.position); last = e.position;
+        if (! grabbed.empty()) { dragGrab (e); return; }
+        setRange (last, e.position, e.mods.isAltDown()); last = e.position;
     }
     void mouseUp (const MouseEvent&) override
     {
-        if (lineMode) setRange (lineA, lineB);
+        if (lineMode) setRange (lineA, lineB, true);
+        grabbed.clear();
         dragging = false;
         st.proc.endEdit (st.probMode ? "Draw chance" : "Draw velocity");
         repaint();
@@ -752,6 +828,24 @@ private:
     EditState& st;
     bool dragging = false, lineMode = false;
     Point<float> lineA, lineB, last;
+    std::vector<std::pair<int, int>> grabbed;     // note index, value at grab
+    int grabbedIdx = -1, grabStartVal = 0;
+
+    // the grabbed bar follows the mouse height (snapping to guides); others in the selection move by the same amount
+    void dragGrab (const MouseEvent& e)
+    {
+        auto& p = st.pat();
+        const int top = st.probMode ? 100 : 127;
+        const int target = st.snapGuide (fromY (e.position.y), st.probMode, e.mods.isAltDown());
+        const int d = target - grabStartVal;
+        for (auto& [i, v0] : grabbed) {
+            if (i < 0 || i >= (int) p.notes.size()) continue;
+            auto& n = p.notes[(size_t) i];
+            const int v = i == grabbedIdx ? target : jlimit (st.probMode ? 0 : 1, top, v0 + d);
+            if (st.probMode) n.probability = v; else n.velocity = v;
+        }
+        st.publish();
+    }
 
     bool shown (const Note& n) const { return st.focusLane < 0 || n.note == st.focusLane; }
     int value (const Note& n) const { return st.probMode ? n.probability : n.velocity; }
@@ -762,7 +856,7 @@ private:
         return st.probMode ? (int) std::round (v * 100) : jmax (1, (int) std::round (v * 127));
     }
     // every visible note between a and b gets the value on the straight line a→b
-    void setRange (Point<float> a, Point<float> b)
+    void setRange (Point<float> a, Point<float> b, bool free = false)
     {
         auto& p = st.pat();
         const bool anySel = anySelected (p);
@@ -773,7 +867,7 @@ private:
             const float x = st.tickToX (n.tick) + 2.0f;
             if (x < a.x - 3 || x > b.x + 3) continue;
             const float t = b.x - a.x > 1 ? jlimit (0.0f, 1.0f, (x - a.x) / (b.x - a.x)) : 0.0f;
-            const int v = fromY (a.y + (b.y - a.y) * t);
+            const int v = st.snapGuide (fromY (a.y + (b.y - a.y) * t), st.probMode, free);
             if (st.probMode) n.probability = v; else n.velocity = v;
             changed = true;
         }

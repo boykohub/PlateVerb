@@ -193,7 +193,11 @@ public:
     void uiStop() { pushCmd (CmdStop, 0); }
     void uiPlayChain (int c) { pushCmd (CmdChain, c); }
     void uiPreview (int note) { pushCmd (CmdPreview, note); }
-    std::atomic<bool> recArmed { false };
+    void uiRecord (bool start, int key) { pushCmd (start ? CmdRecStart : CmdRecStop, key); }
+    std::atomic<bool> recArmed { false };            // true while counting in or recording
+    std::atomic<int> recStateUi { 0 };               // 0 off, 1 counting in, 2 recording
+    std::atomic<int> recSession { 0 };
+    std::array<std::atomic<uint32>, 128> outHits {}, inHits {};   // per note, for the lane lights
 
     // ---------------------------------------------------------------- display (read by the editor)
     std::atomic<int> playingKey { -1 }, queuedKey { -2 }, chainPlaying { -1 }, chainStep { -1 };
@@ -246,8 +250,11 @@ private:
         if (ready > 0) {
             recFifo.prepareToRead (ready, s1, n1, s2, n2);
             if (editStart == nullptr) beginEdit();
+            if (recSession.load() != lastRecSession) { lastRecSession = recSession.load(); replacedLanes.clear(); }
             auto add = [this] (const RecNote& r) {
                 auto& p = edit.keys[(size_t) jlimit (0, 127, r.key)];
+                if (edit.settings.recMode == 1 && replacedLanes.insert ((r.key << 8) | r.note).second)       // replace: this lane's old notes go
+                    p.notes.erase (std::remove_if (p.notes.begin(), p.notes.end(), [&r] (const Note& x) { return x.note == r.note; }), p.notes.end());
                 Note n; n.tick = r.tick; n.note = r.note; n.velocity = r.vel; n.length = 60;
                 if (edit.settings.recQuantize > 0) {
                     const int g = noteValues[jlimit (0, numNoteValues - 1, edit.settings.recQuantize - 1)].ticks;
@@ -268,6 +275,8 @@ private:
         }
         if (dirty && ++saveCounter > 60) { saveCounter = 0; dirty = false; saveLastSession(); }
     }
+    int lastRecSession = -1;
+    std::set<int> replacedLanes;
 
     // ---------------------------------------------------------------- audio
     void processBlock (AudioBuffer<float>& audio, MidiBuffer& midi) override
@@ -331,6 +340,15 @@ private:
         if (ppqEnd > pos) renderTo (pos, ppqEnd);
         flushOffs (out, ppqEnd, false);
 
+        // recording that stops by itself after N passes
+        if (recState == 2 && cur.key >= 0 && S->settings.recStopAfter > 0) {
+            const double len = S->keys[(size_t) cur.key].lengthTicks() / (double) PPQ;
+            if (ppqEnd - recStartPpq >= S->settings.recStopAfter * len) recState = 0;
+        }
+        if (cur.key < 0 && ! (queued.active && recState == 1)) recState = 0;
+        metronome (audio, ppq, ppqEnd);
+        recArmed = recState != 0; recStateUi = recState;
+
         midi.swapWith (out);
         lastPpqEnd = ppqEnd;
         if (! playing) internalPpq = ppqEnd;
@@ -343,9 +361,9 @@ private:
 
     // ---------------------------------------------------------------- engine
     struct Play { int key = -1; double start = 0; int returnKey = -1; };
-    struct Queue { bool active = false; double ppq = 0; int key = -1; int returnKey = -1; bool fromChain = false; };
+    struct Queue { bool active = false; double ppq = 0; int key = -1; int returnKey = -1; bool fromChain = false; bool force = false; };
     struct Off { double ppq; int note, ch; };
-    enum CmdType { CmdNoteOn = 1, CmdNoteOff, CmdStop, CmdChain, CmdPreview };
+    enum CmdType { CmdNoteOn = 1, CmdNoteOff, CmdStop, CmdChain, CmdPreview, CmdRecStart, CmdRecStop };
     struct Cmd { int type = 0, value = 0; };
     struct RecNote { int key, tick, note, vel; };
 
@@ -406,6 +424,62 @@ private:
     {
         flushOffs (o, 0, true);
         cur = {}; queued = {};
+        recState = 0;
+    }
+
+    // ---------------------------------------------------------------- recording state and metronome
+    int recState = 0, recKey = -1;
+    double recStartPpq = 0, countStart = 0, countEnd = 0;
+    int clickPos = -1; float clickFreq = 1000.0f, clickAmp = 0.0f;
+
+    void startRecording (int k, double now)
+    {
+        if (k < 0 || k >= numKeys) return;
+        chain = -1;
+        recSession++;
+        if (cur.key == k) { recState = 2; recKey = k; recStartPpq = now; return; }
+        const auto& p = S->keys[(size_t) k];
+        double at = cur.key >= 0 ? boundary (now) : (wasPlaying ? std::ceil (now - 0.02) : now);
+        const double count = cur.key >= 0 ? 0.0 : (double) S->settings.countInBars * p.beatsPerBar;
+        countStart = at; countEnd = at + count;
+        queued = { true, countEnd, k, -1, false, true };
+        recState = 1; recKey = k;
+    }
+
+    void metronome (AudioBuffer<float>& audio, double p0, double p1)
+    {
+        const auto& st = S->settings;
+        if (st.metroMode == 0) { clickPos = -1; return; }
+        double ref = 0; int bpb = 4; bool on = false;
+        const bool counting = recState == 1 && queued.active;
+        if (counting) { ref = countStart; bpb = S->keys[(size_t) jlimit (0, 127, recKey)].beatsPerBar; on = true; }
+        else if (cur.key >= 0) {
+            ref = cur.start; bpb = S->keys[(size_t) cur.key].beatsPerBar;
+            on = st.metroMode == 3 || (st.metroMode == 2 && recState == 2);
+        }
+        const int n = audio.getNumSamples();
+        int starts[16]; float freqs[16]; int ns = 0;
+        if (on)
+            for (double b = std::ceil (p0 - 1e-9); b < p1 && ns < 16; b += 1.0) {
+                if (counting && (b < countStart - 1e-6 || b >= countEnd - 1e-6)) continue;
+                if (! counting && b < ref - 1e-6) continue;
+                double m = std::fmod (b - ref, (double) bpb); if (m < 0) m += bpb;
+                starts[ns] = jlimit (0, n - 1, (int) std::round ((b - p0) * samplesPerBeat));
+                freqs[ns] = (m < 1e-3 || bpb - m < 1e-3) ? 1600.0f : 1000.0f;
+                ++ns;
+            }
+        if (clickPos < 0 && ns == 0) return;
+        const int len = (int) (0.035 * sampleRate);
+        const float level = st.metroLevel * 0.6f;
+        int si = 0;
+        for (int i = 0; i < n; ++i) {
+            if (si < ns && starts[si] == i) { clickPos = 0; clickFreq = freqs[si]; ++si; }
+            if (clickPos < 0) continue;
+            const float t = (float) clickPos / (float) sampleRate;
+            const float v = std::sin (MathConstants<float>::twoPi * clickFreq * t) * std::exp (-t / 0.007f) * level;
+            for (int c = 0; c < audio.getNumChannels(); ++c) audio.addSample (c, i, v);
+            if (++clickPos >= len) clickPos = -1;
+        }
     }
 
     double boundary (double now) const
@@ -427,6 +501,7 @@ private:
     void triggerKey (int k, double now, bool fromChain = false)
     {
         if (! keyHasPattern (k)) return;
+        if (! fromChain && recState == 1) recState = 0;          // a key press cancels a waiting count-in
         if (! fromChain) chain = -1;
         const auto type = S->keys[(size_t) k].type;
         if (S->settings.latch && ! fromChain && k == cur.key && ! queued.active && type == PatternType::Groove) {   // same key again: stop
@@ -457,11 +532,14 @@ private:
         if (c.type == CmdNoteOn) triggerKey (c.value, now);
         else if (c.type == CmdNoteOff) { if (! S->settings.latch && (c.value == cur.key || (queued.active && c.value == queued.key))) { stopNow (out, 0); chain = -1; } }
         else if (c.type == CmdStop) { stopNow (out, 0); chain = -1; }
+        else if (c.type == CmdRecStart) startRecording (c.value, now);
+        else if (c.type == CmdRecStop) { if (recState == 1) { queued = {}; } recState = 0; }
         else if (c.type == CmdChain) { if (c.value >= 0 && c.value < 4) startChain (c.value, now); }
         else if (c.type == CmdPreview) {
             const auto* l = S->lane (c.value);
             const int ch = (l != nullptr && l->channel > 0) ? l->channel : S->settings.outChannel;
             out.addEvent (MidiMessage::noteOn (ch, jlimit (0, 127, c.value), (uint8) 100), 0);
+            outHits[(size_t) jlimit (0, 127, c.value)]++;
             offs.push_back ({ now + 0.25, c.value, ch });
         }
     }
@@ -473,18 +551,24 @@ private:
             const int nn = m.getNoteNumber();
             for (int c = 0; c < 4; ++c)
                 if (S->chains[(size_t) c].triggerNote == nn) { if (m.isNoteOn()) startChain (c, ppq); return; }
-            if (nn == st.stopNote) { if (m.isNoteOn()) { stopNow (out, sample); chain = -1; } return; }
-            if (nn >= st.zoneLow && nn <= st.zoneHigh) {
-                if (m.isNoteOn()) triggerKey (nn, ppq);
-                else if (! st.latch && (nn == cur.key || (queued.active && nn == queued.key))) { stopNow (out, sample); chain = -1; }
+            const int key = st.keyForNote (nn, m.getChannel());
+            const int stop = st.resolveStop();
+            if (stop >= 0 && (key == stop || (key < 0 && nn == stop && st.keyForNote (nn, m.getChannel()) < 0 && stop > st.zoneHigh))) {
+                if (m.isNoteOn()) { stopNow (out, sample); chain = -1; }
                 return;
             }
-            if (m.isNoteOn() && recArmed && cur.key >= 0) {
+            if (key >= 0) {
+                if (m.isNoteOn()) triggerKey (key, ppq);
+                else if (! st.latch && (key == cur.key || (queued.active && key == queued.key))) { stopNow (out, sample); chain = -1; }
+                return;
+            }
+            if (m.isNoteOn()) inHits[(size_t) nn]++;
+            if (m.isNoteOn() && recState == 2 && cur.key >= 0) {
                 const auto& p = S->keys[(size_t) cur.key];
                 double rel = std::fmod ((ppq - cur.start) * PPQ, (double) p.lengthTicks()); if (rel < 0) rel += p.lengthTicks();
                 int s1, n1, s2, n2;
                 recFifo.prepareToWrite (1, s1, n1, s2, n2);
-                const RecNote r { cur.key, (int) rel, nn, (int) m.getVelocity() };
+                const RecNote r { cur.key, (int) rel, nn, st.recFixedVel > 0 ? st.recFixedVel : (int) m.getVelocity() };
                 if (n1 > 0) recBuf[(size_t) s1] = r; else if (n2 > 0) recBuf[(size_t) s2] = r;
                 recFifo.finishedWrite (n1 + n2);
             }
@@ -497,6 +581,7 @@ private:
         const auto q = queued; queued = {};
         if (q.key < 0) { stopNow (out, sampleAt (q.ppq)); chain = -1; return; }
         cur = { q.key, q.ppq, q.returnKey };
+        if (q.force && recState == 1 && q.key == recKey) { recState = 2; recStartPpq = q.ppq; }
         const auto& p = S->keys[(size_t) cur.key];
         const double len = p.lengthTicks() / (double) PPQ;
         if (chain >= 0) {
@@ -595,6 +680,7 @@ private:
                 out.addEvent (MidiMessage::noteOn (ch, nt.note, (uint8) vel), smp);
                 offs.push_back ({ evPpq + jmax (10, nt.length) / (double) PPQ, nt.note, ch });
                 lastHitNote = nt.note; lastHitSerial++;
+                outHits[(size_t) nt.note]++;
             }
         }
     }
