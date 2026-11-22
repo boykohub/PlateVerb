@@ -31,9 +31,11 @@ public:
     }
     ThemeEl& edit (const String& id) { return els[id]; }
     void reset (const String& id) { els.erase (id); changed(); }
-    void resetAll() { els.clear(); textScale = 1.0f; buttonScale = 1.0f; changed(); }
+    void resetAll() { els.clear(); textScale = 1.0f; buttonScale = 1.0f; keyScale = 1.0f; keyTextScale = 1.0f; changed(); }
     float textScale = 1.0f;               // every text at once: 0.7 … 1.6
     float buttonScale = 1.0f;             // every button's height at once: 0.8 … 1.6
+    float keyScale = 1.0f;                // keyboard strip: key size 0.7 … 2.5
+    float keyTextScale = 1.0f;            // text on the keys 0.7 … 2.5
     void changed() { ++version; save(); }
     int version = 0;
 
@@ -52,6 +54,7 @@ public:
     {
         XmlElement x ("DrumPlayerTheme");
         x.setAttribute ("textScale", textScale); x.setAttribute ("buttonScale", buttonScale);
+        x.setAttribute ("keyScale", keyScale); x.setAttribute ("keyTextScale", keyTextScale);
         for (auto& [id, e] : els) {
             auto* c = x.createNewChildElement ("E");
             c->setAttribute ("id", id); c->setAttribute ("custom", e.custom);
@@ -64,10 +67,12 @@ public:
     void readFrom (const File& source)
     {
         els.clear();
-        textScale = 1.0f; buttonScale = 1.0f;
+        textScale = 1.0f; buttonScale = 1.0f; keyScale = 1.0f; keyTextScale = 1.0f;
         if (auto x = XmlDocument::parse (source)) {
             textScale = (float) jlimit (0.7, 1.6, x->getDoubleAttribute ("textScale", 1.0));
             buttonScale = (float) jlimit (0.8, 1.6, x->getDoubleAttribute ("buttonScale", 1.0));
+            keyScale = (float) jlimit (0.7, 2.5, x->getDoubleAttribute ("keyScale", 1.0));
+            keyTextScale = (float) jlimit (0.7, 2.5, x->getDoubleAttribute ("keyTextScale", 1.0));
             for (auto* c : x->getChildIterator()) {
                 ThemeEl e;
                 e.custom = c->getBoolAttribute ("custom");

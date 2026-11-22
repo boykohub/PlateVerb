@@ -579,7 +579,7 @@ private:
         hr.place (zoomOut, 24); hr.place (zoomPct, 48); hr.place (zoomIn, 24);
         a.removeFromTop (6);
         // keyboard + tray
-        auto ks = a.removeFromTop (72);
+        auto ks = a.removeFromTop ((int) jlimit (56.0f, 170.0f, 72.0f * std::sqrt (Theme::get().keyScale)));
         tray.setBounds (ks.removeFromRight (250));
         ks.removeFromRight (8);
         strip.setBounds (ks);

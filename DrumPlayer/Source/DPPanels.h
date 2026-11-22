@@ -101,8 +101,18 @@ public:
             decorate (g, r, k, play, queued, blink);
         }
         // octave labels
-        g.setFont (font (9.0f, 2)); g.setColour (Colours::black.withAlpha (0.55f));
+        g.setFont (font (9.0f * Theme::get().keyTextScale, 2)); g.setColour (Colours::black.withAlpha (0.55f));
         for (int k = lo; k <= hi; ++k) if (k % 12 == 0) { auto r = keyRect (k); g.drawText (keyName (k), r.withHeight (14).translated (0, (int) (r.getHeight() * 0.42f)), Justification::centred); }
+        // while dragging, a tag says exactly which key the groove will land on
+        if (dropHover >= 0) {
+            auto kr = keyRect (dropHover);
+            const String t = "Drop on " + keyName (dropHover) + (s.keys[(size_t) dropHover].isEmpty() ? String() : "  (replaces " + s.keys[(size_t) dropHover].name + ")");
+            g.setFont (font (11.5f, 3));
+            const float tw = textWidth (g.getCurrentFont(), t) + 14;
+            auto tag = Rectangle<float> (jlimit (0.0f, (float) getWidth() - tw, kr.getCentreX() - tw / 2), 2.0f, tw, 18.0f);
+            g.setColour (th::ink.withAlpha (0.9f)); g.fillRoundedRectangle (tag, 4);
+            g.setColour (th::green); g.drawText (t, tag, Justification::centred);
+        }
         // scroll arrows: the whole keyboard is there, an octave per click
         drawArrow (g, leftArrow(), true, viewLow > firstKey());
         drawArrow (g, rightArrow(), false, viewEnd < s.settings.zoneHigh);
@@ -118,7 +128,7 @@ public:
         return f;
     }
     bool isPatternKey (int k) const { const auto& o = st.song().settings; return k >= o.zoneLow && k <= o.zoneHigh && k != o.resolveStop(); }
-    int visibleWhites() const { return jmax (7, (getWidth() - 2 * arrowW) / (large ? 30 : 24)); }
+    int visibleWhites() const { return jmax (5, (int) ((getWidth() - 2 * arrowW) / ((large ? 30.0f : 24.0f) * Theme::get().keyScale))); }
     void updateView()
     {
         const int hi = st.song().settings.zoneHigh;
@@ -268,7 +278,7 @@ private:
     {
         if (k == st.song().settings.resolveStop()) {             // the stop key
             g.setColour (th::red.withAlpha (pressedStop ? 1.0f : 0.85f)); g.fillRoundedRectangle (r, 3);
-            g.setColour (th::ink); g.setFont (font (large ? 11.0f : 9.5f, 3));
+            g.setColour (th::ink); g.setFont (font ((large ? 11.0f : 9.5f) * Theme::get().keyTextScale, 3));
             g.drawFittedText ("STOP", r.reduced (1).toNearestInt(), Justification::centred, 1, 0.7f);
             return;
         }
@@ -277,11 +287,12 @@ private:
         g.setColour (c.withAlpha (black ? 0.85f : 0.9f));
         g.fillRoundedRectangle (r, 3);
         g.setColour (th::ink);
-        const float fs = large ? 11.0f : 9.5f;
+        const float fs = (large ? 11.0f : 9.5f) * Theme::get().keyTextScale;
         g.setFont (font (fs, 2));
         String label = p.name.isNotEmpty() ? p.name : String (typeName (p.type));
-        if (black && ! large) label = label.substring (0, 3);
-        g.drawFittedText (label, r.reduced (2, 1).toNearestInt(), Justification::centred, large ? 3 : 2, 0.8f);
+        if (black && ! large && Theme::get().keyScale < 1.5f) label = label.substring (0, 3);
+        const int lines = jmax (1, (int) (r.getHeight() / (fs * Theme::get().textScale * 1.15f)));
+        g.drawFittedText (label, r.reduced (2, 1).toNearestInt(), Justification::centred, lines, 0.85f);
         ignoreUnused (k);
     }
     void decorate (Graphics& g, Rectangle<float> r, int k, int play, int queued, bool blink)
@@ -292,7 +303,10 @@ private:
             g.setColour (th::amber); g.drawRoundedRectangle (r.reduced (1.0f), 3, 2.0f);
         }
         if (k == queued && blink) { g.setColour (th::blue.withAlpha (0.45f)); g.fillRoundedRectangle (r.reduced (1.0f), 3); }
-        if (k == dropHover) { g.setColour (th::green.withAlpha (0.45f)); g.fillRoundedRectangle (r.reduced (1.0f), 3); }
+        if (k == dropHover) {
+            g.setColour (th::green.withAlpha (0.55f)); g.fillRoundedRectangle (r.reduced (1.0f), 3);
+            g.setColour (th::green); g.drawRoundedRectangle (r.reduced (1.0f), 3, 2.5f);
+        }
         if (k == flashNote && Time::getMillisecondCounter() < flashUntil) { g.setColour (th::text.withAlpha (0.45f)); g.fillRoundedRectangle (r.reduced (2.0f), 3); }
     }
 };
@@ -1295,7 +1309,6 @@ public:
         setupLabel (*this, lAll, "All text", 11.5f, th::amber);
         setupSlider (*this, allText, th::amber); allText.setRange (70, 160, 1); allText.setTextValueSuffix (" %");
         allText.setValue (Theme::get().textScale * 100.0, dontSendNotification);
-        allButtons.setValue (Theme::get().buttonScale * 100.0, dontSendNotification);
         allText.setTooltip ("Makes every text in Drum Player bigger or smaller at once; each part's own size still applies on top");
         allText.onValueChange = [this] { if (loading) return; Theme::get().textScale = (float) allText.getValue() / 100.0f; Theme::get().changed(); if (onChanged) onChanged(); };
         setupLabel (*this, lAllB, "All buttons", 11.5f, th::amber);
@@ -1303,6 +1316,14 @@ public:
         allButtons.setValue (Theme::get().buttonScale * 100.0, dontSendNotification);
         allButtons.setTooltip ("Makes every button bigger or smaller at once");
         allButtons.onValueChange = [this] { if (loading) return; Theme::get().buttonScale = (float) allButtons.getValue() / 100.0f; Theme::get().changed(); if (onChanged) onChanged(); };
+        setupLabel (*this, lKeys, "Keys", 11.5f, th::amber);
+        setupSlider (*this, keySize, th::amber); keySize.setRange (70, 250, 1); keySize.setTextValueSuffix (" %");
+        keySize.setTooltip ("Bigger keys on the keyboard strip (fewer shown at a time; scroll with the arrows)");
+        keySize.onValueChange = [this] { if (loading) return; Theme::get().keyScale = (float) keySize.getValue() / 100.0f; Theme::get().changed(); if (onChanged) onChanged(); };
+        setupLabel (*this, lKeyText, "Key text", 11.5f, th::amber);
+        setupSlider (*this, keyText, th::amber); keyText.setRange (70, 250, 1); keyText.setTextValueSuffix (" %");
+        keyText.setTooltip ("Text on the keys, on its own");
+        keyText.onValueChange = [this] { if (loading) return; Theme::get().keyTextScale = (float) keyText.getValue() / 100.0f; Theme::get().changed(); if (onChanged) onChanged(); };
         setupButton (*this, useMine, "Use my colours", true);
         useMine.onClick = [this] { auto& e = el(); if (useMine.getToggleState() && ! e.custom) seed (e); e.custom = useMine.getToggleState(); changed(); };
         for (int i = 0; i < 3; ++i) {
@@ -1374,7 +1395,9 @@ public:
     {
         auto a = getLocalBounds();
         { auto r = a.removeFromTop (26); lAll.setBounds (r.removeFromLeft (80)); allText.setBounds (r.removeFromLeft (240)); a.removeFromTop (4); }
-        { auto r = a.removeFromTop (26); lAllB.setBounds (r.removeFromLeft (80)); allButtons.setBounds (r.removeFromLeft (240)); a.removeFromTop (6); }
+        { auto r = a.removeFromTop (26); lAllB.setBounds (r.removeFromLeft (80)); allButtons.setBounds (r.removeFromLeft (240)); a.removeFromTop (4); }
+        { auto r = a.removeFromTop (26); lKeys.setBounds (r.removeFromLeft (80)); keySize.setBounds (r.removeFromLeft (240)); a.removeFromTop (4); }
+        { auto r = a.removeFromTop (26); lKeyText.setBounds (r.removeFromLeft (80)); keyText.setBounds (r.removeFromLeft (240)); a.removeFromTop (6); }
         list.setBounds (a.removeFromLeft (200)); a.removeFromLeft (12);
         name.setBounds (a.removeFromTop (24)); a.removeFromTop (2);
         useMine.setBounds (a.removeFromTop (26).removeFromLeft (useMine.getWidth()).reduced (0, 2)); a.removeFromTop (6);
@@ -1436,7 +1459,7 @@ private:
 
     ListBox list; Label name, lDepth, lFont, help;
     TextButton useMine, d3, resetOne, resetAll, saveLook, loadLook;
-    Label lAll, lAllB; FineSlider allText, allButtons;
+    Label lAll, lAllB, lKeys, lKeyText; FineSlider allText, allButtons, keySize, keyText;
     OwnedArray<Swatch> swatches;
     FineSlider depth, fontSz;
     StringArray items, ids;
@@ -1468,6 +1491,7 @@ private:
         const Colour c[3] = { e->c0, e->c1, e->c2 };
         for (int i = 0; i < 3; ++i) { swatches[i]->colour = c[i]; swatches[i]->enabled = e->custom; swatches[i]->repaint(); }
         d3.setToggleState (e->threeD, dontSendNotification);
+        keySize.setValue (Theme::get().keyScale * 100.0, dontSendNotification); keyText.setValue (Theme::get().keyTextScale * 100.0, dontSendNotification);
         allText.setValue (Theme::get().textScale * 100.0, dontSendNotification);
         depth.setValue (e->depth, dontSendNotification); fontSz.setValue (e->fontSize, dontSendNotification);
         loading = false;
