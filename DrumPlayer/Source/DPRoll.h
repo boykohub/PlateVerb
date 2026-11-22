@@ -35,10 +35,11 @@ struct EditState
     int currentChain = 0;            // the chain shown on the chain strip and page
     int defaultVel = 100;
     std::vector<Note> clipboard;
-    static constexpr int laneH = 22;
+    int laneH = 22;                  // lane height: zoom up and down
 
     std::function<void()> changed;                    // repaint + refresh controls
     std::function<void (Tool)> chooseTool;            // so menus can switch the toolbar's tool
+    std::function<void()> openCurve;                  // the velocity curve panel
     // the last note action from a menu: repeat it (Ctrl+R) or click notes to stamp it on them
     std::function<void (Pattern&)> lastAction; String lastName; bool stamping = false;
     void remember (const String& name, std::function<void (Pattern&)> f) { lastName = name; lastAction = std::move (f); }
@@ -151,24 +152,24 @@ public:
         auto& p = st.pat();
         bool anySolo = false; for (auto& l : st.song().lanes) anySolo |= l.solo;
         for (int i = 0; i < (int) lanes.size(); ++i) {
-            const int y = i * EditState::laneH - st.scrollY;
-            if (y < -EditState::laneH || y > getHeight()) continue;
+            const int y = i * st.laneH - st.scrollY;
+            if (y < -st.laneH || y > getHeight()) continue;
             const int note = lanes[(size_t) i];
             const auto* lane = st.song().lane (note);
-            auto r = Rectangle<int> (0, y, getWidth(), EditState::laneH);
+            auto r = Rectangle<int> (0, y, getWidth(), st.laneH);
             const bool focus = note == st.focusLane;
             const bool muted = p.laneMute.count (note) > 0 || (anySolo && (lane == nullptr || ! lane->solo));
             g.setColour (focus ? th::blue.withAlpha (0.16f) : themed ("Lane names") ? Colours::white.withAlpha (i % 2 ? 0.0f : 0.04f) : (i % 2 ? th::panel : th::surface.withAlpha (0.55f)));
             g.fillRect (r);
             g.setColour (st.laneColour (note).withAlpha (muted ? 0.3f : 1.0f));
-            g.fillRoundedRectangle (Rectangle<float> ((float) pianoW + 4, (float) y + 4, 5, EditState::laneH - 8.0f), 2);
+            g.fillRoundedRectangle (Rectangle<float> ((float) pianoW + 4, (float) y + 4, 5, st.laneH - 8.0f), 2);
             drawPianoKey (g, note, y);
             // name + note number
             g.setFont (font (12.0f, focus ? 2 : 1));
             g.setColour (muted ? th::faint : th::text);
-            g.drawText (lane != nullptr ? lane->name : gmDrumName (note), pianoW + 14, y, getWidth() - 120 - pianoW, EditState::laneH, Justification::centredLeft, true);
+            g.drawText (lane != nullptr ? lane->name : gmDrumName (note), pianoW + 14, y, getWidth() - 120 - pianoW, st.laneH, Justification::centredLeft, true);
             g.setFont (font (10.0f, 1)); g.setColour (th::faint);
-            g.drawText (keyName (note), getWidth() - 116, y, 30, EditState::laneH, Justification::centredRight);
+            g.drawText (keyName (note), getWidth() - 116, y, 30, st.laneH, Justification::centredRight);
             // level bar
             auto lv = levelRect (y);
             g.setColour (Colours::black.withAlpha (0.35f)); g.fillRoundedRectangle (lv.toFloat(), 2);
@@ -179,9 +180,9 @@ public:
             // polyrhythm length badge
             if (p.laneLength.count (note)) {
                 g.setFont (font (9.5f, 2)); g.setColour (th::amber);
-                g.drawText (lengthText (p.laneLen (note)), getWidth() - 86, y, 28, EditState::laneH, Justification::centred);
+                g.drawText (lengthText (p.laneLen (note)), getWidth() - 86, y, 28, st.laneH, Justification::centred);
             }
-            g.setColour (th::line); g.drawHorizontalLine (y + EditState::laneH - 1, 0, (float) getWidth());
+            g.setColour (th::line); g.drawHorizontalLine (y + st.laneH - 1, 0, (float) getWidth());
         }
         g.setColour (th::line); g.drawVerticalLine (getWidth() - 1, 0, (float) getHeight());
     }
@@ -196,11 +197,11 @@ public:
 
     void mouseDown (const MouseEvent& e) override
     {
-        const int idx = (e.y + st.scrollY) / EditState::laneH;
+        const int idx = (e.y + st.scrollY) / st.laneH;
         auto lanes = st.lanes();
         if (idx < 0 || idx >= (int) lanes.size()) return;
         const int note = lanes[(size_t) idx];
-        const int y = idx * EditState::laneH - st.scrollY;
+        const int y = idx * st.laneH - st.scrollY;
         if (e.mods.isPopupMenu()) { laneMenu (note); return; }
         if (mRect (y).contains (e.getPosition())) {
             st.apply ("Lane mute", [note] (Pattern& p) { if (p.laneMute.count (note)) p.laneMute.erase (note); else p.laneMute.insert (note); });
@@ -244,7 +245,7 @@ private:
     void drawPianoKey (Graphics& g, int note, int y)
     {
         const bool black = isBlackKey (note);
-        auto r = Rectangle<float> (1, (float) y + 1, (float) pianoW - 3, EditState::laneH - 2.0f);
+        auto r = Rectangle<float> (1, (float) y + 1, (float) pianoW - 3, st.laneH - 2.0f);
         const bool lit = litUntil[(size_t) note] != 0;
         if (black) g.setGradientFill (ColourGradient (Colour (0xff3a3e46), r.getTopLeft(), Colour (0xff101114), r.getTopRight(), false));
         else g.setGradientFill (ColourGradient (Colour (0xffe9eaee), r.getTopLeft(), Colour (0xffb9bcc4), r.getTopRight(), false));
@@ -369,10 +370,10 @@ public:
 
         // rows
         for (int i = 0; i < rows; ++i) {
-            const int y = i * EditState::laneH - st.scrollY;
-            if (y < -EditState::laneH || y > getHeight()) continue;
+            const int y = i * st.laneH - st.scrollY;
+            if (y < -st.laneH || y > getHeight()) continue;
             g.setColour (lanes[(size_t) i] == st.focusLane ? th::blue.withAlpha (0.07f) : themed ("Note grid") ? Colours::white.withAlpha (i % 2 ? 0.0f : 0.035f) : (i % 2 ? th::bg : th::panel.withAlpha (0.7f)));
-            g.fillRect (0, y, getWidth(), EditState::laneH);
+            g.fillRect (0, y, getWidth(), st.laneH);
         }
         // base grid
         const int t0 = jmax (0, (int) st.xToTick (0)), t1 = (int) st.xToTick (w) + 1;
@@ -400,14 +401,14 @@ public:
             if (it == cells.end() || noteValues[vi].ticks < noteValues[it->second].ticks) cells[key] = vi;
         }
         for (auto& [key, vi] : cells) {
-            const int y = key.first * EditState::laneH - st.scrollY;
+            const int y = key.first * st.laneH - st.scrollY;
             const int beat = key.second;
             const float x0 = st.tickToX (beat * PPQ), x1 = st.tickToX ((beat + 1) * PPQ);
             if (x1 < 0 || x0 > w) continue;
             const auto c = th::valueColour (vi);
-            g.setColour (c.withAlpha (0.07f)); g.fillRect (x0, (float) y, x1 - x0, (float) EditState::laneH);
+            g.setColour (c.withAlpha (0.07f)); g.fillRect (x0, (float) y, x1 - x0, (float) st.laneH);
             g.setColour (c.withAlpha (0.38f));
-            for (int t = 0; t < PPQ; t += noteValues[vi].ticks) g.drawVerticalLine ((int) st.tickToX (beat * PPQ + t), (float) y + 1, (float) (y + EditState::laneH - 1));
+            for (int t = 0; t < PPQ; t += noteValues[vi].ticks) g.drawVerticalLine ((int) st.tickToX (beat * PPQ + t), (float) y + 1, (float) (y + st.laneH - 1));
         }
         // beyond the pattern end
         const float ex = st.tickToX (L);
@@ -418,17 +419,17 @@ public:
             const int note = lanes[(size_t) i];
             if (! p.laneLength.count (note)) continue;
             const int LL = p.laneLen (note);
-            const int y = i * EditState::laneH - st.scrollY;
+            const int y = i * st.laneH - st.scrollY;
             const float lx = st.tickToX (LL);
-            g.setColour (Colours::black.withAlpha (0.3f)); g.fillRect (lx, (float) y, w - lx, (float) EditState::laneH);
+            g.setColour (Colours::black.withAlpha (0.3f)); g.fillRect (lx, (float) y, w - lx, (float) st.laneH);
             for (auto& n : p.notes) if (n.note == note && n.tick < LL)
                 for (int k = 1; (long) k * LL + n.tick < (long) total; ++k) {
                     const float x = st.tickToX ((double) k * LL + n.tick);
                     if (x > w) break;
                     g.setColour (st.laneColour (note).withAlpha (0.22f));
-                    g.fillRoundedRectangle (x, (float) y + 5, jmax (5.0f, n.length * st.pxPerBeat / PPQ), EditState::laneH - 10.0f, 2);
+                    g.fillRoundedRectangle (x, (float) y + 5, jmax (5.0f, n.length * st.pxPerBeat / PPQ), st.laneH - 10.0f, 2);
                 }
-            g.setColour (th::amber); g.fillRoundedRectangle (lx - 2, (float) y + 2, 4, EditState::laneH - 4.0f, 2);
+            g.setColour (th::amber); g.fillRoundedRectangle (lx - 2, (float) y + 2, 4, st.laneH - 4.0f, 2);
         }
         // notes
         g.setFont (font (9.0f, 2));
@@ -459,8 +460,8 @@ public:
                 const int note = lanes[(size_t) i];
                 if (! p.laneLength.count (note)) continue;
                 const double lr = std::fmod (playTicks, (double) p.laneLen (note));
-                const int y = i * EditState::laneH - st.scrollY;
-                g.setColour (th::amber); g.fillRect (st.tickToX (lr) - 1, (float) y, 2.0f, (float) EditState::laneH);
+                const int y = i * st.laneH - st.scrollY;
+                g.setColour (th::amber); g.fillRect (st.tickToX (lr) - 1, (float) y, 2.0f, (float) st.laneH);
             }
         }
         // rubber band, split line, paint preview
@@ -493,7 +494,7 @@ public:
         mode = Mode::None;
         auto& p = st.pat();
         const auto lanes = st.lanes();
-        const int row = (e.y + st.scrollY) / EditState::laneH;
+        const int row = (e.y + st.scrollY) / st.laneH;
         const int note = (row >= 0 && row < (int) lanes.size()) ? lanes[(size_t) row] : -1;
         const double tick = st.xToTick ((float) e.x);
         st.cursorTick = st.snapFloor (tick);
@@ -591,7 +592,7 @@ public:
                     int newAnchor = free ? (int) std::round (anchorTick + dt) : st.snapRound (anchorTick + dt);
                     const int d = newAnchor - anchorTick;
                     const auto lanes = st.lanes();
-                    const int dRow = (int) std::round ((e.position.y - downPos.y) / EditState::laneH);
+                    const int dRow = (int) std::round ((e.position.y - downPos.y) / st.laneH);
                     for (auto& n : p.notes) if (n.selected) {
                         n.tick = jmax (0, n.tick + d);
                         if (dRow != 0) {
@@ -657,7 +658,7 @@ private:
     {
         const float x = st.tickToX (n.tick);
         const float wpx = jmax (7.0f, n.length * st.pxPerBeat / PPQ - 1.0f);
-        return { x, (float) (row * EditState::laneH - st.scrollY) + 3.0f, wpx, EditState::laneH - 6.0f };
+        return { x, (float) (row * st.laneH - st.scrollY) + 3.0f, wpx, st.laneH - 6.0f };
     }
     Note* hit (Point<float> pt)
     {
@@ -678,7 +679,7 @@ private:
     int laneHandleAt (Point<float> pt)
     {
         auto& p = st.pat(); const auto lanes = st.lanes();
-        const int row = (int) (pt.y + st.scrollY) / EditState::laneH;
+        const int row = (int) (pt.y + st.scrollY) / st.laneH;
         if (row < 0 || row >= (int) lanes.size()) return -1;
         const int note = lanes[(size_t) row];
         const float lx = st.tickToX (p.laneLen (note));
@@ -726,7 +727,7 @@ private:
     {
         auto& p = st.pat();
         const auto lanes = st.lanes();
-        const int row = (e.y + st.scrollY) / EditState::laneH;
+        const int row = (e.y + st.scrollY) / st.laneH;
         const int laneNote = (row >= 0 && row < (int) lanes.size()) ? lanes[(size_t) row] : -1;
         int clickedVel = -1;
         if (auto* n = hit (e.position)) { clickedVel = n->velocity; if (! n->selected) { selectAll (p, false); n->selected = true; st.publish(); } }
@@ -744,7 +745,7 @@ private:
         m.addItem (1, "Delete", sel); m.addItem (2, "Duplicate", sel); m.addItem (3, "Copy", sel); m.addItem (4, "Paste here", ! st.clipboard.empty());
         m.addItem (6, "Mute / unmute", sel);
         PopupMenu vel; for (int v : { 127, 112, 100, 90, 80, 64, 48, 32 }) vel.addItem (300 + v, String (v));
-        vel.addSeparator(); vel.addItem (10, "Louder +10"); vel.addItem (11, "Softer -10"); vel.addItem (12, "Ramp up"); vel.addItem (13, "Ramp down");
+        vel.addSeparator(); vel.addItem (16, "Curve (sine, triangle, ramps)..."); vel.addItem (10, "Louder +10"); vel.addItem (11, "Softer -10"); vel.addItem (12, "Ramp up"); vel.addItem (13, "Ramp down");
         vel.addItem (14, "Accent the beats"); vel.addItem (15, "Randomize");
         m.addSubMenu ("Velocity", vel, sel);
         PopupMenu prob; for (int v : { 100, 90, 75, 50, 33, 25, 10, 0 }) prob.addItem (100 + v, String (v) + "%" + (v == 0 ? "  (muted)" : ""));
@@ -788,6 +789,7 @@ private:
                 case 12: st.apply ("Ramp up", [] (Pattern& q) { velocityRamp (q, 40, 120, 0.0); }); break;
                 case 13: st.apply ("Ramp down", [] (Pattern& q) { velocityRamp (q, 120, 40, 0.0); }); break;
                 case 14: act ("Accent the beats", [] (Pattern& q) { for (auto* n : targetNotes (q)) n->velocity = n->tick % PPQ == 0 ? 116 : (n->tick % (PPQ / 2) == 0 ? 88 : 66); }); break;
+                case 16: if (st.openCurve) st.openCurve(); break;
                 case 15: act ("Randomize velocity", [] (Pattern& q) { std::mt19937 rr ((uint32) Time::getMillisecondCounter()); randomizeVelocity (q, 60, 120, rr); }); break;
                 case 20: act (String ("Quantize ") + noteValues[gi].name, [gi] (Pattern& q) { QuantOptions o; o.valueIndex = gi; quantize (q, o); }); break;
                 case 21: act ("Humanize", [] (Pattern& q) { std::mt19937 rr ((uint32) Time::getMillisecondCounter()); humanizeBake (q, 12, 12, rr); }); break;
@@ -835,7 +837,12 @@ public:
                     g.setColour (th::blue.withAlpha (0.16f)); g.drawHorizontalLine ((int) y, 0, (float) getWidth());
                     g.setColour (th::faint); g.drawText (String (v), getWidth() - 30, (int) y - 11, 26, 10, Justification::centredRight);
                 }
-            else for (int q = 1; q < 4; ++q) { g.setColour (th::line); g.drawHorizontalLine ((int) (4 + h * q / 4), 0, (float) getWidth()); }
+            else                                              // lines off: only the values marked on the side
+                for (int v : (st.probMode ? std::vector<int> { 100, 75, 50, 25 } : std::vector<int> { 127, 100, 80, 64, 40, 20 })) {
+                    const float y = 4 + h * (1.0f - (float) v / top);
+                    g.setColour (th::faint); g.drawText (String (v), getWidth() - 30, (int) y - 5, 26, 10, Justification::centredRight);
+                    g.drawHorizontalLine ((int) y, (float) getWidth() - 4, (float) getWidth());
+                }
         }
         auto& p = st.pat();
         const float ex = st.tickToX (p.lengthTicks());
@@ -961,10 +968,13 @@ private:
         m.addItem (8, "Compress 50%");
         m.addItem (9, "Expand 150%");
         m.addItem (10, "All to 100");
+        m.addSeparator();
+        m.addItem (11, "Curve (sine, triangle, ramps)...");
         const bool prob = st.probMode;
         const int focus = st.focusLane;
         m.showMenuAsync (PopupMenu::Options().withMousePosition(), [this, prob, focus] (int r) {
             if (r <= 0) return;
+            if (r == 11) { if (st.openCurve) st.openCurve(); return; }
             st.apply (prob ? "Chance shape" : "Velocity shape", [r, prob, focus] (Pattern& p) {
                 // work on the selection, or on the notes the lane shows
                 bool anySel = anySelected (p);

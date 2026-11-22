@@ -14,7 +14,26 @@ public:
     void paint (Graphics& g) override { fillArea (g, getLocalBounds(), "Window background", th::bg); if (onPaint) onPaint (g); }
 };
 
-class DrumPlayerEditor : public AudioProcessorEditor, public DragAndDropContainer, public FileDragAndDropTarget, private Timer
+// a bar you drag up or down to share the space between two areas
+class Divider : public Component, public SettableTooltipClient
+{
+public:
+    std::function<int()> getValue; std::function<void (int)> setValue; bool invert = false;
+    Divider() { setMouseCursor (MouseCursor::UpDownResizeCursor); setTooltip ("Drag up or down"); }
+    void paint (Graphics& g) override
+    {
+        g.setColour (Colours::white.withAlpha (isMouseOver() ? 0.22f : 0.08f));
+        g.fillRoundedRectangle (getLocalBounds().toFloat().withSizeKeepingCentre (60.0f, 3.0f), 1.5f);
+    }
+    void mouseEnter (const MouseEvent&) override { repaint(); }
+    void mouseExit (const MouseEvent&) override { repaint(); }
+    void mouseDown (const MouseEvent&) override { start = getValue ? getValue() : 0; }
+    void mouseDrag (const MouseEvent& e) override { if (setValue) setValue (start + (invert ? -1 : 1) * e.getDistanceFromDragStartY()); }
+private:
+    int start = 0;
+};
+
+class DrumPlayerEditor : public AudioProcessorEditor, public DragAndDropContainer, public FileDragAndDropTarget, private Timer, public MenuBarModel
 {
 public:
     explicit DrumPlayerEditor (DrumPlayerProcessor& p)
@@ -33,6 +52,7 @@ public:
         st.toast = [this] (const String& t) { showToast (t); };
         st.splitAt = [this] (int t) { splitMenu (t); };
         st.chooseTool = [this] (Tool t) { setTool (t); };
+        st.openCurve = [this] { openCurve(); };
 
         // ---------------- header
         setupButton (body, prevPreset, "<", false, "Previous preset");
@@ -149,12 +169,23 @@ public:
         // ---------------- roll
         body.addAndMakeVisible (ruler); body.addAndMakeVisible (headers); body.addAndMakeVisible (grid); body.addAndMakeVisible (vel);
         body.addAndMakeVisible (songLane); body.addAndMakeVisible (songHeader); songHeader.attach();
+        body.addAndMakeVisible (songDiv); body.addAndMakeVisible (velDiv);
+        songDiv.getValue = [this] { return songH; }; songDiv.setValue = [this] (int v) { songH = jlimit (40, 260, v); layout(); };
+        velDiv.getValue = [this] { return velH; }; velDiv.setValue = [this] (int v) { velH = jlimit (50, 420, v); layout(); }; velDiv.invert = true;
+        menuBar.setModel (this); body.addAndMakeVisible (menuBar);
+        setupButton (body, zH1, "W-", false, "Narrower (Ctrl+wheel)"); setupButton (body, zH2, "W+", false, "Wider (Ctrl+wheel)");
+        setupButton (body, zV1, "H-", false, "Lower lanes (Alt+wheel)"); setupButton (body, zV2, "H+", false, "Taller lanes (Alt+wheel)");
+        setupButton (body, zFit, "Fit", false, "Fit the pattern to the window (Ctrl+Shift+F)");
+        zH1.onClick = [this] { zoomX (1.0f / 1.25f); }; zH2.onClick = [this] { zoomX (1.25f); };
+        zV1.onClick = [this] { zoomY (-3); }; zV2.onClick = [this] { zoomY (3); };
+        zFit.onClick = [this] { zoomToFit(); };
         body.addAndMakeVisible (hScroll); body.addAndMakeVisible (vScroll);
         hScroll.setAutoHide (false); vScroll.setAutoHide (false);
         hScroll.addListener (&scrollRelay); vScroll.addListener (&scrollRelay);
         scrollRelay.owner = this;
         headers.preview = grid.preview = [this] (int n) { proc.uiPreview (n); };
         auto wheel = [this] (const MouseWheelDetails& w, bool shift, bool cmd, float mouseX) {
+            if (ModifierKeys::currentModifiers.isAltDown()) { zoomY (w.deltaY > 0 ? 2 : -2); return; }
             if (cmd) {                                                    // zoom around the mouse
                 const double t = st.xToTick (mouseX);
                 st.pxPerBeat = jlimit (12.0f, 900.0f, st.pxPerBeat * (w.deltaY > 0 ? 1.15f : 1.0f / 1.15f));
@@ -168,8 +199,23 @@ public:
         grid.onWheel = [wheel] (const MouseWheelDetails& w, const MouseEvent& e) { wheel (w, e.mods.isShiftDown(), e.mods.isCommandDown(), e.position.x); };
         headers.onWheel = [wheel] (const MouseWheelDetails& w) { wheel (w, false, false, 0); };
 
-        body.addAndMakeVisible (velMode); setupButton (body, velMode, "Velocity", false, "Switch the lower lane between velocity and chance to play");
-        velMode.onClick = [this] { st.probMode = ! st.probMode; velMode.setButtonText (st.probMode ? "Chance" : "Velocity"); vel.repaint(); };
+        body.addAndMakeVisible (velMode); setupButton (body, velMode, "Velocity", false, "What the lower lane shows, and velocity actions");
+        velMode.onClick = [this] {
+            PopupMenu m;
+            m.addItem (1, "Show velocity", true, ! st.probMode); m.addItem (2, "Show chance to play", true, st.probMode);
+            m.addSeparator();
+            m.addItem (3, "Curve (sine, triangle, ramps)...");
+            m.addItem (10020, "Ramp up"); m.addItem (10021, "Ramp down"); m.addItem (10022, "Accent the beats");
+            m.addItem (10023, "Louder +10"); m.addItem (10024, "Softer -10"); m.addItem (10025, "Compress 50%"); m.addItem (10026, "Expand 150%");
+            m.addItem (10030, "Randomize"); m.addItem (10011, "Humanize");
+            PopupMenu fx; for (int x : { 127, 110, 100, 90, 80, 64, 48, 32 }) fx.addItem (10200 + x, String (x));
+            m.addSubMenu ("All to", fx);
+            m.showMenuAsync (PopupMenu::Options().withTargetComponent (&velMode), [this] (int r) {
+                if (r == 1 || r == 2) { st.probMode = r == 2; velMode.setButtonText (st.probMode ? "Chance" : "Velocity"); vel.repaint(); }
+                else if (r == 3) openCurve();
+                else if (r >= 10000) runFunction (r - 10000);
+            });
+        };
 
         // ---------------- pages
         for (Page* pg : { (Page*) &quantPage, (Page*) &humPage, (Page*) &chainPage, (Page*) &setPage, (Page*) &presetPage, (Page*) &mapPage, (Page*) &recPage }) body.addChildComponent (pg);
@@ -299,6 +345,159 @@ public:
         }
         return false;
     }
+    void zoomX (float f)
+    {
+        const double centreTick = st.xToTick (grid.getWidth() * 0.5f);
+        st.pxPerBeat = jlimit (12.0f, 900.0f, st.pxPerBeat * f); proc.uiZoomX = st.pxPerBeat / 80.0f;
+        st.scrollX = jmax (0, (int) (centreTick / PPQ * st.pxPerBeat - grid.getWidth() * 0.5f));
+        clampScroll(); repaintRoll();
+    }
+    void zoomY (int d) { st.laneH = jlimit (14, 60, st.laneH + d); clampScroll(); repaintRoll(); }
+    void openCurve()
+    {
+        auto c = std::make_unique<CurvePanel> (st);
+        CallOutBox::launchAsynchronously (std::move (c), vel.getScreenBounds().withSizeKeepingCentre (40, 40).translated (0, -vel.getHeight() / 2), nullptr);
+    }
+
+    // ------------------------------------------------------------ the menu bar (File, Edit, Notes, ...)
+    StringArray getMenuBarNames() override { return { "File", "Edit", "Notes", "Pattern", "Song", "View", "Tools" }; }
+    PopupMenu getMenuForIndex (int index, const String&) override
+    {
+        PopupMenu m;
+        auto& p = st.pat();
+        const bool sel = anySelected (p);
+        switch (index) {
+            case 0:
+                m.addItem (1, "New (clear everything)"); m.addItem (2, "Presets..."); m.addItem (3, "Save preset");
+                m.addSeparator(); m.addItem (4, "Import MIDI files..."); m.addItem (5, "Export this pattern as MIDI..."); m.addItem (6, "Export the song lane as MIDI...");
+                m.addSeparator(); m.addItem (7, "Drum map..."); m.addItem (8, "Settings..."); m.addItem (9, "Look...");
+                break;
+            case 1:
+                m.addItem (101, "Undo  (Ctrl+Z)", proc.undo.canUndo()); m.addItem (102, "Redo  (Ctrl+Y)", proc.undo.canRedo());
+                m.addSeparator(); m.addItem (103, "Cut  (Ctrl+X)", sel); m.addItem (104, "Copy  (Ctrl+C)", sel); m.addItem (105, "Paste  (Ctrl+V)", ! st.clipboard.empty());
+                m.addItem (106, "Duplicate  (D)", sel); m.addItem (107, "Delete  (Del)", sel);
+                m.addSeparator(); m.addItem (108, "Select all  (Ctrl+A)"); m.addItem (109, "Select none  (Esc)", sel); m.addItem (110, "Invert selection");
+                m.addItem (111, st.lastAction ? "Repeat \"" + st.lastName + "\"  (Ctrl+R)" : String ("Repeat last action  (Ctrl+R)"), (bool) st.lastAction);
+                break;
+            case 2: {
+                m.addItem (10010, "Quantize  (Q)"); m.addItem (201, "Quantize settings..."); m.addItem (202, "Humanize & feel..."); m.addItem (10011, "Humanize the notes");
+                m.addSeparator();
+                PopupMenu v; v.addItem (203, "Curve (sine, triangle, ramps)..."); v.addItem (10020, "Ramp up"); v.addItem (10021, "Ramp down"); v.addItem (10022, "Accent the beats");
+                v.addItem (10023, "Louder +10"); v.addItem (10024, "Softer -10"); v.addItem (10025, "Compress 50%"); v.addItem (10026, "Expand 150%");
+                for (int x : { 127, 110, 100, 90, 80, 64, 48, 32 }) v.addItem (10200 + x, "All to " + String (x));
+                m.addSubMenu ("Velocity", v);
+                PopupMenu t; t.addItem (10012, "Reverse"); t.addItem (10013, "Double speed"); t.addItem (10014, "Half speed"); t.addItem (10015, "Nudge left");
+                t.addItem (10016, "Nudge right"); t.addItem (10017, "Lengths = grid"); t.addItem (10018, "Remove doubled notes");
+                m.addSubMenu ("Timing", t);
+                PopupMenu r; r.addItem (10030, "Velocities"); r.addItem (10031, "Timing"); r.addItem (10032, "Chance to play"); r.addItem (10033, "Thin out 25%"); r.addItem (10034, "Add ghost notes");
+                m.addSubMenu ("Randomize", r);
+                PopupMenu d; for (auto& l : st.song().lanes) d.addItem (11000 + l.note, l.name + "  (" + String (l.note) + ")");
+                m.addSubMenu ("Move to drum", d, sel);
+                m.addItem (204, "Mute / unmute  (M)", sel);
+                break;
+            }
+            case 3: {
+                m.addItem (301, "Play  (Space)"); m.addItem (302, "Stop"); m.addItem (303, "Record into this key");
+                m.addSeparator();
+                PopupMenu len; for (int b : { 1, 2, 3, 4, 6, 8, 12, 16, 32 }) len.addItem (400 + b, String (b) + (b == 1 ? " bar" : " bars"), true, p.bars == b);
+                m.addSubMenu ("Length", len);
+                PopupMenu ty; for (int t2 = 0; t2 < 4; ++t2) ty.addItem (420 + t2, typeName ((PatternType) t2), true, (int) p.type == t2);
+                m.addSubMenu ("Type", ty);
+                m.addItem (10043, "Split at the cursor  (Alt+X)"); m.addItem (10040, "Copy pattern"); m.addItem (10041, "Paste pattern", hasPatternClip); m.addItem (10042, "Clear pattern");
+                m.addItem (304, "Convert from another drum plugin...");
+                break;
+            }
+            case 4:
+                m.addItem (501, "Song plays", true, st.song().songMode); m.addItem (502, "Play the song from the cursor"); m.addItem (503, "Stop the song");
+                m.addSeparator(); m.addItem (504, "Duplicate chunks  (D)"); m.addItem (505, "Split chunks at the cursor  (Alt+X)"); m.addItem (506, "Mute chunks  (M)");
+                m.addItem (507, "Delete chunks"); m.addItem (508, "Make unique"); m.addItem (509, "Select all chunks");
+                break;
+            case 5:
+                m.addItem (601, "Wider  (Ctrl+wheel)"); m.addItem (602, "Narrower"); m.addItem (603, "Taller lanes  (Alt+wheel)"); m.addItem (604, "Lower lanes");
+                m.addItem (605, "Fit the pattern  (Ctrl+Shift+F)");
+                m.addItem (606, "Bigger velocity area"); m.addItem (607, "Smaller velocity area"); m.addItem (608, "Bigger song lane"); m.addItem (609, "Smaller song lane");
+                m.addItem (610, "Show only used lanes", true, st.usedOnly);
+                m.addSeparator(); m.addItem (611, "Exchange keys"); m.addItem (612, "Chains page"); m.addItem (613, "Recording options");
+                break;
+            case 6: {
+                static const char* tn[] = { "Select (arrow)  1", "Draw (pencil)  5", "Erase  4", "Split (scissors)  3", "Paint brush  7", "Mute  6", "Line (velocity ramps)  2" };
+                for (int t2 = 0; t2 < 7; ++t2) m.addItem (700 + t2, tn[t2], true, (int) st.tool == t2);
+                break;
+            }
+            default: break;
+        }
+        return m;
+    }
+    void menuItemSelected (int id, int) override
+    {
+        auto& p = st.pat();
+        if (id >= 10000) { runFunction (id - 10000); return; }
+        switch (id) {
+            case 1: AlertWindow::showOkCancelBox (MessageBoxIconType::QuestionIcon, "New", "Clear every pattern, chain and the song lane?", "Clear", "Cancel", this,
+                        ModalCallbackFunction::create ([this] (int r) { if (r == 1) { auto s2 = Song::makeDefault(); s2.settings = st.song().settings; s2.playMap = st.song().playMap; proc.commit (s2, "New"); refreshAll(); } })); break;
+            case 2: togglePage (presetPage, presetName); break;
+            case 3: quickSave(); break;
+            case 4: importDialog(); break;
+            case 5: exportPattern (st.song().editKey); break;
+            case 6: {
+                chooser = std::make_unique<FileChooser> ("Export song", File::getSpecialLocation (File::userDocumentsDirectory).getChildFile ("Drum Player Song.mid"), "*.mid");
+                chooser->launchAsync (FileBrowserComponent::saveMode | FileBrowserComponent::canSelectFiles | FileBrowserComponent::warnAboutOverwriting,
+                    [this] (const FileChooser& fc) { auto f = fc.getResult(); if (f != File()) { writeSongMidi (st.song(), f.withFileExtension ("mid"), st.song().settings.outChannel); showToast ("Exported " + f.getFileName()); } });
+                break;
+            }
+            case 7: togglePage (mapPage, mapBtn); break;
+            case 8: togglePage (setPage, settingsBtn); break;
+            case 9: togglePage (setPage, settingsBtn); setPage.showTab (true); break;
+            case 101: proc.undo.undo(); refreshAll(); break;
+            case 102: proc.undo.redo(); refreshAll(); break;
+            case 103: copySel(); st.apply ("Cut", [] (Pattern& q) { deleteSelected (q); }); break;
+            case 104: copySel(); break;
+            case 105: paste(); break;
+            case 106: st.apply ("Duplicate", [] (Pattern& q) { duplicateSelection (q); }); break;
+            case 107: st.apply ("Delete", [] (Pattern& q) { deleteSelected (q); }); break;
+            case 108: selectAll (p, true); st.publish(); break;
+            case 109: selectAll (p, false); st.publish(); break;
+            case 110: for (auto& n : p.notes) n.selected = ! n.selected; st.publish(); break;
+            case 111: st.repeatLast(); break;
+            case 201: togglePage (quantPage, quantBtn); break;
+            case 202: togglePage (humPage, humBtn); break;
+            case 203: openCurve(); break;
+            case 204: st.apply ("Mute / unmute", [] (Pattern& q) { for (auto& n : q.notes) if (n.selected) n.probability = n.probability == 0 ? 100 : 0; }); break;
+            case 301: proc.uiTrigger (st.song().editKey); break;
+            case 302: proc.uiStop(); break;
+            case 303: recBtn.triggerClick(); break;
+            case 304: togglePage (mapPage, mapBtn); break;
+            case 501: { const bool on = ! st.song().songMode; st.applySong ("Song mode", [on] (Song& s2) { s2.songMode = on; }); break; }
+            case 502: if (! st.song().songMode) st.applySong ("Song mode", [] (Song& s2) { s2.songMode = true; }); proc.uiSongPlay (true, songLane.cursorBeat); break;
+            case 503: proc.uiSongPlay (false, 0); break;
+            case 504: songLane.duplicate(); break;
+            case 505: songLane.splitAtCursor(); break;
+            case 506: songLane.muteSelected(); break;
+            case 507: songLane.deleteSelected(); break;
+            case 508: songLane.makeUnique(); break;
+            case 509: songLane.selectAll(); break;
+            case 601: zoomX (1.25f); break;
+            case 602: zoomX (0.8f); break;
+            case 603: zoomY (3); break;
+            case 604: zoomY (-3); break;
+            case 605: zoomToFit(); break;
+            case 606: velH += 40; layout(); break;
+            case 607: velH -= 40; layout(); break;
+            case 608: songH = jlimit (40, 260, songH + 30); layout(); break;
+            case 609: songH = jlimit (40, 260, songH - 30); layout(); break;
+            case 610: st.usedOnly = ! st.usedOnly; refreshAll(); break;
+            case 611: toggleExchange(); break;
+            case 612: togglePage (chainPage, chainsBtn); break;
+            case 613: togglePage (recPage, recOptBtn); break;
+            default:
+                if (id >= 400 && id < 420) { const int b = id - 400; st.apply ("Pattern length", [b] (Pattern& q) { q.bars = b; }); }
+                else if (id >= 420 && id < 424) { const int t2 = id - 420; st.apply ("Pattern type", [t2] (Pattern& q) { q.type = (PatternType) t2; }); }
+                else if (id >= 700 && id < 707) setTool ((Tool) (id - 700));
+                break;
+        }
+        refreshControls();
+    }
+
     void zoomToFit()
     {
         st.pxPerBeat = jlimit (12.0f, 900.0f, (float) grid.getWidth() / jmax (1.0f, (float) st.pat().lengthTicks() / PPQ));
@@ -329,6 +528,10 @@ private:
     DragMidiButton dragBtn;
     Ruler ruler; LaneHeaders headers; NoteGrid grid; VelocityLane vel;
     SongLane songLane; SongHeader songHeader;
+    Divider songDiv, velDiv;
+    MenuBarComponent menuBar;
+    TextButton zH1, zH2, zV1, zV2, zFit;
+    int songH = 64, velH = 104;
     ScrollBar hScroll { false }, vScroll { true };
     struct ScrollRelay : public ScrollBar::Listener
     {
@@ -360,7 +563,8 @@ private:
     // ------------------------------------------------------------ layout
     void layout()
     {
-        auto a = body.getLocalBounds().reduced (10, 8);
+        auto a = body.getLocalBounds().reduced (10, 6);
+        menuBar.setBounds (a.removeFromTop (20)); a.removeFromTop (4);
         // header
         auto h = a.removeFromTop (30);
         headerArea = h;
@@ -400,20 +604,23 @@ private:
         r2.place (recBtn); r2.place (recOptBtn); r2.place (playBtn); r2.place (stopBtn); r2.place (dragBtn);
         a.removeFromTop (8);
         // song lane
-        auto songRow = a.removeFromTop (64);
+        auto songRow = a.removeFromTop (songH);
         songHeader.setBounds (songRow.removeFromLeft (200));
         songRow.removeFromRight (10);
         songLane.setBounds (songRow);
-        a.removeFromTop (6);
+        songDiv.setBounds (a.removeFromTop (8));
         // status line
         status.setBounds (a.removeFromBottom (18));
         a.removeFromBottom (2);
         // roll
         rollArea = a;
-        const int headW = 200, rulerH = 22, velH = 104, sb = 10;
+        const int headW = 200, rulerH = 22, sb = 10;
+        velH = jlimit (50, jmax (50, a.getHeight() - 120), velH);
         auto velRow = a.removeFromBottom (velH);
-        a.removeFromBottom (4);
+        velDiv.setBounds (a.removeFromBottom (8));
         auto top = a.removeFromTop (rulerH);
+        {   auto z = top.withWidth (headW).reduced (4, 0);
+            for (auto* b : { &zH1, &zH2, &zV1, &zV2, &zFit }) { b->setBounds (z.removeFromLeft (b->getWidth()).withSizeKeepingCentre (b->getWidth(), 18)); z.removeFromLeft (3); } }
         vScroll.setBounds (a.removeFromRight (sb)); top.removeFromRight (sb);
         hScroll.setBounds (a.removeFromBottom (sb).withTrimmedLeft (headW));
         headers.setBounds (a.removeFromLeft (headW)); top.removeFromLeft (headW);
@@ -499,14 +706,14 @@ private:
     {
         hScroll.setRangeLimits (0, jmax ((double) grid.getWidth(), (double) st.contentTicks() / PPQ * st.pxPerBeat + 40), dontSendNotification);
         hScroll.setCurrentRange (st.scrollX, grid.getWidth(), dontSendNotification);
-        vScroll.setRangeLimits (0, jmax ((double) grid.getHeight(), (double) st.lanes().size() * EditState::laneH), dontSendNotification);
+        vScroll.setRangeLimits (0, jmax ((double) grid.getHeight(), (double) st.lanes().size() * st.laneH), dontSendNotification);
         vScroll.setCurrentRange (st.scrollY, grid.getHeight(), dontSendNotification);
         ruler.repaint(); headers.repaint(); grid.repaint(); vel.repaint();
     }
     void clampScroll()
     {
         const int maxX = jmax (0, (int) (st.contentTicks() / (double) PPQ * st.pxPerBeat + 40) - grid.getWidth());
-        const int maxY = jmax (0, (int) st.lanes().size() * EditState::laneH - grid.getHeight());
+        const int maxY = jmax (0, (int) st.lanes().size() * st.laneH - grid.getHeight());
         st.scrollX = jlimit (0, maxX, st.scrollX); st.scrollY = jlimit (0, maxY, st.scrollY);
     }
 

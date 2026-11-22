@@ -591,17 +591,27 @@ public:
                     "their left edge to trim. Ctrl-drag copies. D duplicates, Alt+X splits at the cursor, M mutes, Del deletes. Double-click: edit the pattern");
     }
     std::function<void()> onFocus;
-    float pxPerBeat = 12.0f; int scrollX = 0; double cursorBeat = 0; int snap = 0;   // snap: 0 bar, 1 beat, 2 off
+    float pxPerBeat = 12.0f; int scrollX = 0; double cursorBeat = 0; int snap = 0;   // snap: 0 bar, 1 beat, 2 1/8, 3 1/16, 4 off
     static constexpr int rulerH = 16;
 
     double beatToX (double b) const { return b * pxPerBeat - scrollX; }
     double xToBeat (double x) const { return (x + scrollX) / pxPerBeat; }
     double snapBeat (double b, bool alt) const
     {
-        const int mode = alt ? jmin (2, snap + 1) : snap;
-        if (mode == 2) return jmax (0.0, std::round (b * 4) / 4);            // free: sixteenths
-        const double g = mode == 0 ? 4.0 : 1.0;
-        return jmax (0.0, std::round (b / g) * g);
+        if (alt || snap >= 4) return jmax (0.0, std::round (b * 16) / 16);   // free (1/64 steps)
+        static const double g[] = { 4.0, 1.0, 0.5, 0.25 };
+        return jmax (0.0, std::round (b / g[snap]) * g[snap]);
+    }
+    // chunks click onto the edges of the other chunks (unless Alt)
+    double magnet (double b, bool alt) const
+    {
+        if (alt) return b;
+        double best = b, dist = 9.0 / pxPerBeat;
+        for (auto& c : st.song().clips) {
+            if (c.selected) continue;
+            for (double e : { c.start, c.start + c.length }) if (std::abs (e - b) < dist) { dist = std::abs (e - b); best = e; }
+        }
+        return best;
     }
 
     void paint (Graphics& g) override
@@ -701,10 +711,17 @@ public:
         if (copying) for (auto& c : orig) if (c.selected) { auto x = c; x.selected = false; clips.push_back (x); }
         const auto& a = orig[(size_t) anchor];
         if (mode == Move) {
-            const double nb = snapBeat (a.start + d, e.mods.isAltDown()), dd = nb - a.start;
+            const bool alt = e.mods.isAltDown();
+            double nb = snapBeat (a.start + d, alt);
+            const double ms = magnet (a.start + d, alt), me = magnet (a.start + d + a.length, alt) - a.length;   // start or end onto a neighbour
+            if (std::abs (ms - (a.start + d)) < std::abs (nb - (a.start + d)) && ms != a.start + d) nb = ms;
+            else if (me != a.start + d && std::abs (me - (a.start + d)) < std::abs (nb - (a.start + d))) nb = me;
+            const double dd = nb - a.start;
             for (size_t k = 0; k < orig.size(); ++k) if (orig[k].selected) clips[k].start = jmax (0.0, orig[k].start + dd);
         } else if (mode == ResizeR) {
-            const double ne = snapBeat (a.start + a.length + d, e.mods.isAltDown()), dd = ne - (a.start + a.length);
+            double ne = snapBeat (a.start + a.length + d, e.mods.isAltDown());
+            if (const double m = magnet (a.start + a.length + d, e.mods.isAltDown()); m != a.start + a.length + d) ne = m;
+            const double dd = ne - (a.start + a.length);
             for (size_t k = 0; k < orig.size(); ++k) if (orig[k].selected) clips[k].length = jmax (0.25, orig[k].length + dd);
         } else if (mode == ResizeL) {
             const double ns = snapBeat (a.start + d, e.mods.isAltDown()), dd = ns - a.start;
@@ -852,7 +869,7 @@ public:
         onBtn.onClick = [this] { const bool on = onBtn.getToggleState(); st.applySong ("Song mode", [on] (Song& s) { s.songMode = on; }); };
         setupButton (*this, play, "Play"); play.onClick = [this] { if (! st.song().songMode) st.applySong ("Song mode", [] (Song& s) { s.songMode = true; }); st.proc.uiSongPlay (true, lane.cursorBeat); };
         setupButton (*this, stop, "Stop"); stop.onClick = [this] { st.proc.uiSongPlay (false, 0); };
-        setupCombo (*this, snap, { "Snap: bar", "Snap: beat", "Snap: off" }, 1, "Alt while dragging = one step finer");
+        setupCombo (*this, snap, { "Snap: bar", "Snap: beat", "Snap: 1/8", "Snap: 1/16", "Snap: off" }, 1, "Chunks also click onto each other's edges. Alt while dragging = free");
         snap.setSelectedItemIndex (0, dontSendNotification);
         snap.onChange = [this] { lane.snap = snap.getSelectedItemIndex(); };
         dragOut.setButtonText ("Song MIDI"); dragOut.setSize (fitW ("Song MIDI"), btnH); dragOut.setComponentID ("Song MIDI"); addAndMakeVisible (dragOut);
@@ -894,6 +911,86 @@ private:
     DragSong dragOut;
 public:
     void attach() { dragOut.st = &st; }
+};
+
+
+// ---------------------------------------------------------------- velocity curve: a sine (or other wave) drawn over the velocities, live
+class CurvePanel : public Component
+{
+public:
+    explicit CurvePanel (EditState& e) : st (e)
+    {
+        auto& p = st.pat();
+        bool anySel = false; for (auto& n : p.notes) anySel |= n.selected;
+        for (int i = 0; i < (int) p.notes.size(); ++i) {
+            const auto& n = p.notes[(size_t) i];
+            if (anySel ? n.selected : (st.focusLane < 0 || n.note == st.focusLane)) { idx.push_back (i); orig.push_back (n.velocity); lo = jmin (lo, n.tick); }
+        }
+        if (lo == INT_MAX) lo = 0;
+        st.proc.beginEdit();
+        setupLabel (*this, title, anySel ? "Velocity curve on the selected notes" : "Velocity curve on the notes shown", 12.5f, th::amber);
+        setupLabel (*this, lShape, "Shape"); setupCombo (*this, shape, { "Sine wave", "Triangle", "Ramp up", "Ramp down", "Saw (up each cycle)", "Random" });
+        setupLabel (*this, lCycle, "One cycle"); setupCombo (*this, cycle, { "1/8", "1/4 (a beat)", "1/2 bar", "1 bar", "2 bars", "All the notes" });
+        setupLabel (*this, lMode, "Mode"); setupCombo (*this, mode, { "Set the velocity", "Add to the velocity it has" });
+        setupLabel (*this, lCentre, "Middle"); setupSlider (*this, centre, th::blue); centre.setRange (1, 127, 1);
+        setupLabel (*this, lDepth, "Up and down"); setupSlider (*this, depth, th::amber); depth.setRange (0, 63, 1);
+        setupLabel (*this, lPhase, "Start point"); setupSlider (*this, phase, th::blue); phase.setRange (0, 360, 1); phase.setTextValueSuffix (" deg");
+        shape.setSelectedItemIndex (0, dontSendNotification); cycle.setSelectedItemIndex (1, dontSendNotification); mode.setSelectedItemIndex (0, dontSendNotification);
+        centre.setValue (90, dontSendNotification); depth.setValue (25, dontSendNotification); phase.setValue (90, dontSendNotification);
+        for (auto* c : { &shape, &cycle, &mode }) c->onChange = [this] { apply(); };
+        for (auto* sl : { &centre, &depth, &phase }) sl->onValueChange = [this] { apply(); };
+        setupLabel (*this, help, "Changes show live. Click outside to keep it; Ctrl+Z undoes it.", 10.5f, th::faint);
+        setSize (380, 252);
+        apply();
+    }
+    ~CurvePanel() override { st.proc.endEdit ("Velocity curve"); if (st.changed) st.changed(); }
+    void paint (Graphics& g) override { g.fillAll (th::panel); }
+    void resized() override
+    {
+        auto a = getLocalBounds().reduced (12, 8);
+        title.setBounds (a.removeFromTop (22)); a.removeFromTop (4);
+        auto rowOf = [&a] (Label& l, Component& c, int w) { auto r = a.removeFromTop (26); a.removeFromTop (4); l.setBounds (r.removeFromLeft (90)); c.setBounds (w > 0 ? r.removeFromLeft (w) : r); };
+        rowOf (lShape, shape, 180); rowOf (lCycle, cycle, 140); rowOf (lMode, mode, 200);
+        rowOf (lCentre, centre, 0); rowOf (lDepth, depth, 0); rowOf (lPhase, phase, 0);
+        help.setBounds (a.removeFromTop (20));
+    }
+private:
+    EditState& st;
+    std::vector<int> idx, orig; int lo = INT_MAX;
+    Label title, lShape, lCycle, lMode, lCentre, lDepth, lPhase, help;
+    ComboBox shape, cycle, mode;
+    FineSlider centre, depth, phase;
+
+    void apply()
+    {
+        auto& p = st.pat();
+        if (idx.empty()) return;
+        int hi = lo; for (int i : idx) if (i < (int) p.notes.size()) hi = jmax (hi, p.notes[(size_t) i].tick);
+        static const int cyc[] = { 480, 960, 0, 0, 0, 0 };
+        const int bar = p.beatsPerBar * PPQ;
+        const int ci = cycle.getSelectedItemIndex();
+        double len = ci <= 1 ? cyc[ci] : ci == 2 ? bar / 2.0 : ci == 3 ? bar : ci == 4 ? bar * 2.0 : jmax (1, hi - lo + 1);
+        const double ph = phase.getValue() / 360.0;
+        std::mt19937 rng ((uint32) (centre.getValue() * 131 + depth.getValue() * 7 + ph * 1000));
+        std::uniform_real_distribution<double> rnd (-1.0, 1.0);
+        for (size_t k = 0; k < idx.size(); ++k) {
+            if (idx[k] >= (int) p.notes.size()) continue;
+            auto& n = p.notes[(size_t) idx[k]];
+            double x = std::fmod ((n.tick - lo) / len + ph, 1.0); if (x < 0) x += 1.0;
+            double w = 0;
+            switch (shape.getSelectedItemIndex()) {
+                case 0: w = std::sin (x * MathConstants<double>::twoPi); break;
+                case 1: w = x < 0.5 ? x * 4 - 1 : 3 - x * 4; break;
+                case 2: w = (n.tick - lo) / (double) jmax (1, hi - lo) * 2 - 1; break;
+                case 3: w = 1 - (n.tick - lo) / (double) jmax (1, hi - lo) * 2; break;
+                case 4: w = x * 2 - 1; break;
+                default: w = rnd (rng); break;
+            }
+            const double base = mode.getSelectedItemIndex() == 0 ? centre.getValue() : orig[k] + (centre.getValue() - 64);
+            n.velocity = jlimit (1, 127, (int) std::round (base + depth.getValue() * w));
+        }
+        st.publish();
+    }
 };
 
 // ---------------------------------------------------------------- quantize page
@@ -1570,6 +1667,9 @@ public:
         setupLabel (*this, lFrom, "Dropped MIDI is from");
         setupCombo (*this, importFrom, from, 1, "Which plugin made the MIDI you drop in. It is converted on the way in");
         importFrom.onChange = [this] { if (loading) return; const int v = importFrom.getSelectedItemIndex() - 1; st.applySong ("Import map", [v] (Song& s) { s.importMap = v; }); refresh(); };
+        StringArray chs; for (int c = 1; c <= 16; ++c) chs.add ("Channel " + String (c));
+        setupLabel (*this, lOut, "MIDI out"); setupCombo (*this, outCh, chs, 1, "The channel Drum Player sends on. It must match what the drum plugin's track lets through");
+        outCh.onChange = [this] { if (loading) return; const int c = outCh.getSelectedItemIndex() + 1; st.applySong ("MIDI out channel", [c] (Song& s) { s.settings.outChannel = c; }); refresh(); };
         setupButton (*this, convertBtn, "Convert the edited pattern from...", false, "For a pattern that came from another plugin and sounds wrong");
         convertBtn.onClick = [this] {
             PopupMenu m;
@@ -1606,6 +1706,7 @@ public:
         auto& s = st.song();
         play.setSelectedItemIndex (s.playMap, dontSendNotification);
         importFrom.setSelectedItemIndex (s.importMap + 1, dontSendNotification);
+        outCh.setSelectedItemIndex (s.settings.outChannel - 1, dontSendNotification);
         const auto& m = builtInMaps()[(size_t) s.playMap];
         info.setText (m.note + "\nOutput: MIDI channel " + String (s.settings.outChannel) + ".  Notes the map doesn't know pass through unchanged.", dontSendNotification);
         for (int a = 0; a < aCount; ++a) combos[a]->setSelectedItemIndex (s.customNotes[(size_t) a] + 1, dontSendNotification);
@@ -1619,6 +1720,7 @@ public:
         auto a = content();
         play.setBounds (row (a, lPlay, 150).removeFromLeft (300));
         importFrom.setBounds (row (a, lFrom, 150).removeFromLeft (300));
+        outCh.setBounds (row (a, lOut, 150).removeFromLeft (130));
         convertBtn.setBounds (a.removeFromTop (28).removeFromLeft (convertBtn.getWidth()).reduced (0, 3)); a.removeFromTop (4);
         info.setBounds (a.removeFromTop (46)); a.removeFromTop (4);
         lCustom.setBounds (a.removeFromTop (22));
@@ -1628,8 +1730,8 @@ public:
     }
 private:
     EditState& st; bool loading = false;
-    Label lPlay, lFrom, info, lCustom;
-    ComboBox play, importFrom;
+    Label lPlay, lFrom, info, lCustom, lOut;
+    ComboBox play, importFrom, outCh;
     TextButton convertBtn;
     Viewport view; Component list;
     OwnedArray<Label> labels; OwnedArray<ComboBox> combos;

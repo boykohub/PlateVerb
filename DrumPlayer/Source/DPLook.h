@@ -197,6 +197,19 @@ public:
         g.setColour (Colours::white.withAlpha (over ? 0.28f : 0.16f)); g.fillRoundedRectangle (r, 3);
     }
     int getDefaultScrollbarWidth() override { return 10; }
+    void drawMenuBarBackground (Graphics& g, int w, int h, bool, MenuBarComponent&) override
+    {
+        if (auto* e = Theme::get().findCustom ("Menu bar")) { fillThemed (g, Rectangle<float> (0, 0, (float) w, (float) h), *e, 4); return; }
+        g.setColour (th::panel); g.fillRoundedRectangle (Rectangle<float> (0, 0, (float) w, (float) h), 4);
+    }
+    void drawMenuBarItem (Graphics& g, int w, int h, int, const String& text, bool over, bool open, bool, MenuBarComponent&) override
+    {
+        if (over || open) { g.setColour (th::blue.withAlpha (0.22f)); g.fillRoundedRectangle (Rectangle<float> (1, 2, (float) w - 2, (float) h - 4), 3); }
+        g.setFont (font (Theme::get().fontFor ("txt:Menu bar", "", 12.5f), 2)); g.setColour (open ? th::amber : th::text);
+        g.drawFittedText (text, 0, 0, w, h, Justification::centred, 1);
+    }
+    Font getMenuBarFont (MenuBarComponent&, int, const String&) override { return font (Theme::get().fontFor ("txt:Menu bar", "", 12.5f), 2); }
+    int getMenuBarItemWidth (MenuBarComponent&, int, const String& t) override { return (int) textWidth (font (12.5f, 2), t) + 22; }
     void fillTextEditorBackground (Graphics& g, int w, int h, TextEditor&) override
     {
         g.setColour (Colours::black.withAlpha (0.25f)); g.fillRoundedRectangle (Rectangle<float> (0, 0, (float) w, (float) h), 5);

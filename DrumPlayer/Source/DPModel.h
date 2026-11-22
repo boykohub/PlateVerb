@@ -121,7 +121,8 @@ struct Settings
 {
     int outChannel = 10;
     int zoneLow = 12, zoneHigh = 127;              // pattern keys: C-1 (12) up the whole keyboard (Studio One names)
-    int keyMode = 0;                               // 0 = Pattern mode (keys play patterns), 1 = Play mode (keys play drums)
+    int keyMode = 0;
+    int channelBeforeStrike = 10;                               // 0 = Pattern mode (keys play patterns), 1 = Play mode (keys play drums)
     StartQuant startQuant = StartQuant::InTime;
     bool latch = true;                             // false = hold (release stops)
     bool stopWithHost = true;
@@ -510,7 +511,9 @@ inline void convertSong (Song& s, int fromId, int toId)
     }
     for (auto& p : s.keys) s.ensureLanesForPattern (p);
     s.sortLanes();
-    s.settings.outChannel = to.channel;
+    // only AIR Strike needs its own channel (2); every other plugin keeps the channel you chose
+    if (toId == mapStrike && fromId != mapStrike) { s.settings.channelBeforeStrike = s.settings.outChannel; s.settings.outChannel = 2; }
+    else if (fromId == mapStrike && toId != mapStrike) s.settings.outChannel = s.settings.channelBeforeStrike;
 }
 
 // ------------------------------------------------------------------ MIDI files
