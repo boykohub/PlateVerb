@@ -736,6 +736,21 @@ private:
         if (const int ser = proc.lastInSerial.load(); ser != lastInSerialSeen) {     // which key was pressed, and what it did
             lastInSerialSeen = ser;
             const int n = proc.lastInNote.load(), k = proc.lastInKey.load();
+            if (n >= 0) { strip.flash (n); bigStrip.flash (n); }
+            if (learnFrom >= 0 && ser != learnSerial && n >= 0) {          // "move to the next key I press"
+                const int from = learnFrom, to = n; learnFrom = -1;
+                if (to == from) showToast ("That's the same key");
+                else if (to < st.song().settings.zoneLow || to == st.song().settings.resolveStop()) showToast (keyName (to) + " isn't a pattern key");
+                else {
+                    st.applySong ("Move pattern", [from, to] (Song& s2) {
+                        std::swap (s2.keys[(size_t) from], s2.keys[(size_t) to]);
+                        for (auto& c : s2.chains) for (auto& step : c.steps) { if (step.key == from) step.key = to; else if (step.key == to) step.key = from; }
+                        for (auto& c : s2.clips) { if (c.key == from) c.key = to; else if (c.key == to) c.key = from; }
+                        s2.editKey = to;
+                    });
+                    showToast ("Moved to " + keyName (to));
+                }
+            }
             String t = "Key " + keyName (n) + " (" + String (n) + ")";
             if (k >= 0 && k == st.song().settings.resolveStop()) t << "  ->  STOP";
             else if (k >= 0) t << "  ->  pattern " + keyName (k) + (st.song().keys[(size_t) k].notes.empty() ? String ("  (empty key)") : "  " + st.song().keys[(size_t) k].name);
@@ -759,6 +774,7 @@ private:
     int lastChainState = -1;
     std::array<uint32, 128> lastIn {};
     double lastSongBeat = -1;
+    int learnFrom = -1, learnSerial = 0;
 
     static void repaintEverything (Component& c) { c.repaint(); for (auto* ch : c.getChildren()) repaintEverything (*ch); }
     void showToast (const String& t) { toast.text = t; toast.until = Time::getMillisecondCounter() + 2600; toast.toFront (false); toast.repaint(); }
@@ -1068,16 +1084,25 @@ private:
         const auto& p = s.keys[(size_t) k];
         PopupMenu m;
         m.addSectionHeader (keyName (k) + (p.isEmpty() ? "  (empty)" : "  " + p.name));
-        m.addItem (1, "Edit"); m.addItem (2, "Play", ! p.notes.empty());
-        PopupMenu type; for (int t = 0; t < 4; ++t) type.addItem (10 + t, typeName ((PatternType) t), ! p.isEmpty(), (int) p.type == t);
-        m.addSubMenu ("Type", type);
-        m.addItem (3, "Copy pattern", ! p.isEmpty()); m.addItem (4, "Paste pattern", hasPatternClip);
-        m.addItem (5, "Duplicate to the next free key", ! p.isEmpty());
-        m.addItem (6, "Export as MIDI file...", ! p.notes.empty());
-        m.addItem (7, "Clear", ! p.isEmpty());
-        PopupMenu chain;
-        for (int c = 0; c < (int) s.chains.size() && c < 200; ++c) chain.addItem (2000 + c, "Add to " + (s.chains[(size_t) c].name.isNotEmpty() ? s.chains[(size_t) c].name : "Chain " + String (c + 1)), ! p.notes.empty());
-        m.addSubMenu ("Chains", chain);
+        m.addItem (1, "Edit");
+        if (! p.notes.empty()) m.addItem (2, "Play");
+        if (! p.isEmpty()) {
+            PopupMenu type; for (int t = 0; t < 4; ++t) type.addItem (10 + t, typeName ((PatternType) t), true, (int) p.type == t);
+            m.addSubMenu ("Type", type);
+            m.addItem (3, "Copy pattern");
+        }
+        if (hasPatternClip) m.addItem (4, "Paste pattern here");
+        if (! p.isEmpty()) {
+            m.addItem (5, "Duplicate to the next free key");
+            m.addItem (8, "Move to the next key I press");
+        }
+        if (! p.notes.empty()) {
+            m.addItem (6, "Export as MIDI file...");
+            PopupMenu chain;
+            for (int c = 0; c < (int) s.chains.size() && c < 200; ++c) chain.addItem (2000 + c, "Add to " + (s.chains[(size_t) c].name.isNotEmpty() ? s.chains[(size_t) c].name : "Chain " + String (c + 1)));
+            m.addSubMenu ("Chains", chain);
+        }
+        if (! p.isEmpty()) m.addItem (7, "Clear");
         m.showMenuAsync (PopupMenu::Options().withMousePosition(), [this, k] (int r) {
             switch (r) {
                 case 1: st.song().editKey = k; refreshAll(); break;
@@ -1088,6 +1113,7 @@ private:
                           st.applySong ("Duplicate pattern", [k, d] (Song& s2) { s2.keys[(size_t) d] = s2.keys[(size_t) k]; s2.keys[(size_t) d].name += " copy"; s2.editKey = d; }); break; }
                 case 6: exportPattern (k); break;
                 case 7: st.applySong ("Clear key", [k] (Song& s2) { s2.keys[(size_t) k] = Pattern(); }); break;
+                case 8: learnFrom = k; learnSerial = proc.lastInSerial.load(); showToast ("Press the key on your keyboard where " + keyName (k) + "'s pattern should go"); break;
                 default:
                     if (r >= 10 && r < 14) { const int t = r - 10; st.applySong ("Pattern type", [k, t] (Song& s2) { s2.keys[(size_t) k].type = (PatternType) t; }); }
                     else if (r >= 2000 && r < 2200) { const int c = r - 2000; st.applySong ("Add to chain", [k, c] (Song& s2) { if (c < (int) s2.chains.size()) s2.chains[(size_t) c].steps.push_back ({ k, 1 }); }); showToast ("Added to the chain"); }

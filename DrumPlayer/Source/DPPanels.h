@@ -129,6 +129,15 @@ public:
         while (viewEnd >= hi && viewLow - 12 >= firstKey() && endFor (viewLow - 12) >= hi) { viewLow -= 12; viewEnd = endFor (viewLow); }
     }
     void scrollOctaves (int n) { viewLow += 12 * n; updateView(); repaint(); }
+    // the key you just pressed on your keyboard: jump to it and light it for a moment
+    void flash (int note)
+    {
+        if (note < firstKey() || note > st.song().settings.zoneHigh) return;
+        flashNote = note; flashUntil = Time::getMillisecondCounter() + 350;
+        ensureVisible (note);
+        Timer::callAfterDelay (400, [sp = Component::SafePointer<KeyStrip> (this)] { if (sp != nullptr) sp->repaint(); });
+    }
+    int flashNote = -1; uint32 flashUntil = 0;
     void ensureVisible (int k)
     {
         updateView();
@@ -282,6 +291,7 @@ private:
         }
         if (k == queued && blink) { g.setColour (th::blue.withAlpha (0.45f)); g.fillRoundedRectangle (r.reduced (1.0f), 3); }
         if (k == dropHover) { g.setColour (th::green.withAlpha (0.45f)); g.fillRoundedRectangle (r.reduced (1.0f), 3); }
+        if (k == flashNote && Time::getMillisecondCounter() < flashUntil) { g.setColour (th::text.withAlpha (0.45f)); g.fillRoundedRectangle (r.reduced (2.0f), 3); }
     }
 };
 
@@ -539,7 +549,8 @@ private:
         PopupMenu m;
         PopupMenu reps; for (int r : { 1, 2, 3, 4, 6, 8, 12, 16, 32 }) reps.addItem (100 + r, String (r) + (r == 1 ? " time" : " times"), true, chain().steps[(size_t) i].repeats == r);
         m.addSubMenu ("Repeats", reps);
-        m.addItem (1, "Move left", i > 0); m.addItem (2, "Move right", i < (int) chain().steps.size() - 1);
+        if (i > 0) m.addItem (1, "Move left");
+        if (i < (int) chain().steps.size() - 1) m.addItem (2, "Move right");
         m.addItem (3, "Duplicate"); m.addItem (4, "Remove");
         m.addSeparator(); m.addItem (5, "Edit this pattern");
         m.showMenuAsync (PopupMenu::Options().withMousePosition(), [this, i] (int r) {
@@ -560,7 +571,7 @@ private:
         m.addSubMenu ("Start from key", keys);
         m.addSeparator();
         m.addItem (2, "Rename this chain...");
-        m.addItem (3, "Delete this chain", st.song().chains.size() > 1);
+        if (st.song().chains.size() > 1) m.addItem (3, "Delete this chain");
         m.showMenuAsync (PopupMenu::Options().withTargetComponent (&keyBtn), [this] (int r) {
             if (r == 1) edit ("Chain key", [] (Chain& c) { c.triggerNote = -1; });
             else if (r >= 1000) { const int n = r - 1000; edit ("Chain key", [n] (Chain& c) { c.triggerNote = n; }); }
@@ -834,14 +845,22 @@ private:
     void menu (int i)
     {
         PopupMenu m;
-        const bool sel = anySelected();
-        m.addItem (1, "Edit this pattern", i >= 0);
-        m.addItem (2, "Duplicate  (D)", sel); m.addItem (3, "Split at the cursor  (Alt+X)"); m.addItem (4, "Mute / unmute  (M)", sel);
-        m.addItem (5, "Delete  (Del)", sel); m.addItem (6, "Copy  (Ctrl+C)", sel); m.addItem (7, "Paste at the cursor  (Ctrl+V)", ! clipboard.empty());
-        PopupMenu reps; for (int r : { 1, 2, 3, 4, 8 }) reps.addItem (100 + r, String (r) + (r == 1 ? " time" : " times"));
-        m.addSubMenu ("Length: pattern repeated", reps, sel);
-        m.addItem (8, "Make unique (its own copy of the pattern)", sel);
-        m.addItem (9, "Select all  (Ctrl+A)");
+        if (i >= 0) {
+            m.addItem (1, "Edit this pattern");
+            m.addItem (2, "Duplicate  (D)"); m.addItem (4, st.song().clips[(size_t) i].muted ? "Unmute  (M)" : "Mute  (M)");
+            m.addItem (5, "Delete  (Del)"); m.addItem (6, "Copy  (Ctrl+C)");
+            const auto& c = st.song().clips[(size_t) i];
+            if (cursorBeat > c.start + 1e-6 && cursorBeat < c.start + c.length - 1e-6) m.addItem (3, "Split at the cursor  (Alt+X)");
+            PopupMenu reps; for (int r : { 1, 2, 3, 4, 8 }) reps.addItem (100 + r, String (r) + (r == 1 ? " time" : " times"));
+            m.addSubMenu ("Length: pattern repeated", reps);
+            m.addItem (8, "Make unique (its own copy of the pattern)");
+        } else {
+            if (! clipboard.empty()) m.addItem (7, "Paste at the cursor  (Ctrl+V)");
+            if (! st.song().clips.empty()) m.addItem (9, "Select all  (Ctrl+A)");
+            bool cut = false; for (auto& c : st.song().clips) cut |= cursorBeat > c.start + 1e-6 && cursorBeat < c.start + c.length - 1e-6;
+            if (cut) m.addItem (3, "Split chunks at the cursor  (Alt+X)");
+            if (m.getNumItems() == 0) { m.addItem (-1, "Drag keys from the keyboard here to arrange a song", false); }
+        }
         const int key = i >= 0 ? st.song().clips[(size_t) i].key : -1;
         m.showMenuAsync (PopupMenu::Options().withMousePosition(), [this, key] (int r) {
             switch (r) {

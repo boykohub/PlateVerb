@@ -348,6 +348,8 @@ private:
 };
 
 // ---------------------------------------------------------------- the note grid
+inline int anySelectedCount (const Pattern& p) { int c = 0; for (auto& n : p.notes) c += n.selected ? 1 : 0; return c; }
+
 class NoteGrid : public Component
 {
 public:
@@ -730,42 +732,44 @@ private:
         const int row = (e.y + st.scrollY) / st.laneH;
         const int laneNote = (row >= 0 && row < (int) lanes.size()) ? lanes[(size_t) row] : -1;
         int clickedVel = -1;
-        if (auto* n = hit (e.position)) { clickedVel = n->velocity; if (! n->selected) { selectAll (p, false); n->selected = true; st.publish(); } }
-        const bool sel = anySelected (p);
+        auto* hitNote = hit (e.position);
+        if (hitNote != nullptr) { clickedVel = hitNote->velocity; if (! hitNote->selected) { selectAll (p, false); hitNote->selected = true; st.publish(); } }
         PopupMenu m;
-        m.addSectionHeader ("TOOL");
-        static const char* tn[] = { "Select (arrow)", "Draw (pencil)", "Erase", "Split (scissors)", "Paint brush", "Mute", "Line (velocity ramps)" };
-        for (int t = 0; t < 7; ++t) m.addItem (900 + t, tn[t], true, (int) st.tool == t && ! st.stamping);
-        if (st.lastAction) {
+        if (hitNote != nullptr) {
+            // on a note: only what can be done to notes
+            m.addItem (1, "Delete"); m.addItem (2, "Duplicate  (D)"); m.addItem (3, "Copy"); m.addItem (6, hitNote->probability == 0 ? "Unmute" : "Mute  (M)");
+            if (st.lastAction) m.addItem (950, "Repeat \"" + st.lastName + "\"  (Ctrl+R)");
+            PopupMenu vel; for (int v : { 127, 112, 100, 90, 80, 64, 48, 32 }) vel.addItem (300 + v, String (v), true, clickedVel == v);
+            vel.addSeparator(); vel.addItem (16, "Curve (sine, triangle, ramps)..."); vel.addItem (10, "Louder +10"); vel.addItem (11, "Softer -10");
+            vel.addItem (12, "Ramp up"); vel.addItem (13, "Ramp down"); vel.addItem (14, "Accent the beats"); vel.addItem (15, "Randomize");
+            m.addSubMenu ("Velocity", vel);
+            PopupMenu prob; for (int v : { 100, 90, 75, 50, 33, 25, 10 }) prob.addItem (100 + v, String (v) + "%", true, hitNote->probability == v);
+            m.addSubMenu ("Chance to play", prob);
+            PopupMenu len; for (int vi : { 0, 1, 3, 5, 7, 9 }) len.addItem (700 + vi, noteValues[vi].name);
+            m.addSubMenu ("Note length", len);
+            PopupMenu tm;
+            tm.addItem (20, String ("Quantize to ") + (st.grid >= 0 ? noteValues[st.grid].name : "1/16"));
+            tm.addItem (21, "Humanize"); tm.addItem (23, "Nudge left"); tm.addItem (24, "Nudge right");
+            if (anySelectedCount (p) > 1) { tm.addItem (22, "Reverse"); tm.addItem (25, "Double speed"); tm.addItem (26, "Half speed"); }
+            m.addSubMenu ("Timing", tm);
+            PopupMenu drums; for (auto& l : st.song().lanes) if (l.note != hitNote->note) drums.addItem (1000 + l.note, l.name + "  (" + String (l.note) + ")");
+            m.addSubMenu ("Move to drum", drums);
+            PopupMenu se; se.addItem (33, "All in this lane"); se.addItem (34, "All with this velocity"); se.addItem (35, "Every 2nd note in this lane"); se.addItem (32, "Invert");
+            m.addSubMenu ("Select", se);
+            if (st.lastAction) m.addItem (951, "Click notes to apply \"" + st.lastName + "\"", true, st.stamping);
+        } else {
+            // on empty space: tools, paste, selecting, and the pattern itself
+            m.addSectionHeader ("TOOL");
+            static const char* tn[] = { "Select (arrow)  1", "Draw (pencil)  5", "Erase  4", "Split (scissors)  3", "Paint brush  7", "Mute  6", "Line (velocity ramps)  2" };
+            for (int t = 0; t < 7; ++t) m.addItem (900 + t, tn[t], true, (int) st.tool == t && ! st.stamping);
             m.addSeparator();
-            m.addItem (950, "Repeat \"" + st.lastName + "\" on the selection  (Ctrl+R)", sel);
-            m.addItem (951, "Click notes to apply \"" + st.lastName + "\"  (Esc ends)", true, st.stamping);
+            if (! st.clipboard.empty()) m.addItem (4, "Paste here  (Ctrl+V)");
+            if (! p.notes.empty()) { m.addItem (30, "Select all  (Ctrl+A)"); if (laneNote >= 0) m.addItem (33, "Select all in this lane"); }
+            if (anySelected (p)) { m.addItem (31, "Select none"); if (st.lastAction) m.addItem (950, "Repeat \"" + st.lastName + "\" on the selection"); }
+            if (st.lastAction) m.addItem (951, "Click notes to apply \"" + st.lastName + "\"", true, st.stamping);
+            m.addSeparator();
+            m.addItem (5, "Split the pattern here (scissors)");
         }
-        m.addSectionHeader ("NOTES");
-        m.addItem (1, "Delete", sel); m.addItem (2, "Duplicate", sel); m.addItem (3, "Copy", sel); m.addItem (4, "Paste here", ! st.clipboard.empty());
-        m.addItem (6, "Mute / unmute", sel);
-        PopupMenu vel; for (int v : { 127, 112, 100, 90, 80, 64, 48, 32 }) vel.addItem (300 + v, String (v));
-        vel.addSeparator(); vel.addItem (16, "Curve (sine, triangle, ramps)..."); vel.addItem (10, "Louder +10"); vel.addItem (11, "Softer -10"); vel.addItem (12, "Ramp up"); vel.addItem (13, "Ramp down");
-        vel.addItem (14, "Accent the beats"); vel.addItem (15, "Randomize");
-        m.addSubMenu ("Velocity", vel, sel);
-        PopupMenu prob; for (int v : { 100, 90, 75, 50, 33, 25, 10, 0 }) prob.addItem (100 + v, String (v) + "%" + (v == 0 ? "  (muted)" : ""));
-        m.addSubMenu ("Chance to play", prob, sel);
-        PopupMenu len; for (int vi : { 0, 1, 3, 5, 7, 9 }) len.addItem (700 + vi, noteValues[vi].name);
-        m.addSubMenu ("Note length", len, sel);
-        PopupMenu tm;
-        tm.addItem (20, String ("Quantize to ") + (st.grid >= 0 ? noteValues[st.grid].name : "1/16"));
-        tm.addItem (21, "Humanize"); tm.addItem (22, "Reverse"); tm.addItem (23, "Nudge left"); tm.addItem (24, "Nudge right");
-        tm.addItem (25, "Double speed"); tm.addItem (26, "Half speed");
-        m.addSubMenu ("Timing", tm, sel);
-        PopupMenu drums; for (auto& l : st.song().lanes) drums.addItem (1000 + l.note, l.name + "  (" + String (l.note) + ")");
-        m.addSubMenu ("Move to drum", drums, sel);
-        PopupMenu se;
-        se.addItem (30, "All"); se.addItem (31, "None"); se.addItem (32, "Invert");
-        se.addItem (33, "All in this lane", laneNote >= 0); se.addItem (34, "All with this velocity", clickedVel > 0);
-        se.addItem (35, "Every 2nd note in this lane", laneNote >= 0);
-        m.addSubMenu ("Select", se);
-        m.addSectionHeader ("PATTERN");
-        m.addItem (5, "Split pattern here (scissors)");
         st.cursorTick = st.snapFloor (st.xToTick ((float) e.x));
         const int splitTick = st.snapRound (st.xToTick ((float) e.x));
         const int g = st.gridTicks() > 1 ? st.gridTicks() : 240;
