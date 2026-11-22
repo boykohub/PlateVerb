@@ -41,7 +41,12 @@ public:
         d.createDirectory();
         return d.getChildFile ("Theme.xml");
     }
-    void save() const
+    // named looks you can keep and go back to
+    File looksFolder() const { auto d = file().getParentDirectory().getChildFile ("Looks"); d.createDirectory(); return d; }
+    bool saveAs (const String& name) const { auto f = looksFolder().getChildFile (File::createLegalFileName (name) + ".xml"); writeTo (f); return f.existsAsFile(); }
+    void loadFrom (const File& f) { readFrom (f); changed(); }
+    void save() const { writeTo (file()); }
+    void writeTo (const File& target) const
     {
         XmlElement x ("DrumPlayerTheme");
         for (auto& [id, e] : els) {
@@ -50,12 +55,13 @@ public:
             c->setAttribute ("c0", e.c0.toString()); c->setAttribute ("c1", e.c1.toString()); c->setAttribute ("c2", e.c2.toString());
             c->setAttribute ("d3", e.threeD); c->setAttribute ("depth", e.depth); c->setAttribute ("font", e.fontSize);
         }
-        x.writeTo (file());
+        x.writeTo (target);
     }
-    void load()
+    void load() { readFrom (file()); }
+    void readFrom (const File& source)
     {
         els.clear();
-        if (auto x = XmlDocument::parse (file()))
+        if (auto x = XmlDocument::parse (source))
             for (auto* c : x->getChildIterator()) {
                 ThemeEl e;
                 e.custom = c->getBoolAttribute ("custom");

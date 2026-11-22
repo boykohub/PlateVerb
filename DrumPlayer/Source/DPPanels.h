@@ -1309,7 +1309,28 @@ public:
             AlertWindow::showOkCancelBox (MessageBoxIconType::QuestionIcon, "Reset every look", "Go back to the designed look everywhere?", "Reset", "Cancel", this,
                 ModalCallbackFunction::create ([this] (int r) { if (r == 1) { Theme::get().resetAll(); show(); if (onChanged) onChanged(); } }));
         };
-        setupLabel (*this, help, "Pick a part on the left. Its own settings win over \"Buttons\" and \"Labels\", which style all of them at once.", 10.5f, th::faint);
+        setupButton (*this, saveLook, "Save look as..."); saveLook.onClick = [this] {
+            auto* aw = new AlertWindow ("Save look", "A name for this look:", MessageBoxIconType::NoIcon);
+            aw->addTextEditor ("n", "My look");
+            aw->addButton ("Save", 1, KeyPress (KeyPress::returnKey)); aw->addButton ("Cancel", 0, KeyPress (KeyPress::escapeKey));
+            aw->enterModalState (true, ModalCallbackFunction::create ([aw] (int r) { if (r == 1) Theme::get().saveAs (aw->getTextEditorContents ("n").trim()); }), true);
+        };
+        setupButton (*this, loadLook, "Looks..."); loadLook.onClick = [this] {
+            PopupMenu m;
+            m.addItem (1, "Original look (as designed)");
+            auto files = Theme::get().looksFolder().findChildFiles (File::findFiles, false, "*.xml"); files.sort();
+            if (! files.isEmpty()) m.addSeparator();
+            for (int i = 0; i < files.size(); ++i) m.addItem (100 + i, files[i].getFileNameWithoutExtension());
+            if (! files.isEmpty()) { PopupMenu del; for (int i = 0; i < files.size(); ++i) del.addItem (1000 + i, files[i].getFileNameWithoutExtension()); m.addSubMenu ("Delete a saved look", del); }
+            m.showMenuAsync (PopupMenu::Options().withTargetComponent (&loadLook), [this, files] (int r) {
+                if (r == 1) Theme::get().resetAll();
+                else if (r >= 100 && r < 1000) Theme::get().loadFrom (files[r - 100]);
+                else if (r >= 1000) files[r - 1000].deleteFile();
+                else return;
+                show(); list.repaint(); if (onChanged) onChanged();
+            });
+        };
+        setupLabel (*this, help, "Pick a part on the left. Its own settings win over \"Buttons\" and \"Labels\", which style all of them at once. Your changes are kept automatically; save a look to come back to it.", 10.5f, th::faint);
         help.setJustificationType (Justification::topLeft);
     }
     void refreshList()
@@ -1341,7 +1362,9 @@ public:
         r = a.removeFromTop (26); lFont.setBounds (r.removeFromLeft (62)); fontSz.setBounds (r);
         a.removeFromTop (10);
         r = a.removeFromTop (26); resetOne.setBounds (r.removeFromLeft (resetOne.getWidth()).reduced (0, 2)); r.removeFromLeft (8); resetAll.setBounds (r.removeFromLeft (resetAll.getWidth()).reduced (0, 2));
-        a.removeFromTop (8); help.setBounds (a.removeFromTop (44));
+        a.removeFromTop (6);
+        r = a.removeFromTop (26); saveLook.setBounds (r.removeFromLeft (saveLook.getWidth()).reduced (0, 2)); r.removeFromLeft (8); loadLook.setBounds (r.removeFromLeft (loadLook.getWidth()).reduced (0, 2));
+        a.removeFromTop (8); help.setBounds (a.removeFromTop (58));
     }
 private:
     struct Swatch : public Component
@@ -1367,7 +1390,7 @@ private:
     };
 
     ListBox list; Label name, lDepth, lFont, help;
-    TextButton useMine, d3, resetOne, resetAll;
+    TextButton useMine, d3, resetOne, resetAll, saveLook, loadLook;
     OwnedArray<Swatch> swatches;
     FineSlider depth, fontSz;
     StringArray items, ids;
