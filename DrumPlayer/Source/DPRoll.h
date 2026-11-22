@@ -740,7 +740,10 @@ private:
             m.addItem (1, "Delete"); m.addItem (2, "Duplicate  (D)"); m.addItem (3, "Copy"); m.addItem (6, hitNote->probability == 0 ? "Unmute" : "Mute  (M)");
             if (st.lastAction) m.addItem (950, "Repeat \"" + st.lastName + "\"  (Ctrl+R)");
             PopupMenu vel; for (int v : { 127, 112, 100, 90, 80, 64, 48, 32 }) vel.addItem (300 + v, String (v), true, clickedVel == v);
-            vel.addSeparator(); vel.addItem (16, "Curve (sine, triangle, ramps)..."); vel.addItem (10, "Louder +10"); vel.addItem (11, "Softer -10");
+            vel.addSeparator();
+            vel.addItem (17, String ("Alternate the lane from this note (") + (clickedVel < 64 ? "low-high" : "high-low") + ")");
+            vel.addItem (18, String ("Alternate in pairs from this note (") + (clickedVel < 64 ? "low-low-high-high" : "high-high-low-low") + ")");
+            vel.addItem (16, "Curve (sine, triangle, ramps)..."); vel.addItem (10, "Louder +10"); vel.addItem (11, "Softer -10");
             vel.addItem (12, "Ramp up"); vel.addItem (13, "Ramp down"); vel.addItem (14, "Accent the beats"); vel.addItem (15, "Randomize");
             m.addSubMenu ("Velocity", vel);
             PopupMenu prob; for (int v : { 100, 90, 75, 50, 33, 25, 10 }) prob.addItem (100 + v, String (v) + "%", true, hitNote->probability == v);
@@ -803,6 +806,20 @@ private:
                 case 13: st.apply ("Ramp down", [] (Pattern& q) { velocityRamp (q, 120, 40, 0.0); }); break;
                 case 14: act ("Accent the beats", [] (Pattern& q) { for (auto* n : targetNotes (q)) n->velocity = n->tick % PPQ == 0 ? 116 : (n->tick % (PPQ / 2) == 0 ? 88 : 66); }); break;
                 case 16: if (st.openCurve) st.openCurve(); break;
+                case 17: case 18: {
+                    // the clicked note sets one level; its neighbours get the other, alternating through the whole lane
+                    const int v = clickedVel, other = v < 64 ? jmin (127, v + 50) : jmax (1, v - 50);
+                    const int group = r == 17 ? 1 : 2, lane = hitLane, at = hitTick;
+                    act (r == 17 ? "Alternate velocities" : "Alternate velocities in pairs", [v, other, group, lane, at] (Pattern& q) {
+                        std::vector<Note*> ln; for (auto& n : q.notes) if (n.note == lane) ln.push_back (&n);
+                        int me = 0; for (int i = 0; i < (int) ln.size(); ++i) if (ln[(size_t) i]->tick == at) me = i;
+                        for (int i = 0; i < (int) ln.size(); ++i) {
+                            const int d = i - me, step = (d >= 0 ? d / group : -((-d + group - 1) / group));
+                            ln[(size_t) i]->velocity = (std::abs (step) % 2 == 0) ? v : other;
+                        }
+                    });
+                    break;
+                }
                 case 15: act ("Randomize velocity", [] (Pattern& q) { std::mt19937 rr ((uint32) Time::getMillisecondCounter()); randomizeVelocity (q, 60, 120, rr); }); break;
                 case 20: act (String ("Quantize ") + noteValues[gi].name, [gi] (Pattern& q) { QuantOptions o; o.valueIndex = gi; quantize (q, o); }); break;
                 case 21: act ("Humanize", [] (Pattern& q) { std::mt19937 rr ((uint32) Time::getMillisecondCounter()); humanizeBake (q, 12, 12, rr); }); break;
