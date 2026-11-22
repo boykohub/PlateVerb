@@ -31,7 +31,9 @@ public:
     }
     ThemeEl& edit (const String& id) { return els[id]; }
     void reset (const String& id) { els.erase (id); changed(); }
-    void resetAll() { els.clear(); changed(); }
+    void resetAll() { els.clear(); textScale = 1.0f; buttonScale = 1.0f; changed(); }
+    float textScale = 1.0f;               // every text at once: 0.7 … 1.6
+    float buttonScale = 1.0f;             // every button's height at once: 0.8 … 1.6
     void changed() { ++version; save(); }
     int version = 0;
 
@@ -49,6 +51,7 @@ public:
     void writeTo (const File& target) const
     {
         XmlElement x ("DrumPlayerTheme");
+        x.setAttribute ("textScale", textScale); x.setAttribute ("buttonScale", buttonScale);
         for (auto& [id, e] : els) {
             auto* c = x.createNewChildElement ("E");
             c->setAttribute ("id", id); c->setAttribute ("custom", e.custom);
@@ -61,7 +64,10 @@ public:
     void readFrom (const File& source)
     {
         els.clear();
-        if (auto x = XmlDocument::parse (source))
+        textScale = 1.0f; buttonScale = 1.0f;
+        if (auto x = XmlDocument::parse (source)) {
+            textScale = (float) jlimit (0.7, 1.6, x->getDoubleAttribute ("textScale", 1.0));
+            buttonScale = (float) jlimit (0.8, 1.6, x->getDoubleAttribute ("buttonScale", 1.0));
             for (auto* c : x->getChildIterator()) {
                 ThemeEl e;
                 e.custom = c->getBoolAttribute ("custom");
@@ -72,6 +78,7 @@ public:
                 e.fontSize = (float) c->getDoubleAttribute ("font", 0.0);
                 els[c->getStringAttribute ("id")] = e;
             }
+        }
         ++version;
     }
     std::map<String, ThemeEl> els;

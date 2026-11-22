@@ -1290,6 +1290,17 @@ public:
         addAndMakeVisible (list); list.setModel (this); list.setRowHeight (22);
         list.setColour (ListBox::backgroundColourId, Colours::black.withAlpha (0.2f));
         setupLabel (*this, name, "", 13.0f, th::amber);
+        setupLabel (*this, lAll, "All text", 11.5f, th::amber);
+        setupSlider (*this, allText, th::amber); allText.setRange (70, 160, 1); allText.setTextValueSuffix (" %");
+        allText.setValue (Theme::get().textScale * 100.0, dontSendNotification);
+        allButtons.setValue (Theme::get().buttonScale * 100.0, dontSendNotification);
+        allText.setTooltip ("Makes every text in Drum Player bigger or smaller at once; each part's own size still applies on top");
+        allText.onValueChange = [this] { if (loading) return; Theme::get().textScale = (float) allText.getValue() / 100.0f; Theme::get().changed(); if (onChanged) onChanged(); };
+        setupLabel (*this, lAllB, "All buttons", 11.5f, th::amber);
+        setupSlider (*this, allButtons, th::amber); allButtons.setRange (80, 160, 1); allButtons.setTextValueSuffix (" %");
+        allButtons.setValue (Theme::get().buttonScale * 100.0, dontSendNotification);
+        allButtons.setTooltip ("Makes every button bigger or smaller at once");
+        allButtons.onValueChange = [this] { if (loading) return; Theme::get().buttonScale = (float) allButtons.getValue() / 100.0f; Theme::get().changed(); if (onChanged) onChanged(); };
         setupButton (*this, useMine, "Use my colours", true);
         useMine.onClick = [this] { auto& e = el(); if (useMine.getToggleState() && ! e.custom) seed (e); e.custom = useMine.getToggleState(); changed(); };
         for (int i = 0; i < 3; ++i) {
@@ -1360,6 +1371,8 @@ public:
     void resized() override
     {
         auto a = getLocalBounds();
+        { auto r = a.removeFromTop (26); lAll.setBounds (r.removeFromLeft (80)); allText.setBounds (r.removeFromLeft (240)); a.removeFromTop (4); }
+        { auto r = a.removeFromTop (26); lAllB.setBounds (r.removeFromLeft (80)); allButtons.setBounds (r.removeFromLeft (240)); a.removeFromTop (6); }
         list.setBounds (a.removeFromLeft (200)); a.removeFromLeft (12);
         name.setBounds (a.removeFromTop (24)); a.removeFromTop (2);
         useMine.setBounds (a.removeFromTop (26).removeFromLeft (useMine.getWidth()).reduced (0, 2)); a.removeFromTop (6);
@@ -1421,6 +1434,7 @@ private:
 
     ListBox list; Label name, lDepth, lFont, help;
     TextButton useMine, d3, resetOne, resetAll, saveLook, loadLook;
+    Label lAll, lAllB; FineSlider allText, allButtons;
     OwnedArray<Swatch> swatches;
     FineSlider depth, fontSz;
     StringArray items, ids;
@@ -1452,6 +1466,7 @@ private:
         const Colour c[3] = { e->c0, e->c1, e->c2 };
         for (int i = 0; i < 3; ++i) { swatches[i]->colour = c[i]; swatches[i]->enabled = e->custom; swatches[i]->repaint(); }
         d3.setToggleState (e->threeD, dontSendNotification);
+        allText.setValue (Theme::get().textScale * 100.0, dontSendNotification);
         depth.setValue (e->depth, dontSendNotification); fontSz.setValue (e->fontSize, dontSendNotification);
         loading = false;
     }

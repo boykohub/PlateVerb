@@ -47,11 +47,13 @@ inline Font font (float h, int weight = 1)
 {
     auto& f = Fonts::get();
     auto tf = weight <= 0 ? f.reg : weight == 1 ? f.med : weight == 2 ? f.semi : f.bold;
-    return Font (FontOptions (tf).withHeight (h));
+    return Font (FontOptions (tf).withHeight (h * Theme::get().textScale));     // "All text" size applies everywhere
 }
 inline float textWidth (const Font& f, const String& s) { return GlyphArrangement::getStringWidth (f, s); }
 
-constexpr int btnH = 22;
+// button height follows the "All buttons" size in the Look editor
+struct ButtonHeight { operator int() const { return (int) std::round (22.0f * Theme::get().buttonScale); } };
+inline const ButtonHeight btnH {};
 
 class DPLnF : public LookAndFeel_V4
 {
@@ -154,8 +156,9 @@ public:
     Font getLabelFont (Label& l) override
     {
         auto f = l.getFont();
+        const float base = (float) (double) l.getProperties().getWithDefault ("baseH", f.getHeight() / Theme::get().textScale);
         const float h = Theme::get().fontFor ("txt:" + l.getComponentID(), "Labels", 0.0f);
-        return h > 0 ? f.withHeight (h) : f;
+        return f.withHeight ((h > 0 ? h : base) * Theme::get().textScale);
     }
     void positionComboBoxText (ComboBox& b, Label& l) override
     {
@@ -222,7 +225,7 @@ public:
 };
 
 // ---------------------------------------------------------------- small helpers
-inline int fitW (const String& t, int minW = 0) { return jmax (minW, (int) std::ceil (textWidth (font (12.0f, 2), t)) + 16); }
+inline int fitW (const String& t, int minW = 0) { return jmax (minW, (int) std::ceil (textWidth (font (12.0f, 2), t) + 16.0f * Theme::get().buttonScale)); }
 
 inline void setupButton (Component& parent, TextButton& b, const String& text, bool toggle = false, const String& tip = {})
 {
@@ -245,6 +248,7 @@ inline void setupCombo (Component& parent, ComboBox& c, const StringArray& items
 inline void setupLabel (Component& parent, Label& l, const String& text, float size = 11.5f, Colour c = th::dim)
 {
     l.setText (text, dontSendNotification); l.setFont (font (size, 2)); l.setColour (Label::textColourId, c);
+    l.getProperties().set ("baseH", size);
     if (l.getComponentID().isEmpty()) l.setComponentID (text.upToFirstOccurrenceOf ("\n", false, false).substring (0, 40));
     l.setJustificationType (Justification::centredLeft); l.setInterceptsMouseClicks (false, false);
     parent.addAndMakeVisible (l);

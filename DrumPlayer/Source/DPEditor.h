@@ -235,7 +235,7 @@ public:
             walk (body);
             return out;
         };
-        setPage.look.onChanged = [this] { repaintEverything (body); };
+        setPage.look.onChanged = [this] { refitButtons (body); layout(); relayoutAll (body); repaintEverything (body); };
         presetPage.onImport = [this] { importDialog(); };
         body.addChildComponent (exchange);
         exchange.addAndMakeVisible (bigStrip); exchange.addAndMakeVisible (bigTray);
@@ -566,7 +566,7 @@ private:
         auto a = body.getLocalBounds().reduced (10, 6);
         menuBar.setBounds (a.removeFromTop (20)); a.removeFromTop (4);
         // header
-        auto h = a.removeFromTop (30);
+        auto h = a.removeFromTop (jmax (30, (int) btnH + 8));
         headerArea = h;
         headerTitle = h.removeFromLeft (170);
         RowPlacer hp (h, 5);
@@ -582,10 +582,10 @@ private:
         ks.removeFromRight (8);
         strip.setBounds (ks);
         a.removeFromTop (5);
-        chainStrip.setBounds (a.removeFromTop (32));
+        chainStrip.setBounds (a.removeFromTop (jmax (32, (int) btnH + 10)));
         a.removeFromTop (7);
         // toolbar 1
-        auto t1 = a.removeFromTop (28);
+        auto t1 = a.removeFromTop (jmax (28, (int) btnH + 6));
         toolArea = t1;
         RowPlacer r1 (t1, 5);
         r1.place (nameEd, 150); r1.place (typeBox, 84); r1.skip (6);
@@ -595,7 +595,7 @@ private:
         r1.place (undoBtn); r1.place (redoBtn);
         a.removeFromTop (4);
         // toolbar 2
-        auto t2 = a.removeFromTop (28);
+        auto t2 = a.removeFromTop (jmax (28, (int) btnH + 6));
         toolArea = toolArea.getUnion (t2);
         RowPlacer r2 (t2, 5);
         r2.place (lSwing, 40); r2.place (swingPreset, 104); r2.place (swingSlider, 190); r2.place (swingValue, 66); r2.skip (10);
@@ -785,6 +785,16 @@ private:
     uint32 lastNotesSent = 0, lastStatusMs = 0;
     int learnFrom = -1, learnSerial = 0;
 
+    // after a text size change, buttons grow or shrink to fit their words
+    static void refitButtons (Component& c)
+    {
+        for (auto* ch : c.getChildren()) {
+            if (auto* b = dynamic_cast<TextButton*> (ch); b != nullptr && b->getComponentID().isNotEmpty())
+                b->setSize (b->getWidth() > 30 ? fitW (b->getButtonText()) : b->getWidth(), btnH);
+            refitButtons (*ch);
+        }
+    }
+    static void relayoutAll (Component& c) { for (auto* ch : c.getChildren()) { ch->resized(); relayoutAll (*ch); } }
     static void repaintEverything (Component& c) { c.repaint(); for (auto* ch : c.getChildren()) repaintEverything (*ch); }
     void showToast (const String& t) { toast.text = t; toast.until = Time::getMillisecondCounter() + 2600; toast.toFront (false); toast.repaint(); }
 
