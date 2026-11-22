@@ -60,7 +60,7 @@ public:
         publish();
         startTimerHz (20);
     }
-    ~DrumPlayerProcessor() override { stopTimer(); saveLastSession(); }
+    ~DrumPlayerProcessor() override { *aliveFlag = false; stopTimer(); saveLastSession(); }
 
     // ---------------------------------------------------------------- AudioProcessor
     const String getName() const override { return "Drum Player"; }
@@ -82,16 +82,32 @@ public:
     bool hasEditor() const override { return true; }
     AudioProcessorEditor* createEditor() override;
 
+    // Studio One may ask for the state on any thread, while the editor is changing patterns:
+    // build it from the published copy, which never changes once made.
     void getStateInformation (MemoryBlock& dest) override
     {
-        auto x = stateXml();
+        std::shared_ptr<const Song> snap;
+        { SpinLock::ScopedLockType l (liveLock); snap = live; }
+        auto x = stateXmlFor (snap != nullptr ? *snap : Song::makeDefault());
         copyXmlToBinary (*x, dest);
-        saveLastSession();
     }
     void setStateInformation (const void* data, int size) override
     {
-        if (auto x = getXmlFromBinary (data, size)) {
-            if (! x->hasTagName ("DrumPlayerState")) return;
+        auto x = getXmlFromBinary (data, size);
+        if (x == nullptr || ! x->hasTagName ("DrumPlayerState")) return;
+        if (! MessageManager::existsAndIsCurrentThread()) {       // apply it on the editing thread
+            std::weak_ptr<bool> alive = aliveFlag;
+            std::shared_ptr<XmlElement> xs (x.release());
+            MessageManager::callAsync ([this, alive, xs] { if (alive.lock() != nullptr) applyState (*xs); });
+            return;
+        }
+        applyState (*x);
+    }
+    std::shared_ptr<bool> aliveFlag = std::make_shared<bool> (true);
+    void applyState (const XmlElement& xr)
+    {
+        const XmlElement* x = &xr;
+        {
             if (auto* sx = x->getChildByName ("DrumPlayerSong")) edit = songFromXml (*sx);
             if (auto* px = x->getChildByName (apvts.state.getType())) apvts.replaceState (ValueTree::fromXml (*px));
             restoreUi (*x);
@@ -101,13 +117,15 @@ public:
         }
     }
 
-    std::unique_ptr<XmlElement> stateXml() const
+    std::unique_ptr<XmlElement> stateXml() const { return stateXmlFor (edit); }
+    std::unique_ptr<XmlElement> stateXmlFor (const Song& song) const
     {
         auto x = std::make_unique<XmlElement> ("DrumPlayerState");
-        x->addChildElement (songToXml (edit).release());
+        x->addChildElement (songToXml (song).release());
         if (auto px = const_cast<AudioProcessorValueTreeState&> (apvts).copyState().createXml()) x->addChildElement (px.release());
         auto* ui = x->createNewChildElement ("UI");
-        ui->setAttribute ("scale", uiScale); ui->setAttribute ("preset", presetName); ui->setAttribute ("grid", uiGrid);
+        String pn; { const ScopedLock l (uiLock); pn = presetName; }
+        ui->setAttribute ("scale", uiScale); ui->setAttribute ("preset", pn); ui->setAttribute ("grid", uiGrid);
         ui->setAttribute ("zoomX", uiZoomX);
         return x;
     }
@@ -115,7 +133,7 @@ public:
     {
         if (auto* ui = x.getChildByName ("UI")) {
             uiScale = (float) jlimit (0.6, 2.0, ui->getDoubleAttribute ("scale", 1.0));
-            presetName = ui->getStringAttribute ("preset");
+            { const ScopedLock l (uiLock); presetName = ui->getStringAttribute ("preset"); }
             uiGrid = jlimit (0, numNoteValues - 1, ui->getIntAttribute ("grid", 3));
             uiZoomX = (float) jlimit (0.25, 8.0, ui->getDoubleAttribute ("zoomX", 1.0));
         }
@@ -131,7 +149,7 @@ public:
     {
         auto x = stateXml();
         if (! x->writeTo (f)) return false;
-        presetName = f.getFileNameWithoutExtension();
+        { const ScopedLock l (uiLock); presetName = f.getFileNameWithoutExtension(); }
         return true;
     }
     bool loadPreset (const File& f)
@@ -144,7 +162,7 @@ public:
         s.settings = edit.settings;                  // routing and keyboard setup stay as they are
         commit (std::move (s), "Load preset");
         if (auto* px = x->getChildByName (apvts.state.getType())) apvts.replaceState (ValueTree::fromXml (*px));
-        presetName = f.getFileNameWithoutExtension();
+        { const ScopedLock l (uiLock); presetName = f.getFileNameWithoutExtension(); }
         stateVersion++;
         return true;
     }
@@ -152,7 +170,7 @@ public:
     // ---------------------------------------------------------------- editing (message thread)
     Song edit;                         // the editor's working copy
     UndoManager undo { 1000, 100 };
-    String presetName;
+    String presetName; CriticalSection uiLock;
     float uiScale = 1.0f, uiZoomX = 1.0f; int uiGrid = 3;
     std::atomic<int> stateVersion { 0 };
 
@@ -194,6 +212,8 @@ public:
     void uiPlayChain (int c) { pushCmd (CmdChain, c); }
     void uiPreview (int note) { pushCmd (CmdPreview, note); }
     void uiRecord (bool start, int key) { pushCmd (start ? CmdRecStart : CmdRecStop, key); }
+    void uiSongPlay (bool start, double fromBeat) { pushCmd (start ? CmdSongPlay : CmdSongStop, (int) std::round (fromBeat * 100)); }
+    std::atomic<double> songBeatUi { -1.0 };          // song lane playhead (beats), -1 = not playing
     std::atomic<bool> recArmed { false };            // true while counting in or recording
     std::atomic<int> recStateUi { 0 };               // 0 off, 1 counting in, 2 recording
     std::atomic<int> recSession { 0 };
@@ -321,6 +341,8 @@ private:
         sendControllers (out);
         lastStagSample = -1000000;
 
+        if (playing && ! wasPlayingSong && S->songMode) { songPlaying = false; stopNow (out, 0); }   // the song follows Studio One
+        wasPlayingSong = playing;
         // UI commands land at the start of the block
         int cs1, cn1, cs2, cn2;
         cmdFifo.prepareToRead (cmdFifo.getNumReady(), cs1, cn1, cs2, cn2);
@@ -353,7 +375,8 @@ private:
         midi.swapWith (out);
         lastPpqEnd = ppqEnd;
         if (! playing) internalPpq = ppqEnd;
-        playingKey = cur.key;
+        playingKey = songOn() ? songKeyNow : cur.key;
+        if (! songOn()) songBeatUi = -1.0;
         queuedKey = queued.active ? queued.key : -2;
         chainPlaying = chain; chainStep = chainIdx;
         if (cur.key >= 0) playRelTicks = (ppqEnd - cur.start) * PPQ;
@@ -373,7 +396,7 @@ private:
     }
     bool inTime() const { return S->settings.startQuant == StartQuant::InTime; }
     struct Off { double ppq; int note, ch; };
-    enum CmdType { CmdNoteOn = 1, CmdNoteOff, CmdStop, CmdChain, CmdPreview, CmdRecStart, CmdRecStop };
+    enum CmdType { CmdNoteOn = 1, CmdNoteOff, CmdStop, CmdChain, CmdPreview, CmdRecStart, CmdRecStop, CmdSongPlay, CmdSongStop };
     struct Cmd { int type = 0, value = 0; };
     struct RecNote { int key, tick, note, vel; };
 
@@ -544,7 +567,9 @@ private:
     {
         if (c.type == CmdNoteOn) triggerKey (c.value, now);
         else if (c.type == CmdNoteOff) { if (! S->settings.latch && (c.value == cur.key || (queued.active && c.value == queued.key))) { stopNow (out, 0); chain = -1; } }
-        else if (c.type == CmdStop) { stopNow (out, 0); chain = -1; }
+        else if (c.type == CmdStop) { stopNow (out, 0); chain = -1; songPlaying = false; }
+        else if (c.type == CmdSongPlay) { stopNow (out, 0); chain = -1; songPlaying = true; songOrigin = now - c.value / 100.0; }
+        else if (c.type == CmdSongStop) { songPlaying = false; flushOffs (out, 0, true); }
         else if (c.type == CmdRecStart) startRecording (c.value, now);
         else if (c.type == CmdRecStop) { if (recState == 1) { queued = {}; } recState = 0; }
         else if (c.type == CmdChain) { if (c.value >= 0 && c.value < (int) S->chains.size()) startChain (c.value, now); }
@@ -620,8 +645,31 @@ private:
     int pendingChainIdx = 0;
     int lastStagSample = -1000000;
 
+    // ---------------------------------------------------------------- song lane playback
+    bool songPlaying = false, wasPlayingSong = false; double songOrigin = 0;
+    bool songOn() const { return S->songMode && (wasPlaying || songPlaying); }
+    double songShift() const { return wasPlaying ? 0.0 : songOrigin; }      // ppq → song beats
+    void renderSong (double a, double b)
+    {
+        const double sh = songShift(), sa = a - sh, sb = b - sh;
+        int keyNow = -1;
+        for (auto& c : S->clips) {
+            if (c.muted) continue;
+            const double cs = c.start, ce = c.start + c.length;
+            if (sb > cs && sa < ce) {
+                const double ia = jmax (sa, cs), ib = jmin (sb, ce);
+                if (ib > ia) renderKey (c.key, sh + cs - c.offset, ia + sh, ib + sh);
+            }
+            if (sb > cs && sb <= ce) keyNow = c.key;
+        }
+        songKeyNow = keyNow;
+        songBeatUi = sb;
+    }
+    int songKeyNow = -1;
+
     void renderTo (double a, double b)
     {
+        if (songOn()) { flushOffs (out, a, false); renderSong (a, b); return; }
         while (true) {
             flushOffs (out, a, false);
             if (queued.active && queued.ppq < b) {
@@ -638,12 +686,15 @@ private:
         }
     }
 
-    void renderPattern (double a, double b)
+    void renderPattern (double a, double b) { if (cur.key >= 0) renderKey (cur.key, cur.start, a, b); }
+
+    // plays one key's pattern as if it started at `start` (ppq), for the stretch a … b
+    void renderKey (int key, double start, double a, double b)
     {
-        if (cur.key < 0 || b <= a) return;
-        const auto& p = S->keys[(size_t) cur.key];
+        if (key < 0 || b <= a) return;
+        const auto& p = S->keys[(size_t) key];
         if (p.notes.empty()) return;
-        const double relA = (a - cur.start) * PPQ, relB = (b - cur.start) * PPQ;
+        const double relA = (a - start) * PPQ, relB = (b - start) * PPQ;
         const double ticksPerMs = curBpm / 60.0 * PPQ / 1000.0;
         const double humT = apvts.getRawParameterValue (ids::humTime)->load() * ticksPerMs;
         const double pushT = apvts.getRawParameterValue (ids::push)->load() * ticksPerMs;
@@ -675,10 +726,10 @@ private:
             const int k0 = jmax (0, (int) std::floor ((relA - nt.tick - margin) / LL));
             const int k1 = (int) std::floor ((relB - nt.tick + margin) / LL);
             for (int k = k0; k <= k1; ++k) {
-                const uint32 salt = (uint32) cur.key * 131u + (uint32) i;
-                double T = (double) k * LL + nt.tick + swOff + pushT + hashNoise ((uint32) k, (uint32) i, (uint32) cur.key, 7) * humT * 0.6;
+                const uint32 salt = (uint32) key * 131u + (uint32) i;
+                double T = (double) k * LL + nt.tick + swOff + pushT + hashNoise ((uint32) k, (uint32) i, (uint32) key, 7) * humT * 0.6;
                 if (vstep > 0) T = std::round (T / vstep) * vstep;                       // coarse vintage clock
-                if (wob > 0) T += hashNoise ((uint32) k, (uint32) i, (uint32) cur.key, 19) * wob;   // clock wobble
+                if (wob > 0) T += hashNoise ((uint32) k, (uint32) i, (uint32) key, 19) * wob;   // clock wobble
                 if (k == 0 && nt.tick == 0) T = jmax (T, 0.0);
                 if (T < relA || T >= relB) continue;
                 if (nt.probability < 100 && (hashNoise ((uint32) k, (uint32) i, salt, 3) * 0.5f + 0.5f) * 100.0f >= nt.probability) continue;
@@ -688,7 +739,7 @@ private:
                 v += hashNoise ((uint32) k, (uint32) i, salt, 11) * humV;
                 const int vel = jlimit (1, 127, (int) std::round (v));
                 const int ch = (lane != nullptr && lane->channel > 0) ? lane->channel : S->settings.outChannel;
-                const double evPpq = cur.start + T / PPQ;
+                const double evPpq = start + T / PPQ;
                 int smp = sampleAt (evPpq);
                 if (stag) {                     // 5-pin MIDI sends about one note per millisecond
                     if (smp <= lastStagSample) smp = jmin (blockSamples() - 1, lastStagSample + jmax (1, (int) (sampleRate / 1000.0)));

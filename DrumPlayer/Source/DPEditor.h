@@ -19,7 +19,7 @@ class DrumPlayerEditor : public AudioProcessorEditor, public DragAndDropContaine
 public:
     explicit DrumPlayerEditor (DrumPlayerProcessor& p)
         : AudioProcessorEditor (p), proc (p), st (p),
-          strip (st, false), bigStrip (st, true), tray (st), bigTray (st), chainStrip (st), ruler (st), headers (st), grid (st), vel (st),
+          strip (st, false), bigStrip (st, true), tray (st), bigTray (st), chainStrip (st), ruler (st), headers (st), grid (st), vel (st), songLane (st), songHeader (st, songLane),
           quantPage (st), humPage (st), chainPage (st), setPage (st), presetPage (st), mapPage (st), recPage (st)
     {
         setLookAndFeel (&lnf);
@@ -88,9 +88,9 @@ public:
         gridBox.onChange = [this] { const int i = gridBox.getSelectedItemIndex(); st.grid = i >= numNoteValues ? -1 : i; proc.uiGrid = jmax (0, st.grid); quantPage.grid.setSelectedItemIndex (jmax (0, st.grid), dontSendNotification); refreshAll(); };
         for (int i = 0; i < 7; ++i) {
             auto* b = toolBtns.add (new TextButton());
-            static const char* tips[] = { "Select and move (1). Ctrl-drag copies, drag a note's right edge for length, drag the amber bar at a lane's end for polyrhythm",
-                "Draw (2): click to add or remove, drag to add along the lane. Alt = erase", "Erase (3)", "Scissors (4): split the pattern here",
-                "Paint brush (5): drag to paint repeated notes with accents", "Mute (6): click notes to mute or unmute", "Line (7): draw velocity ramps in the velocity lane" };
+            static const char* tips[] = { "Select and move (1, as in Studio One). Ctrl-drag copies, drag a note's right edge for length, drag the amber bar at a lane's end for polyrhythm",
+                "Draw (5, Studio One's paint tool): click to add or remove, drag to add along the lane. Alt = erase", "Erase (4)", "Scissors (3): split the pattern here. Alt+X splits at the cursor",
+                "Paint brush (7): drag to paint repeated notes with accents", "Mute (6): click notes to mute or unmute. M mutes the selection", "Line (2): draw velocity ramps in the velocity lane" };
             setupButton (body, *b, toolName ((Tool) i), true, tips[i]);
             b->setRadioGroupId (11);
             b->onClick = [this, i] { st.tool = (Tool) i; st.stamping = false; grid.repaint(); };
@@ -148,6 +148,7 @@ public:
 
         // ---------------- roll
         body.addAndMakeVisible (ruler); body.addAndMakeVisible (headers); body.addAndMakeVisible (grid); body.addAndMakeVisible (vel);
+        body.addAndMakeVisible (songLane); body.addAndMakeVisible (songHeader); songHeader.attach();
         body.addAndMakeVisible (hScroll); body.addAndMakeVisible (vScroll);
         hScroll.setAutoHide (false); vScroll.setAutoHide (false);
         hScroll.addListener (&scrollRelay); vScroll.addListener (&scrollRelay);
@@ -239,39 +240,69 @@ public:
         return true;
     }
 
+    // Studio One key commands where they exist: 1 arrow, 3 split, 4 erase, 5 paint (pencil), 6 mute, D duplicate,
+    // Alt+X split at cursor, Q quantize, Ctrl+Y / Ctrl+Z, Alt+Left/Right nudge, Shift+Up/Down move to the next drum
     bool keyPressed (const KeyPress& k) override
     {
         const auto m = k.getModifiers();
         const int code = k.getKeyCode();
+        const juce_wchar ch = CharacterFunctions::toUpperCase (k.getTextCharacter());
         auto& p = st.pat();
+        const bool plain = ! m.isCommandDown() && ! m.isAltDown() && ! m.isCtrlDown();
         if (m.isCommandDown() && code == 'Z') { if (m.isShiftDown()) proc.undo.redo(); else proc.undo.undo(); refreshAll(); return true; }
         if (m.isCommandDown() && code == 'Y') { proc.undo.redo(); refreshAll(); return true; }
+        if (m.isCommandDown() && m.isShiftDown() && code == 'F') { zoomToFit(); return true; }
+
+        if (songLane.hasKeyboardFocus (false)) {                    // the song lane has the keys
+            if (m.isCommandDown() && code == 'A') { songLane.selectAll(); return true; }
+            if (m.isCommandDown() && code == 'C') { songLane.copy(); return true; }
+            if (m.isCommandDown() && code == 'X') { songLane.copy(); songLane.deleteSelected(); return true; }
+            if (m.isCommandDown() && code == 'V') { songLane.paste(); return true; }
+            if ((plain && ch == 'D') || (m.isCommandDown() && code == 'D')) { songLane.duplicate(); return true; }
+            if (m.isAltDown() && code == 'X') { songLane.splitAtCursor(); return true; }
+            if (plain && ch == 'M') { songLane.muteSelected(); return true; }
+            if (code == KeyPress::deleteKey || code == KeyPress::backspaceKey) { songLane.deleteSelected(); return true; }
+            if (code == KeyPress::spaceKey) { if (proc.songBeatUi.load() >= 0) proc.uiSongPlay (false, 0); else songHeader.refresh(), proc.uiSongPlay (true, songLane.cursorBeat); return true; }
+            if (code == KeyPress::escapeKey) { for (auto& c : st.song().clips) c.selected = false; songLane.repaint(); return true; }
+            return false;
+        }
+
         if (m.isCommandDown() && code == 'R') { st.repeatLast(); return true; }
         if (m.isCommandDown() && code == 'A') { selectAll (p, true); st.publish(); return true; }
-        if (m.isCommandDown() && code == 'D') { st.apply ("Duplicate", [] (Pattern& q) { duplicateSelection (q); }); return true; }
+        if ((plain && ch == 'D') || (m.isCommandDown() && code == 'D')) { st.apply ("Duplicate", [] (Pattern& q) { duplicateSelection (q); }); return true; }
         if (m.isCommandDown() && code == 'C') { copySel(); return true; }
         if (m.isCommandDown() && code == 'X') { copySel(); st.apply ("Cut", [] (Pattern& q) { deleteSelected (q); }); return true; }
         if (m.isCommandDown() && code == 'V') { paste(); return true; }
+        if (m.isAltDown() && code == 'X') { splitMenu (st.cursorTick); return true; }
+        if (plain && ch == 'M') { st.apply ("Mute / unmute", [] (Pattern& q) { for (auto& n : q.notes) if (n.selected) n.probability = n.probability == 0 ? 100 : 0; }); return true; }
         if (code == KeyPress::deleteKey || code == KeyPress::backspaceKey) { st.apply ("Delete", [] (Pattern& q) { deleteSelected (q); }); return true; }
         if (code == KeyPress::escapeKey && st.stamping) { st.stamping = false; showToast ("Stopped"); return true; }
         if (code == KeyPress::escapeKey) { if (openPage != nullptr || exchange.isVisible()) closePages(); else { selectAll (p, false); st.publish(); } return true; }
-        if (! m.isAnyModifierKeyDown() && code >= '1' && code <= '7') { setTool ((Tool) (code - '1')); return true; }
-        if (! m.isAnyModifierKeyDown() && (code == 'Q' || code == 'q')) { quantPage.run(); return true; }
+        if (plain && ch >= '1' && ch <= '7') {
+            static const Tool map[] = { Tool::Select, Tool::Line, Tool::Split, Tool::Erase, Tool::Draw, Tool::Mute, Tool::Paint };
+            setTool (map[ch - '1']); return true;
+        }
+        if (plain && ch == 'Q') { quantPage.run(); return true; }
         if (code == KeyPress::spaceKey) { if (proc.playingKey.load() >= 0) proc.uiStop(); else proc.uiTrigger (st.song().editKey); return true; }
         if (code == KeyPress::leftKey || code == KeyPress::rightKey) {
-            const int g = (m.isAltDown() || st.grid < 0) ? 10 : st.gridTicks();
+            const int g = st.grid < 0 ? 10 : st.gridTicks();
             const int d = code == KeyPress::leftKey ? -g : g;
             st.apply ("Nudge", [d] (Pattern& q) { nudge (q, d); }); return true;
         }
         if (code == KeyPress::upKey || code == KeyPress::downKey) {
-            if (m.isShiftDown()) { const int d = code == KeyPress::upKey ? 10 : -10; st.apply ("Velocity", [d] (Pattern& q) { velocityAdd (q, d); }); return true; }
+            if (m.isCommandDown()) { const int d = code == KeyPress::upKey ? 10 : -10; st.apply ("Velocity", [d] (Pattern& q) { velocityAdd (q, d); }); return true; }
             auto lanes = st.lanes(); const int dir = code == KeyPress::upKey ? -1 : 1;
-            st.apply ("Move lane", [lanes, dir] (Pattern& q) {
+            st.apply ("Move to the next drum", [lanes, dir] (Pattern& q) {
                 for (auto& n : q.notes) if (n.selected) { int i = 0; for (; i < (int) lanes.size(); ++i) if (lanes[(size_t) i] == n.note) break; i += dir; if (i >= 0 && i < (int) lanes.size()) n.note = lanes[(size_t) i]; }
                 q.sort(); });
             return true;
         }
         return false;
+    }
+    void zoomToFit()
+    {
+        st.pxPerBeat = jlimit (12.0f, 900.0f, (float) grid.getWidth() / jmax (1.0f, (float) st.pat().lengthTicks() / PPQ));
+        proc.uiZoomX = st.pxPerBeat / 80.0f; st.scrollX = 0; repaintRoll();
     }
 
 private:
@@ -297,6 +328,7 @@ private:
     std::unique_ptr<AudioProcessorValueTreeState::ComboBoxAttachment> swingValAtt;
     DragMidiButton dragBtn;
     Ruler ruler; LaneHeaders headers; NoteGrid grid; VelocityLane vel;
+    SongLane songLane; SongHeader songHeader;
     ScrollBar hScroll { false }, vScroll { true };
     struct ScrollRelay : public ScrollBar::Listener
     {
@@ -367,6 +399,12 @@ private:
         r2.place (lVel, 24); r2.place (velBox, 56); r2.skip (10);
         r2.place (recBtn); r2.place (recOptBtn); r2.place (playBtn); r2.place (stopBtn); r2.place (dragBtn);
         a.removeFromTop (8);
+        // song lane
+        auto songRow = a.removeFromTop (64);
+        songHeader.setBounds (songRow.removeFromLeft (200));
+        songRow.removeFromRight (10);
+        songLane.setBounds (songRow);
+        a.removeFromTop (6);
         // status line
         status.setBounds (a.removeFromBottom (18));
         a.removeFromBottom (2);
@@ -424,6 +462,7 @@ private:
         refreshControls();
         if (openPage != nullptr) openPage->refresh();
         chainStrip.refresh();
+        songHeader.refresh(); songLane.repaint();
         clampScroll();
         strip.repaint(); bigStrip.repaint(); tray.repaint(); bigTray.repaint();
         repaintRoll();
@@ -486,6 +525,7 @@ private:
             if (lit != recBtn.getToggleState()) recBtn.setToggleState (lit, dontSendNotification);
         }
         if (headers.pollHits()) headers.repaint();
+        if (const double sb = proc.songBeatUi.load(); sb >= 0 || lastSongBeat >= 0) { lastSongBeat = sb; songLane.repaint(); }
         if (const int ser = proc.lastInSerial.load(); ser != lastInSerialSeen) {     // which key was pressed, and what it did
             lastInSerialSeen = ser;
             const int n = proc.lastInNote.load(), k = proc.lastInKey.load();
@@ -511,6 +551,7 @@ private:
     }
     int lastChainState = -1;
     std::array<uint32, 128> lastIn {};
+    double lastSongBeat = -1;
 
     static void repaintEverything (Component& c) { c.repaint(); for (auto* ch : c.getChildren()) repaintEverything (*ch); }
     void showToast (const String& t) { toast.text = t; toast.until = Time::getMillisecondCounter() + 2600; toast.toFront (false); toast.repaint(); }
@@ -611,7 +652,10 @@ private:
             }
             if (first >= 0) s.editKey = first;
         });
-        showToast ("Imported " + String ((int) pieces.size()) + (pieces.size() == 1 ? " pattern to " + keyName (first) : " patterns to " + keyName (first) + " to " + keyName (last)));
+        int nNotes = 0, vLo = 127, vHi = 0;
+        for (auto& p : pieces) for (auto& n : p.notes) { ++nNotes; vLo = jmin (vLo, n.velocity); vHi = jmax (vHi, n.velocity); }
+        showToast ("Imported " + String ((int) pieces.size()) + (pieces.size() == 1 ? " pattern to " + keyName (first) : " patterns to " + keyName (first) + " to " + keyName (last))
+                   + ": " + String (nNotes) + " notes, velocities " + String (vLo) + "-" + String (vHi) + " exactly as in the file");
     }
 
     // ------------------------------------------------------------ scissors

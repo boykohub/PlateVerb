@@ -94,7 +94,7 @@ inline void fillThemed (Graphics& g, Rectangle<float> r, const ThemeEl& e, float
 inline StringArray themePanels()
 {
     return { "Window background", "Header", "Keyboard strip", "Parking tray", "Toolbars", "Ruler", "Lane names",
-             "Note grid", "Velocity lane", "Roll card", "Chain strip", "Pages", "Messages", "Buttons", "Lit buttons", "Boxes and menus", "Labels" };
+             "Note grid", "Velocity lane", "Roll card", "Chain strip", "Song lane", "Pages", "Messages", "Buttons", "Lit buttons", "Boxes and menus", "Labels" };
 }
 
 } // namespace dp

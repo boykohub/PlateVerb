@@ -111,6 +111,8 @@ struct Lane
 };
 
 struct ChainStep { int key = -1, repeats = 1; };
+// a chunk on the song lane: plays a key's pattern from `start` for `length` beats, `offset` beats into it (it repeats if longer)
+struct Clip { double start = 0, length = 4, offset = 0; int key = 12; bool muted = false, selected = false; };
 struct Chain { String name; std::vector<ChainStep> steps; int triggerNote = -1; bool loop = true; };
 
 enum class StartQuant { Immediate = 0, Beat, Bar, PatternEnd, InTime };   // InTime: switch at once, keeping the bar position
@@ -167,6 +169,8 @@ struct Song
     int importMap = -1;                            // where dropped MIDI comes from (-1 = same as playMap)
     std::array<int, aCount> customNotes {};        // Custom map: note per articulation (-1 = none)
     std::array<Pattern, numKeys> keys;
+    std::vector<Clip> clips;                       // the song lane
+    bool songMode = false;                         // the song lane plays (with Studio One's transport, or its own Play)
     std::vector<Lane> lanes;
     std::vector<Chain> chains { Chain { "Chain 1", {}, -1, true } };      // as many as you like
     std::array<Pattern, 8> park;
@@ -472,6 +476,14 @@ inline void convertPattern (Pattern& p, const DrumMap& from, const DrumMap& to)
     MapConverter c { from, to };
     std::map<int, int> laneMap;                       // old lane note → new note (for lane lengths and mutes)
     for (auto& n : p.notes) { const int old = n.note; n.note = c.convert (n.note, n.art); laneMap[old] = n.note; }
+    // two sounds of the old plugin can land on the same note: keep one hit, the louder, never a doubled one
+    p.sort();
+    std::vector<Note> kept;
+    for (auto& n : p.notes) {
+        if (! kept.empty() && kept.back().tick == n.tick && kept.back().note == n.note) { kept.back().velocity = jmax (kept.back().velocity, n.velocity); continue; }
+        kept.push_back (n);
+    }
+    p.notes = kept;
     std::map<int, int> ll; for (auto& [k, v] : p.laneLength) { auto it = laneMap.find (k); ll[it != laneMap.end() ? it->second : k] = v; }
     p.laneLength = ll;
     std::set<int> lm; for (int k : p.laneMute) { auto it = laneMap.find (k); lm.insert (it != laneMap.end() ? it->second : k); }
@@ -590,6 +602,36 @@ inline File writeMidiFile (const std::vector<const Pattern*>& parts, const File&
     return f;
 }
 
+
+// the song lane written out as one MIDI file: every chunk's notes in place
+inline void writeSongMidi (const Song& s, const File& f, int channel)
+{
+    MidiMessageSequence seq;
+    double end = 0;
+    for (auto& c : s.clips) {
+        if (c.muted) continue;
+        const auto& p = s.keys[(size_t) jlimit (0, 127, c.key)];
+        const double L = p.lengthTicks() / (double) PPQ;
+        if (L <= 0) continue;
+        end = jmax (end, c.start + c.length);
+        for (auto& n : p.notes) {
+            const double LL = p.laneLen (n.note) / (double) PPQ;
+            if (n.tick >= p.laneLen (n.note)) continue;
+            for (double base = std::floor (c.offset / LL) * LL; base < c.offset + c.length; base += LL) {
+                const double t = base + n.tick / (double) PPQ;
+                if (t < c.offset - 1e-9 || t >= c.offset + c.length - 1e-9) continue;
+                const double at = (c.start + t - c.offset) * PPQ;
+                seq.addEvent (MidiMessage::noteOn (channel, n.note, (uint8) jlimit (1, 127, n.velocity)), at);
+                seq.addEvent (MidiMessage::noteOff (channel, n.note), at + jmax (1, n.length));
+            }
+        }
+    }
+    seq.updateMatchedPairs();
+    MidiMessageSequence meta; meta.addEvent (MidiMessage::endOfTrack(), end * PPQ);
+    MidiFile mf; mf.setTicksPerQuarterNote (PPQ); mf.addTrack (meta); mf.addTrack (seq);
+    f.deleteFile(); FileOutputStream out (f); if (out.openedOk()) mf.writeTo (out, 1);
+}
+
 // ------------------------------------------------------------------ XML state
 inline std::unique_ptr<XmlElement> patternToXml (const Pattern& p, const String& tag = "P")
 {
@@ -649,6 +691,13 @@ inline std::unique_ptr<XmlElement> songToXml (const Song& s)
         String st; for (auto& step : c.steps) st << step.key << ':' << step.repeats << ';';
         e->setAttribute ("steps", st);
     }
+    auto* sg = x->createNewChildElement ("SongLane");
+    sg->setAttribute ("on", s.songMode);
+    for (auto& c : s.clips) {
+        auto* e = sg->createNewChildElement ("Clip");
+        e->setAttribute ("start", c.start); e->setAttribute ("len", c.length); e->setAttribute ("off", c.offset);
+        e->setAttribute ("key", c.key); e->setAttribute ("muted", c.muted);
+    }
     auto* st = x->createNewChildElement ("Settings");
     const auto& o = s.settings;
     st->setAttribute ("out", o.outChannel); st->setAttribute ("zlo", o.zoneLow); st->setAttribute ("zhi", o.zoneHigh);
@@ -693,6 +742,14 @@ inline Song songFromXml (const XmlElement& x)
             }
         }
     }
+    if (auto* sg = x.getChildByName ("SongLane")) {
+        s.songMode = sg->getBoolAttribute ("on", false);
+        for (auto* e : sg->getChildIterator()) {
+            Clip c; c.start = jmax (0.0, e->getDoubleAttribute ("start")); c.length = jmax (0.25, e->getDoubleAttribute ("len", 4));
+            c.offset = jmax (0.0, e->getDoubleAttribute ("off")); c.key = jlimit (0, 127, e->getIntAttribute ("key", 12)); c.muted = e->getBoolAttribute ("muted");
+            s.clips.push_back (c);
+        }
+    }
     // older saves had four fixed chains: keep only the ones in use
     s.chains.erase (std::remove_if (s.chains.begin(), s.chains.end(), [] (const Chain& c) { return c.steps.empty() && c.triggerNote < 0; }), s.chains.end());
     if (s.chains.empty()) s.chains.push_back ({ "Chain 1", {}, -1, true });
@@ -715,6 +772,7 @@ inline Song songFromXml (const XmlElement& x)
             o.zoneLow = 12; o.zoneHigh = 127; o.stopNote = 11; o.mirrorOctaves = false; o.startQuant = StartQuant::InTime;
             for (int k = 127; k >= 12; --k) if (s.keys[(size_t) (k - 12)].isEmpty() == false && s.keys[(size_t) k].isEmpty()) std::swap (s.keys[(size_t) k], s.keys[(size_t) (k - 12)]);
             for (auto& c : s.chains) for (auto& step : c.steps) if (step.key >= 0 && step.key < 116) step.key += 12;
+            for (auto& c : s.clips) if (c.key < 116) c.key += 12;
             s.editKey = jlimit (12, 127, s.editKey + 12);
         }
         o.recQuantize = st->getIntAttribute ("recq", 0); o.splitBars = jlimit (0, maxBars, st->getIntAttribute ("split", 4));
