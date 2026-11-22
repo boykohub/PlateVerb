@@ -96,9 +96,9 @@ class GroovePage : public Page, private TableListBoxModel
 public:
     GroovePage (EditState& e) : Page ("GROOVES"), st (e)
     {
+        styleModel.owner = this;
         addAndMakeVisible (styles); styles.setModel (&styleModel); styles.setRowHeight (22);
         styles.setColour (ListBox::backgroundColourId, Colours::black.withAlpha (0.2f));
-        styleModel.owner = this;
         addAndMakeVisible (search); search.setTextToShowWhenEmpty ("Search names, styles, people", th::faint); search.setFont (font (12.0f, 1));
         search.onTextChange = [this] { filter(); };
         for (auto* t : { "All", "Groove", "Fill", "Intro", "Ending" }) {
@@ -159,7 +159,7 @@ private:
     struct StyleModel : public ListBoxModel
     {
         GroovePage* owner = nullptr;
-        int getNumRows() override { return owner->styleNames.size(); }
+        int getNumRows() override { return owner != nullptr ? owner->styleNames.size() : 0; }
         void paintListBoxItem (int r, Graphics& g, int w, int h, bool sel) override
         {
             if (sel) { g.setColour (th::blue.withAlpha (0.22f)); g.fillRoundedRectangle (2, 1, w - 4.0f, h - 2.0f, 4); }
