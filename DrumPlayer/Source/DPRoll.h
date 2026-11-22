@@ -383,6 +383,7 @@ public:
         }
         // notes
         g.setFont (font (9.0f, 2));
+        const auto dmap = st.song().map (st.song().playMap);
         for (auto& n : p.notes) {
             const int row = indexOf (lanes, n.note);
             if (row < 0) continue;
@@ -390,7 +391,7 @@ public:
             if (r.getRight() < 0 || r.getX() > w || r.getBottom() < 0 || r.getY() > getHeight()) continue;
             const auto c = st.laneColour (n.note);
             const float vel = n.velocity / 127.0f;
-            const bool muted = n.probability == 0;
+            const bool muted = n.probability == 0 || (n.art >= 0 && dmap.resolve (n.art) < 0 && dmap.artFor (n.note) != n.art);
             auto body = muted ? th::faint : c.withMultipliedBrightness (0.55f + 0.45f * vel);
             g.setColour (Colours::black.withAlpha (0.35f)); g.fillRoundedRectangle (r.translated (0, 1), 3);
             g.setGradientFill (ColourGradient (body.brighter (0.25f), r.getTopLeft(), body.darker (0.2f), r.getBottomLeft(), false));

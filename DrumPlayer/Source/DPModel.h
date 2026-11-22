@@ -7,6 +7,7 @@
 #include <set>
 #include <random>
 #include <climits>
+#include "DPDrumMaps.h"
 
 namespace dp {
 using namespace juce;
@@ -71,6 +72,8 @@ struct Note
     int tick = 0, length = 60, note = 36, velocity = 100, probability = 100;
     bool selected = false;                              // editor only, never saved
     int autoDiv = 0;                                    // filled on publish: swing value for "Auto"
+    int art = -1;                                       // drum articulation, kept so map changes can be undone exactly
+    bool silent = false;                                // filled on publish: this plugin has no such sound
     bool operator< (const Note& o) const { return tick != o.tick ? tick < o.tick : note < o.note; }
 };
 
@@ -129,6 +132,9 @@ struct Settings
 
 struct Song
 {
+    int playMap = mapGM;                           // the drum plugin Drum Player feeds
+    int importMap = -1;                            // where dropped MIDI comes from (-1 = same as playMap)
+    std::array<int, aCount> customNotes {};        // Custom map: note per articulation (-1 = none)
     std::array<Pattern, numKeys> keys;
     std::vector<Lane> lanes;
     std::array<Chain, 4> chains;
@@ -139,10 +145,32 @@ struct Song
     const Lane* lane (int note) const { for (auto& l : lanes) if (l.note == note) return &l; return nullptr; }
     Lane* lane (int note) { for (auto& l : lanes) if (l.note == note) return &l; return nullptr; }
 
+    DrumMap map (int id) const
+    {
+        if (id < 0) id = playMap;
+        id = jlimit (0, (int) numMaps - 1, id);
+        if (id != mapCustom) return builtInMaps()[(size_t) id];
+        DrumMap m = builtInMaps()[mapCustom];
+        m.notes.clear();
+        for (int a = 0; a < aCount; ++a) if (customNotes[(size_t) a] >= 0) m.notes.push_back ({ customNotes[(size_t) a], a });
+        return m;
+    }
+    String laneName (int note) const
+    {
+        const auto m = map (playMap);
+        const int a = m.artFor (note);
+        return a >= 0 ? String (artName (a)) : gmDrumName (note);
+    }
+    static std::array<int, aCount> defaultCustom()
+    {
+        std::array<int, aCount> c; c.fill (-1);
+        for (auto& [n, a] : gmNotes()) if (c[(size_t) a] < 0) c[(size_t) a] = n;
+        return c;
+    }
     void ensureLane (int note)
     {
         if (lane (note) != nullptr) return;
-        Lane l; l.note = note; l.name = gmDrumName (note);
+        Lane l; l.note = note; l.name = laneName (note);
         lanes.push_back (l);
         sortLanes();
     }
@@ -152,6 +180,7 @@ struct Song
     static Song makeDefault()
     {
         Song s;
+        s.customNotes = defaultCustom();
         for (int n : { 36, 37, 38, 39, 40, 42, 44, 46, 41, 43, 45, 47, 48, 50, 49, 57, 51, 53, 55, 52, 54, 56 }) s.ensureLane (n);
         for (int c = 0; c < 4; ++c) s.chains[(size_t) c].name = String::charToString ((juce_wchar) ('A' + c));
         // a starter groove and fill so the plugin makes a sound straight away
@@ -406,6 +435,42 @@ inline void removeDoubles (Pattern& p)
     p.notes = keep;
 }
 
+
+// ------------------------------------------------------------------ drum map conversion
+inline void convertPattern (Pattern& p, const DrumMap& from, const DrumMap& to)
+{
+    MapConverter c { from, to };
+    std::map<int, int> laneMap;                       // old lane note → new note (for lane lengths and mutes)
+    for (auto& n : p.notes) { const int old = n.note; n.note = c.convert (n.note, n.art); laneMap[old] = n.note; }
+    std::map<int, int> ll; for (auto& [k, v] : p.laneLength) { auto it = laneMap.find (k); ll[it != laneMap.end() ? it->second : k] = v; }
+    p.laneLength = ll;
+    std::set<int> lm; for (int k : p.laneMute) { auto it = laneMap.find (k); lm.insert (it != laneMap.end() ? it->second : k); }
+    p.laneMute = lm;
+    p.sort();
+}
+
+// switch the whole song to another drum plugin's map; lanes follow their sounds
+inline void convertSong (Song& s, int fromId, int toId)
+{
+    const auto from = s.map (fromId), to = s.map (toId);
+    for (auto& p : s.keys) convertPattern (p, from, to);
+    for (auto& p : s.park) convertPattern (p, from, to);
+    std::vector<Lane> old = s.lanes;
+    s.playMap = toId;
+    s.lanes.clear();
+    for (auto& l : old) {
+        int art = from.artFor (l.note);
+        int n = art >= 0 ? to.resolve (art) : l.note;
+        if (n < 0) n = l.note;
+        if (s.lane (n) != nullptr) continue;
+        Lane nl = l; nl.note = n; nl.name = s.laneName (n);
+        s.lanes.push_back (nl);
+    }
+    for (auto& p : s.keys) s.ensureLanesForPattern (p);
+    s.sortLanes();
+    s.settings.outChannel = to.channel;
+}
+
 // ------------------------------------------------------------------ MIDI files
 struct ImportedPart { String name; std::vector<Note> notes; int lengthTicks = 0; int beatsPerBar = 4; };
 
@@ -502,7 +567,7 @@ inline std::unique_ptr<XmlElement> patternToXml (const Pattern& p, const String&
     x->setAttribute ("name", p.name); x->setAttribute ("type", (int) p.type);
     x->setAttribute ("bars", p.bars); x->setAttribute ("bpb", p.beatsPerBar);
     String s; s.preallocateBytes (p.notes.size() * 24);
-    for (auto& n : p.notes) s << n.tick << ',' << n.length << ',' << n.note << ',' << n.velocity << ',' << n.probability << ';';
+    for (auto& n : p.notes) s << n.tick << ',' << n.length << ',' << n.note << ',' << n.velocity << ',' << n.probability << ',' << n.art << ';';
     x->setAttribute ("notes", s);
     String ll; for (auto& [k, v] : p.laneLength) ll << k << ':' << v << ';';
     x->setAttribute ("lanelen", ll);
@@ -520,6 +585,7 @@ inline Pattern patternFromXml (const XmlElement& x)
         if (f.size() < 4) continue;
         Note n; n.tick = f[0].getIntValue(); n.length = f[1].getIntValue(); n.note = jlimit (0, 127, f[2].getIntValue());
         n.velocity = jlimit (1, 127, f[3].getIntValue()); n.probability = f.size() > 4 ? jlimit (0, 100, f[4].getIntValue()) : 100;
+        n.art = f.size() > 5 ? jlimit ((int) aNone, (int) aCount - 1, f[5].getIntValue()) : -1;
         p.notes.push_back (n);
     }
     for (auto& tok : StringArray::fromTokens (x.getStringAttribute ("lanelen"), ";", "")) {
@@ -534,6 +600,8 @@ inline std::unique_ptr<XmlElement> songToXml (const Song& s)
 {
     auto x = std::make_unique<XmlElement> ("DrumPlayerSong");
     x->setAttribute ("version", 1); x->setAttribute ("editKey", s.editKey);
+    x->setAttribute ("playMap", s.playMap); x->setAttribute ("importMap", s.importMap);
+    String cn; for (int v : s.customNotes) cn << v << ','; x->setAttribute ("customMap", cn);
     auto* ks = x->createNewChildElement ("Keys");
     for (int k = 0; k < numKeys; ++k) if (! s.keys[(size_t) k].isEmpty()) { auto px = patternToXml (s.keys[(size_t) k]); px->setAttribute ("key", k); ks->addChildElement (px.release()); }
     auto* pk = x->createNewChildElement ("Park");
@@ -565,6 +633,11 @@ inline Song songFromXml (const XmlElement& x)
     Song s;
     for (int c = 0; c < 4; ++c) s.chains[(size_t) c].name = String::charToString ((juce_wchar) ('A' + c));
     s.editKey = jlimit (0, 127, x.getIntAttribute ("editKey", 0));
+    s.playMap = jlimit (0, (int) numMaps - 1, x.getIntAttribute ("playMap", mapGM));
+    s.importMap = jlimit (-1, (int) numMaps - 1, x.getIntAttribute ("importMap", -1));
+    s.customNotes = Song::defaultCustom();
+    { auto f = StringArray::fromTokens (x.getStringAttribute ("customMap"), ",", ""); f.removeEmptyStrings();
+      if (f.size() == aCount) for (int a = 0; a < aCount; ++a) s.customNotes[(size_t) a] = jlimit (-1, 127, f[a].getIntValue()); }
     if (auto* ks = x.getChildByName ("Keys"))
         for (auto* e : ks->getChildIterator()) { const int k = e->getIntAttribute ("key", -1); if (k >= 0 && k < numKeys) s.keys[(size_t) k] = patternFromXml (*e); }
     if (auto* pk = x.getChildByName ("Park"))

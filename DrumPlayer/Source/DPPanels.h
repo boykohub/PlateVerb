@@ -749,4 +749,90 @@ private:
     }
 };
 
+
+// ---------------------------------------------------------------- drum map page
+class MapPage : public Page
+{
+public:
+    MapPage (EditState& e) : Page ("DRUM MAP"), st (e)
+    {
+        StringArray names; for (auto& m : builtInMaps()) names.add (m.name);
+        setupLabel (*this, lPlay, "Playing on");
+        setupCombo (*this, play, names, 1, "The drum plugin Drum Player feeds. Changing it converts every pattern (and changing back restores them)");
+        play.onChange = [this] {
+            const int to = play.getSelectedItemIndex();
+            if (loading || to < 0 || to == st.song().playMap) return;
+            st.applySong ("Drum map", [to] (Song& s) { convertSong (s, s.playMap, to); });
+            if (st.toast) st.toast ("All patterns now play on " + builtInMaps()[(size_t) to].name + ", MIDI channel " + String (st.song().settings.outChannel));
+            refresh();
+        };
+        StringArray from { "Same as above" }; from.addArray (names);
+        setupLabel (*this, lFrom, "Dropped MIDI is from");
+        setupCombo (*this, importFrom, from, 1, "Which plugin made the MIDI you drop in. It is converted on the way in");
+        importFrom.onChange = [this] { if (loading) return; const int v = importFrom.getSelectedItemIndex() - 1; st.applySong ("Import map", [v] (Song& s) { s.importMap = v; }); refresh(); };
+        setupButton (*this, convertBtn, "Convert the edited pattern from...", false, "For a pattern that came from another plugin and sounds wrong");
+        convertBtn.onClick = [this] {
+            PopupMenu m;
+            for (int i = 0; i < (int) numMaps; ++i) if (i != st.song().playMap) m.addItem (i + 1, builtInMaps()[(size_t) i].name);
+            m.showMenuAsync (PopupMenu::Options().withTargetComponent (&convertBtn), [this] (int r) {
+                if (r <= 0) return;
+                const int from = r - 1;
+                st.applySong ("Convert pattern", [from] (Song& s) { convertPattern (s.keys[(size_t) s.editKey], s.map (from), s.map (s.playMap)); s.ensureLanesForPattern (s.keys[(size_t) s.editKey]); });
+            });
+        };
+        setupLabel (*this, info, "", 11.0f, th::dim); info.setJustificationType (Justification::topLeft);
+        setupLabel (*this, lCustom, "Custom map: the note for each sound", 11.5f, th::amber);
+        addAndMakeVisible (view); view.setViewedComponent (&list, false); view.setScrollBarsShown (true, false);
+        StringArray notes { "None" }; for (int n = 0; n < 128; ++n) notes.add (String (n) + "  " + keyName (n));
+        for (int a = 0; a < aCount; ++a) {
+            auto* l = labels.add (new Label()); setupLabel (list, *l, artName (a), 11.5f, th::text);
+            auto* c = combos.add (new ComboBox()); setupCombo (list, *c, notes);
+            c->onChange = [this, a, c] {
+                if (loading) return;
+                const int n = c->getSelectedItemIndex() - 1;
+                st.applySong ("Custom map", [a, n] (Song& s) {
+                    const int old = s.customNotes[(size_t) a];
+                    s.customNotes[(size_t) a] = n;
+                    if (s.playMap == mapCustom && old >= 0 && n >= 0)        // move existing notes of that sound along
+                        for (auto& p : s.keys) for (auto& x : p.notes) if (x.note == old) x.note = n;
+                    if (s.playMap == mapCustom && n >= 0) { s.ensureLane (n); if (auto* l2 = s.lane (n)) l2->name = artName (a); }
+                });
+            };
+        }
+    }
+    void refresh() override
+    {
+        loading = true;
+        auto& s = st.song();
+        play.setSelectedItemIndex (s.playMap, dontSendNotification);
+        importFrom.setSelectedItemIndex (s.importMap + 1, dontSendNotification);
+        const auto& m = builtInMaps()[(size_t) s.playMap];
+        info.setText (m.note + "\nOutput: MIDI channel " + String (s.settings.outChannel) + ".  Notes the map doesn't know pass through unchanged.", dontSendNotification);
+        for (int a = 0; a < aCount; ++a) combos[a]->setSelectedItemIndex (s.customNotes[(size_t) a] + 1, dontSendNotification);
+        const bool custom = s.playMap == mapCustom || s.importMap == mapCustom;
+        view.setVisible (custom); lCustom.setVisible (custom);
+        loading = false;
+        resized();
+    }
+    void resized() override
+    {
+        auto a = content();
+        play.setBounds (row (a, lPlay, 150).removeFromLeft (300));
+        importFrom.setBounds (row (a, lFrom, 150).removeFromLeft (300));
+        convertBtn.setBounds (a.removeFromTop (28).removeFromLeft (convertBtn.getWidth()).reduced (0, 3)); a.removeFromTop (4);
+        info.setBounds (a.removeFromTop (46)); a.removeFromTop (4);
+        lCustom.setBounds (a.removeFromTop (22));
+        view.setBounds (a);
+        list.setSize (jmax (100, a.getWidth() - 12), aCount * 26);
+        for (int i = 0; i < aCount; ++i) { labels[i]->setBounds (0, i * 26, 170, 24); combos[i]->setBounds (176, i * 26 + 1, 150, 22); }
+    }
+private:
+    EditState& st; bool loading = false;
+    Label lPlay, lFrom, info, lCustom;
+    ComboBox play, importFrom;
+    TextButton convertBtn;
+    Viewport view; Component list;
+    OwnedArray<Label> labels; OwnedArray<ComboBox> combos;
+};
+
 } // namespace dp

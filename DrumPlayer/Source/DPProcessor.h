@@ -159,7 +159,11 @@ public:
     void publish()
     {
         auto s = std::make_shared<Song> (edit);
-        for (auto& p : s->keys) if (! p.notes.empty()) computeAutoSwing (p);
+        const auto dm = s->map (s->playMap);
+        for (auto& p : s->keys) if (! p.notes.empty()) {
+            computeAutoSwing (p);
+            for (auto& n : p.notes) n.silent = n.art >= 0 && dm.resolve (n.art) < 0 && dm.artFor (n.note) != n.art;
+        }
         std::shared_ptr<const Song> old;
         { SpinLock::ScopedLockType l (liveLock); old = live; live = s; }
         if (old != nullptr) graveyard.push_back (std::move (old));
@@ -554,7 +558,7 @@ private:
         for (size_t i = 0; i < p.notes.size(); ++i) {
             const auto& nt = p.notes[i];
             const int LL = p.laneLen (nt.note);
-            if (LL <= 0 || nt.tick >= LL) continue;
+            if (LL <= 0 || nt.tick >= LL || nt.silent) continue;
             if (p.laneMute.count (nt.note)) continue;
             const Lane* lane = S->lane (nt.note);
             if (anySolo && (lane == nullptr || ! lane->solo)) continue;

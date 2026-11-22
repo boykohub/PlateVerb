@@ -20,7 +20,7 @@ public:
     explicit DrumPlayerEditor (DrumPlayerProcessor& p)
         : AudioProcessorEditor (p), proc (p), st (p),
           strip (st, false), bigStrip (st, true), tray (st), bigTray (st), ruler (st), headers (st), grid (st), vel (st),
-          quantPage (st), humPage (st), chainPage (st), setPage (st), presetPage (st)
+          quantPage (st), humPage (st), chainPage (st), setPage (st), presetPage (st), mapPage (st)
     {
         setLookAndFeel (&lnf);
         LookAndFeel::setDefaultLookAndFeel (&lnf);
@@ -40,6 +40,8 @@ public:
         setupButton (body, saveBtn, "Save", false, "Save the current preset (or name a new one in the browser)");
         setupButton (body, exchangeBtn, "Exchange", true, "Big keyboard for moving patterns between keys");
         setupButton (body, chainsBtn, "Chains", true);
+        setupButton (body, mapBtn, "Drum Map", true, "Which drum plugin you're playing, and where dropped MIDI comes from");
+        mapBtn.onClick = [this] { togglePage (mapPage, mapBtn); };
         setupButton (body, settingsBtn, "Settings", true);
         setupButton (body, zoomOut, "-", false, "Smaller"); setupButton (body, zoomPct, "100%", false, "Window size"); setupButton (body, zoomIn, "+", false, "Bigger");
         prevPreset.onClick = [this] { presetPage.step (-1); refreshAll(); };
@@ -149,7 +151,7 @@ public:
         velMode.onClick = [this] { st.probMode = ! st.probMode; velMode.setButtonText (st.probMode ? "Chance" : "Velocity"); vel.repaint(); };
 
         // ---------------- pages
-        for (Page* pg : { (Page*) &quantPage, (Page*) &humPage, (Page*) &chainPage, (Page*) &setPage, (Page*) &presetPage }) body.addChildComponent (pg);
+        for (Page* pg : { (Page*) &quantPage, (Page*) &humPage, (Page*) &chainPage, (Page*) &setPage, (Page*) &presetPage, (Page*) &mapPage }) body.addChildComponent (pg);
         presetPage.onLoaded = [this] { refreshAll(); };
         presetPage.onImport = [this] { importDialog(); };
         body.addChildComponent (exchange);
@@ -241,7 +243,7 @@ private:
     Body body;
     float scale = 1.0f;
 
-    TextButton prevPreset, nextPreset, presetName, saveBtn, exchangeBtn, chainsBtn, settingsBtn, zoomOut, zoomPct, zoomIn;
+    TextButton prevPreset, nextPreset, presetName, saveBtn, exchangeBtn, chainsBtn, mapBtn, settingsBtn, zoomOut, zoomPct, zoomIn;
     KeyStrip strip, bigStrip;
     ParkTray tray, bigTray;
     TextEditor nameEd, barsEd;
@@ -265,7 +267,7 @@ private:
             owner->repaintRoll();
         }
     } scrollRelay;
-    QuantizePage quantPage; HumanizePage humPage; ChainPage chainPage; SettingsPage setPage; PresetPage presetPage;
+    QuantizePage quantPage; HumanizePage humPage; ChainPage chainPage; SettingsPage setPage; PresetPage presetPage; MapPage mapPage;
     Component exchange;
     Page* openPage = nullptr; TextButton* openPageBtn = nullptr;
     struct Toast : public Component
@@ -291,8 +293,8 @@ private:
         headerTitle = h.removeFromLeft (170);
         RowPlacer hp (h, 5);
         hp.place (prevPreset, 24); hp.place (presetName, 230); hp.place (nextPreset, 24); hp.skip (4); hp.place (saveBtn);
-        RowPlacer hr (h.withTrimmedLeft (h.getWidth() - 360), 5);
-        hr.place (exchangeBtn); hr.place (chainsBtn); hr.place (settingsBtn); hr.skip (8);
+        RowPlacer hr (h.withTrimmedLeft (h.getWidth() - 450), 5);
+        hr.place (exchangeBtn); hr.place (chainsBtn); hr.place (mapBtn); hr.place (settingsBtn); hr.skip (8);
         hr.place (zoomOut, 24); hr.place (zoomPct, 48); hr.place (zoomIn, 24);
         a.removeFromTop (6);
         // keyboard + tray
@@ -338,6 +340,7 @@ private:
         // pages float over the roll's right side
         auto pageArea = rollArea.withTrimmedLeft (jmax (0, rollArea.getWidth() - 520)).withTrimmedBottom (velH / 2);
         for (Page* pg : { (Page*) &quantPage, (Page*) &humPage, (Page*) &chainPage, (Page*) &setPage }) pg->setBounds (pageArea);
+        mapPage.setBounds (rollArea.withTrimmedLeft (jmax (0, rollArea.getWidth() - 520)));
         presetPage.setBounds (rollArea.withTrimmedLeft (jmax (0, rollArea.getWidth() - 600)));
         exchange.setBounds (rollArea.withTrimmedTop (-90));
         auto ex = exchange.getLocalBounds().reduced (12);
@@ -391,7 +394,7 @@ private:
         status.setText (keyName (st.song().editKey) + "   " + (p.name.isNotEmpty() ? p.name : String ("(empty key)")) + "   |   "
                         + String ((int) p.notes.size()) + " notes   |   " + String (p.bars) + " x " + String (p.beatsPerBar) + "/4"
                         + "   |   pattern keys " + keyName (st.song().settings.zoneLow) + " to " + keyName (st.song().settings.zoneHigh)
-                        + "   |   out ch " + String (st.song().settings.outChannel), dontSendNotification);
+                        + "   |   playing on " + builtInMaps()[(size_t) st.song().playMap].name + ", ch " + String (st.song().settings.outChannel), dontSendNotification);
     }
     void syncSwingPreset()
     {
@@ -500,7 +503,11 @@ private:
             if (! f.existsAsFile()) continue;
             auto part = readMidiFile (f);
             if (part.notes.empty()) continue;
-            for (auto& p : splitToPatterns (part, st.song().settings.splitBars)) pieces.push_back (std::move (p));
+            for (auto& p : splitToPatterns (part, st.song().settings.splitBars)) {
+                const int from = st.song().importMap;
+                if (from >= 0 && from != st.song().playMap) convertPattern (p, st.song().map (from), st.song().map (st.song().playMap));
+                pieces.push_back (std::move (p));
+            }
         }
         if (pieces.empty()) { showToast ("No MIDI notes found in that file"); return; }
         const bool toBlack = st.song().settings.fillsToBlack && files.size() > 1;
