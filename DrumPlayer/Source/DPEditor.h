@@ -163,7 +163,10 @@ public:
         guideBox.onChange = [this] { static const int g[] = { 0, 8, 16, 20, 32 }; st.velGuide = g[jlimit (0, 4, guideBox.getSelectedItemIndex())]; vel.repaint(); };
         setupButton (body, playBtn, "Play", false, "Play the pattern being edited");
         playBtn.onClick = [this] { proc.uiTrigger (st.song().editKey); };
-        setupButton (body, stopBtn, "Stop"); stopBtn.onClick = [this] { proc.uiStop(); };
+        setupButton (body, stopBtn, "Stop"); stopBtn.onClick = [this] { proc.uiStop(); stopFlashUntil = Time::getMillisecondCounter() + 450; };
+        playBtn.getProperties().set ("lit", (int) 0xff6fe08f);           // Play glows green while playing
+        stopBtn.getProperties().set ("lit", (int) 0xffff5a5a);           // Stop flashes red
+        recBtn.getProperties().set ("lit", (int) 0xffff5a5a);            // Rec blinks red on the count-in, stays red while recording
         dragBtn.setButtonText ("Drag MIDI"); dragBtn.setSize (fitW ("Drag MIDI"), btnH); body.addAndMakeVisible (dragBtn);
         dragBtn.getParts = [this] { return std::vector<const Pattern*> { &st.pat() }; };
         dragBtn.getChannel = [this] { return st.song().settings.outChannel; };
@@ -175,6 +178,9 @@ public:
         songDiv.getValue = [this] { return songH; }; songDiv.setValue = [this] (int v) { songH = jlimit (40, 260, v); layout(); };
         velDiv.getValue = [this] { return velH; }; velDiv.setValue = [this] (int v) { velH = jlimit (50, 420, v); layout(); }; velDiv.invert = true;
         menuBar.setModel (this); body.addAndMakeVisible (menuBar);
+        setupButton (body, pageClose, String::charToString ((juce_wchar) 0x00D7), false, "Close");
+        pageClose.setComponentID ("Close X"); pageClose.setVisible (false);
+        pageClose.onClick = [this] { closePages(); };
         setupButton (body, zH1, "W-", false, "Narrower (Ctrl+wheel)"); setupButton (body, zH2, "W+", false, "Wider (Ctrl+wheel)");
         setupButton (body, zV1, "H-", false, "Lower lanes (Alt+wheel)"); setupButton (body, zV2, "H+", false, "Taller lanes (Alt+wheel)");
         setupButton (body, zFit, "Fit", false, "Fit the pattern to the window (Ctrl+Shift+F)");
@@ -370,7 +376,10 @@ public:
         const bool sel = anySelected (p);
         switch (index) {
             case 0:
-                m.addItem (1, "New (clear everything)"); m.addItem (2, "Presets..."); m.addItem (3, "Save preset");
+                m.addItem (1, "New (clear everything)");
+                m.addItem (12, "Open project..."); m.addItem (13, "Save project" + (projectFile.existsAsFile() ? "  (" + projectFile.getFileNameWithoutExtension() + ")" : String())); m.addItem (14, "Save project as...");
+                m.addSeparator();
+                m.addItem (2, "Presets..."); m.addItem (3, "Save preset");
                 m.addSeparator(); m.addItem (4, "Import MIDI files..."); m.addItem (5, "Export this pattern as MIDI..."); m.addItem (6, "Export the song lane as MIDI...");
                 m.addSeparator(); m.addItem (7, "Drum map..."); m.addItem (8, "Settings..."); m.addItem (9, "Look...");
                 break;
@@ -438,6 +447,9 @@ public:
             case 1: AlertWindow::showOkCancelBox (MessageBoxIconType::QuestionIcon, "New", "Clear every pattern, chain and the song lane?", "Clear", "Cancel", this,
                         ModalCallbackFunction::create ([this] (int r) { if (r == 1) { auto s2 = Song::makeDefault(); s2.settings = st.song().settings; s2.playMap = st.song().playMap; proc.commit (s2, "New"); refreshAll(); } })); break;
             case 2: togglePage (presetPage, presetName); break;
+            case 12: openProject(); break;
+            case 13: if (projectFile.existsAsFile()) saveProject (projectFile); else saveProjectAs(); break;
+            case 14: saveProjectAs(); break;
             case 3: quickSave(); break;
             case 4: importDialog(); break;
             case 5: exportPattern (st.song().editKey); break;
@@ -500,6 +512,32 @@ public:
         refreshControls();
     }
 
+    // ------------------------------------------------------------ projects: everything (patterns, song lane, chains, settings, sound) in one file
+    File projectsFolder() const { auto d = dataFolder().getChildFile ("Projects"); d.createDirectory(); return d; }
+    void saveProject (const File& f)
+    {
+        if (auto x = proc.stateXml(); x != nullptr && x->writeTo (f)) { projectFile = f; showToast ("Saved project " + f.getFileNameWithoutExtension()); }
+        else showToast ("Couldn't save there");
+    }
+    void saveProjectAs()
+    {
+        chooser = std::make_unique<FileChooser> ("Save project", projectFile.existsAsFile() ? projectFile : projectsFolder().getChildFile ("My song.dpproject"), "*.dpproject");
+        chooser->launchAsync (FileBrowserComponent::saveMode | FileBrowserComponent::canSelectFiles | FileBrowserComponent::warnAboutOverwriting,
+            [this] (const FileChooser& fc) { auto f = fc.getResult(); if (f != File()) saveProject (f.withFileExtension ("dpproject")); });
+    }
+    void openProject()
+    {
+        chooser = std::make_unique<FileChooser> ("Open project", projectsFolder(), "*.dpproject");
+        chooser->launchAsync (FileBrowserComponent::openMode | FileBrowserComponent::canSelectFiles, [this] (const FileChooser& fc) {
+            auto f = fc.getResult();
+            if (f == File()) return;
+            auto x = XmlDocument::parse (f);
+            if (x == nullptr || ! x->hasTagName ("DrumPlayerState")) { showToast ("That isn't a Drum Player project"); return; }
+            proc.applyState (*x);
+            projectFile = f; refreshAll(); showToast ("Opened " + f.getFileNameWithoutExtension());
+        });
+    }
+
     void zoomToFit()
     {
         st.pxPerBeat = jlimit (12.0f, 900.0f, (float) grid.getWidth() / jmax (1.0f, (float) st.pat().lengthTicks() / PPQ));
@@ -548,6 +586,7 @@ private:
     QuantizePage quantPage; HumanizePage humPage; ChainPage chainPage; SettingsPage setPage; PresetPage presetPage; MapPage mapPage; RecordPage recPage;
     Component exchange;
     Page* openPage = nullptr; TextButton* openPageBtn = nullptr;
+    TextButton pageClose;                    // the X in the corner of an open page
     struct Toast : public Component
     {
         String text; uint32 until = 0;
@@ -644,6 +683,7 @@ private:
         ex.removeFromBottom (10);
         bigStrip.setBounds (ex);
         clampScroll();
+        if (openPage != nullptr) placeClose (openPage->getBounds()); else if (exchange.isVisible()) placeClose (exchange.getBounds());
         body.repaint();
     }
     Rectangle<int> headerTitle, rollArea, velLabelArea, headerArea, toolArea;
@@ -735,6 +775,14 @@ private:
             if (lit != recBtn.getToggleState()) recBtn.setToggleState (lit, dontSendNotification);
         }
         if (headers.pollHits()) headers.repaint();
+        {   // transport lamps
+            const bool playingNow = proc.playingKey.load() >= 0 || proc.songBeatUi.load() >= 0;
+            if (playingNow != playBtn.getToggleState()) playBtn.setToggleState (playingNow, dontSendNotification);
+            const bool stopLit = Time::getMillisecondCounter() < stopFlashUntil;
+            if (stopLit != stopBtn.getToggleState()) stopBtn.setToggleState (stopLit, dontSendNotification);
+            bool looping = false; for (auto& c : st.song().chains) for (auto& s2 : c.steps) looping |= s2.looping;
+            if (looping) chainStrip.repaint();
+        }
         if (const uint32 ns = proc.notesSent.load(); ns != lastNotesSent && (Time::getMillisecondCounter() - lastStatusMs) > 250) { lastNotesSent = ns; lastStatusMs = Time::getMillisecondCounter(); refreshControls(); }
         if (const double sb = proc.songBeatUi.load(); sb >= 0 || lastSongBeat >= 0) { lastSongBeat = sb; songLane.repaint(); }
         if (const int ser = proc.lastInSerial.load(); ser != lastInSerialSeen) {     // which key was pressed, and what it did
@@ -784,6 +832,8 @@ private:
     int lastChainState = -1;
     std::array<uint32, 128> lastIn {};
     double lastSongBeat = -1;
+    uint32 stopFlashUntil = 0;
+    File projectFile;
     uint32 lastNotesSent = 0, lastStatusMs = 0;
     int learnFrom = -1, learnSerial = 0;
 
@@ -806,7 +856,10 @@ private:
         if (exchange.isVisible()) { exchange.setVisible (false); exchangeBtn.setToggleState (false, dontSendNotification); }
         const bool open = openPage != &pg;
         closePages();
-        if (open) { openPage = &pg; openPageBtn = &btn; pg.refresh(); pg.setVisible (true); pg.toFront (false); btn.setToggleState (true, dontSendNotification); }
+        if (open) {
+            openPage = &pg; openPageBtn = &btn; pg.refresh(); pg.setVisible (true); pg.toFront (false); btn.setToggleState (true, dontSendNotification);
+            placeClose (pg.getBounds());
+        }
     }
     void closePages()
     {
@@ -814,12 +867,18 @@ private:
         if (openPageBtn != nullptr) openPageBtn->setToggleState (false, dontSendNotification);
         openPage = nullptr; openPageBtn = nullptr;
         exchange.setVisible (false); exchangeBtn.setToggleState (false, dontSendNotification);
+        pageClose.setVisible (false);
+    }
+    void placeClose (Rectangle<int> r)
+    {
+        pageClose.setBounds (r.getRight() - 34, r.getY() + 8, 24, 22);
+        pageClose.setVisible (true); pageClose.toFront (false);
     }
     void toggleExchange()
     {
         const bool show = ! exchange.isVisible();
         closePages();
-        if (show) { exchange.setVisible (true); exchange.toFront (false); exchangeBtn.setToggleState (true, dontSendNotification); }
+        if (show) { exchange.setVisible (true); exchange.toFront (false); exchangeBtn.setToggleState (true, dontSendNotification); placeClose (exchange.getBounds()); }
     }
 
     void setKeyMode (int m)

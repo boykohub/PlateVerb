@@ -74,6 +74,7 @@ struct Note
     int autoDiv = 0;                                    // filled on publish: swing value for "Auto"
     int art = -1;                                       // drum articulation, kept so map changes can be undone exactly
     bool silent = false;                                // filled on publish: this plugin has no such sound
+    int hhOpen = -1;                                    // filled on publish: hi-hat openness 0-127 for the controller (-1 = not a hi-hat)
     bool operator< (const Note& o) const { return tick != o.tick ? tick < o.tick : note < o.note; }
 };
 
@@ -111,7 +112,7 @@ struct Lane
     bool solo = false;
 };
 
-struct ChainStep { int key = -1, repeats = 1; };
+struct ChainStep { int key = -1, repeats = 1; bool looping = false; };   // looping: this step repeats until you release it
 struct Group { String name; uint32 colour = 0xff7fd1ff; };          // your own designations, each with a colour
 inline std::vector<Group> defaultGroups()
 {
@@ -147,6 +148,7 @@ struct Settings
     int recMode = 0;                               // 0 overdub, 1 replace (a lane's old notes go when you play it)
     int recStopAfter = 0;                          // passes, 0 = until stopped
     int recFixedVel = 0;                           // 0 = as played
+    int hhCC = 0;                                  // send hi-hat openness on this controller before hi-hat notes (0 = off)
 
     int resolveStop() const { return stopNote == -2 ? zoneHigh : stopNote; }
     // the pattern key an incoming note triggers, or -1 (stop key included)
@@ -704,7 +706,7 @@ inline std::unique_ptr<XmlElement> songToXml (const Song& s)
     for (auto& c : s.chains) {
         auto* e = cs->createNewChildElement ("C");
         e->setAttribute ("name", c.name); e->setAttribute ("trigger", c.triggerNote); e->setAttribute ("loop", c.loop);
-        String st; for (auto& step : c.steps) st << step.key << ':' << step.repeats << ';';
+        String st; for (auto& step : c.steps) st << step.key << ':' << step.repeats << ':' << (step.looping ? 1 : 0) << ';';
         e->setAttribute ("steps", st);
     }
     auto* gs = x->createNewChildElement ("Groups");
@@ -724,7 +726,7 @@ inline std::unique_ptr<XmlElement> songToXml (const Song& s)
     st->setAttribute ("stop", o.stopNote); st->setAttribute ("recq", o.recQuantize); st->setAttribute ("split", o.splitBars);
     st->setAttribute ("trigch", o.triggerChannel); st->setAttribute ("playch", o.playChannel); st->setAttribute ("mirror", o.mirrorOctaves);
     st->setAttribute ("countin", o.countInBars); st->setAttribute ("metro", o.metroMode); st->setAttribute ("metrolvl", o.metroLevel);
-    st->setAttribute ("keymode", o.keyMode);
+    st->setAttribute ("keymode", o.keyMode); st->setAttribute ("hhcc", o.hhCC);
     st->setAttribute ("recmode", o.recMode); st->setAttribute ("recstop", o.recStopAfter); st->setAttribute ("recvel", o.recFixedVel);
     return x;
 }
@@ -756,7 +758,7 @@ inline Song songFromXml (const XmlElement& x)
             auto& c = s.chains.back();
             c.name = e->getStringAttribute ("name", "Chain " + String ((int) s.chains.size())); c.triggerNote = e->getIntAttribute ("trigger", -1); c.loop = e->getBoolAttribute ("loop", true);
             for (auto& tok : StringArray::fromTokens (e->getStringAttribute ("steps"), ";", "")) {
-                auto f = StringArray::fromTokens (tok, ":", ""); if (f.size() == 2) c.steps.push_back ({ f[0].getIntValue(), jmax (1, f[1].getIntValue()) });
+                auto f = StringArray::fromTokens (tok, ":", ""); if (f.size() >= 2) c.steps.push_back ({ f[0].getIntValue(), jmax (1, f[1].getIntValue()), f.size() > 2 && f[2].getIntValue() != 0 });
             }
         }
     }
@@ -790,6 +792,7 @@ inline Song songFromXml (const XmlElement& x)
         o.recMode = jlimit (0, 1, st->getIntAttribute ("recmode", 0)); o.recStopAfter = jlimit (0, 64, st->getIntAttribute ("recstop", 0));
         o.recFixedVel = jlimit (0, 127, st->getIntAttribute ("recvel", 0));
         o.keyMode = jlimit (0, 1, st->getIntAttribute ("keymode", 0));
+        o.hhCC = jlimit (0, 127, st->getIntAttribute ("hhcc", 0));
         if (x.getIntAttribute ("version", 1) < 3) {     // older saves: patterns move up an octave to start at C-1, stop on B-2
             o.zoneLow = 12; o.zoneHigh = 127; o.stopNote = 11; o.mirrorOctaves = false; o.startQuant = StartQuant::InTime;
             for (int k = 127; k >= 12; --k) if (s.keys[(size_t) (k - 12)].isEmpty() == false && s.keys[(size_t) k].isEmpty()) std::swap (s.keys[(size_t) k], s.keys[(size_t) (k - 12)]);

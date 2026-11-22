@@ -121,16 +121,18 @@ public:
         }
         // soft drop shadow so the key looks raised
         g.setColour (Colours::black.withAlpha (0.35f)); g.fillRoundedRectangle (r.translated (0, 1.0f), cr);
-        Colour top = on ? th::amber.brighter (0.15f) : th::raised.brighter (0.06f);
-        Colour bot = on ? th::amber.darker (0.25f) : th::surface;
+        // a button can carry its own lamp colour (Play green, Stop and Rec red); otherwise amber
+        const Colour lamp = b.getProperties().contains ("lit") ? Colour ((uint32) (int) b.getProperties()["lit"]) : th::amber;
+        Colour top = on ? lamp.brighter (0.15f) : th::raised.brighter (0.06f);
+        Colour bot = on ? lamp.darker (0.25f) : th::surface;
         if (! b.isEnabled()) { top = top.withMultipliedAlpha (0.45f); bot = bot.withMultipliedAlpha (0.45f); }
         g.setGradientFill (ColourGradient (top, r.getTopLeft(), bot, r.getBottomLeft(), false));
         g.fillRoundedRectangle (r, cr);
         if (on) {                                                   // lamp glow
-            g.setColour (th::amber.withAlpha (0.18f)); g.drawRoundedRectangle (r.expanded (1.0f), cr + 1, 2.0f);
+            g.setColour (lamp.withAlpha (0.25f)); g.drawRoundedRectangle (r.expanded (1.0f), cr + 1, 2.0f);
         }
         g.setColour (Colours::white.withAlpha (on ? 0.35f : 0.08f)); g.drawLine (r.getX() + cr, r.getY() + 1.0f, r.getRight() - cr, r.getY() + 1.0f, 1.0f);
-        g.setColour (on ? th::amber.darker (0.4f) : Colours::black.withAlpha (0.5f)); g.drawRoundedRectangle (r, cr, 0.8f);
+        g.setColour (on ? lamp.darker (0.4f) : Colours::black.withAlpha (0.5f)); g.drawRoundedRectangle (r, cr, 0.8f);
         if (over || down) { g.setColour (Colours::white.withAlpha (down ? 0.14f : 0.06f)); g.fillRoundedRectangle (r, cr); }
     }
     Font getTextButtonFont (TextButton&, int) override { return font (12.0f, 2); }

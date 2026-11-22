@@ -31,8 +31,10 @@ class Page : public Component
 {
 public:
     explicit Page (String t) : title (std::move (t)) {}
+    bool embedded = false;                    // shown inside another page (as a tab): no card or title of its own
     void paint (Graphics& g) override
     {
+        if (embedded) return;
         drawCard (g, getLocalBounds().toFloat().reduced (2), th::panel, 12, "Pages");
         g.setFont (font (13.0f, 3)); g.setColour (th::amber);
         g.drawText (title, 16, 8, getWidth() - 32, 22, Justification::centredLeft);
@@ -42,7 +44,7 @@ public:
     virtual void refresh() {}
     String title;
 protected:
-    Rectangle<int> content() const { return getLocalBounds().reduced (16, 0).withTrimmedTop (38).withTrimmedBottom (12); }
+    Rectangle<int> content() const { return embedded ? getLocalBounds() : getLocalBounds().reduced (16, 0).withTrimmedTop (38).withTrimmedBottom (12); }
     // a labelled row
     Rectangle<int> row (Rectangle<int>& area, Label& l, int labelW = 130)
     {
@@ -401,7 +403,7 @@ class ChainStrip : public Component, public DragAndDropTarget, public SettableTo
 public:
     explicit ChainStrip (EditState& e) : st (e)
     {
-        setTooltip ("Drag keys here to chain them. Drag a tile to reorder, right-click it for repeats. Click a tile to edit its pattern");
+        setTooltip ("Drag keys here to chain them. Drag a tile to reorder, right-click it for repeats. Click a tile to edit its pattern. Press and hold a tile to loop it; click it again to let the chain go on");
         setupCombo (*this, sel, {}, 1, "Which chain");
         sel.onChange = [this] {
             const int i = sel.getSelectedItemIndex();
@@ -467,7 +469,11 @@ public:
             g.setColour (th::ink); g.setFont (font (10.5f, 2));
             g.drawFittedText ((p.name.isNotEmpty() ? p.name : keyName (step.key)), r.reduced (6, 1).withTrimmedRight (22).toNearestInt(), Justification::centredLeft, 1, 0.8f);
             g.setFont (font (10.5f, 3));
-            g.drawText ("x" + String (step.repeats), r.reduced (5, 0).toNearestInt(), Justification::centredRight);
+            g.drawText (step.looping ? String ("LOOP") : "x" + String (step.repeats), r.reduced (5, 0).toNearestInt(), Justification::centredRight);
+            if (step.looping) {                                                   // a looping step pulses
+                const float a = 0.5f + 0.5f * (float) std::sin (Time::getMillisecondCounter() * 0.008);
+                g.setColour (th::amber.withAlpha (0.4f + 0.6f * a)); g.drawRoundedRectangle (r.expanded (2), 6, 2.5f);
+            }
             if (dropAt == i) { g.setColour (th::green); g.fillRect (r.getX() - 3.0f, r.getY(), 2.0f, r.getHeight()); }
         }
         g.restoreState();
@@ -484,8 +490,7 @@ public:
         downStep = i;
         if (i < 0) return;
         if (e.mods.isPopupMenu()) { stepMenu (i); return; }
-        st.song().editKey = chain().steps[(size_t) i].key;
-        if (st.changed) st.changed();
+        downTime = Time::getMillisecondCounter(); tileDragged = false;
     }
     void mouseDrag (const MouseEvent& e) override
     {
@@ -495,11 +500,21 @@ public:
                 const auto r = tileRect (downStep).toNearestInt();
                 const auto img = createComponentSnapshot (r, true);
                 const Point<int> off = r.getPosition() - e.getMouseDownPosition();
-                dragStep = downStep;
+                dragStep = downStep; tileDragged = true;
                 c->startDragging ("chainstep:" + String (downStep), this, ScaledImage (img), false, &off);
             }
     }
-    void mouseUp (const MouseEvent&) override { downStep = -1; dragStep = -1; repaint(); }
+    void mouseUp (const MouseEvent& e) override
+    {
+        const int i = downStep;
+        if (i >= 0 && i < (int) chain().steps.size() && ! tileDragged && ! e.mods.isPopupMenu()) {
+            if (Time::getMillisecondCounter() - downTime >= 350 || chain().steps[(size_t) i].looping)   // press and hold: loop; click a looping tile: release it
+                edit (chain().steps[(size_t) i].looping ? "Stop looping" : "Loop chain step", [i] (Chain& c) { c.steps[(size_t) i].looping = ! c.steps[(size_t) i].looping; });
+            else { st.song().editKey = chain().steps[(size_t) i].key; if (st.changed) st.changed(); }
+        }
+        downStep = -1; dragStep = -1; repaint();
+    }
+    uint32 downTime = 0; bool tileDragged = false;
     void mouseWheelMove (const MouseEvent&, const MouseWheelDetails& w) override
     {
         scroll = jlimit (0, jmax (0, ((int) chain().steps.size() + 1) * (tileW + gap) - tilesArea().getWidth()), scroll - (int) ((w.deltaY + w.deltaX) * 300));
@@ -904,13 +919,21 @@ public:
         onBtn.onClick = [this] { const bool on = onBtn.getToggleState(); st.applySong ("Song mode", [on] (Song& s) { s.songMode = on; }); };
         setupButton (*this, play, "Play"); play.onClick = [this] { if (! st.song().songMode) st.applySong ("Song mode", [] (Song& s) { s.songMode = true; }); st.proc.uiSongPlay (true, lane.cursorBeat); };
         setupButton (*this, stop, "Stop"); stop.onClick = [this] { st.proc.uiSongPlay (false, 0); };
+        setupButton (*this, rec, "Rec", true, "Record what you play with the pattern keys onto this lane, at Studio One's position (or from the cursor when Studio One is stopped). Press again to finish");
+        rec.getProperties().set ("lit", (int) 0xffff5a5a);
+        rec.onClick = [this] {
+            const bool on = rec.getToggleState();
+            if (on) { st.song().songMode = false; st.proc.songRecCursor = lane.cursorBeat; st.proc.publish(); }
+            st.proc.setSongRecord (on);
+            if (st.toast) st.toast (on ? "Recording: play your pattern keys" : "Recording finished");
+        };
         setupCombo (*this, snap, { "Snap: bar", "Snap: beat", "Snap: 1/8", "Snap: 1/16", "Snap: off" }, 1, "Chunks also click onto each other's edges. Alt while dragging = free");
         snap.setSelectedItemIndex (0, dontSendNotification);
         snap.onChange = [this] { lane.snap = snap.getSelectedItemIndex(); };
         dragOut.setButtonText ("Song MIDI"); dragOut.setSize (fitW ("Song MIDI"), btnH); dragOut.setComponentID ("Song MIDI"); addAndMakeVisible (dragOut);
         dragOut.setTooltip ("Drag the whole song lane out as one MIDI file");
     }
-    void refresh() { onBtn.setToggleState (st.song().songMode, dontSendNotification); }
+    void refresh() { onBtn.setToggleState (st.song().songMode, dontSendNotification); rec.setToggleState (st.proc.songRecArmed.load(), dontSendNotification); }
     void paint (Graphics& g) override
     {
         fillArea (g, getLocalBounds(), "Lane names", th::panel);
@@ -924,7 +947,8 @@ public:
         onBtn.setBounds (r1.removeFromLeft (onBtn.getWidth())); r1.removeFromLeft (4); dragOut.setBounds (r1.removeFromLeft (jmin (r1.getWidth(), dragOut.getWidth())));
         a.removeFromTop (4);
         auto r2 = a.removeFromTop (btnH);
-        play.setBounds (r2.removeFromLeft (play.getWidth())); r2.removeFromLeft (4); stop.setBounds (r2.removeFromLeft (stop.getWidth())); r2.removeFromLeft (4);
+        play.setBounds (r2.removeFromLeft (play.getWidth())); r2.removeFromLeft (3); stop.setBounds (r2.removeFromLeft (stop.getWidth())); r2.removeFromLeft (3);
+        rec.setBounds (r2.removeFromLeft (rec.getWidth())); r2.removeFromLeft (3);
         snap.setBounds (r2);
     }
 private:
@@ -942,7 +966,7 @@ private:
         }
     };
     EditState& st; SongLane& lane;
-    TextButton onBtn, play, stop; ComboBox snap;
+    TextButton onBtn, play, stop, rec; ComboBox snap;
     DragSong dragOut;
 public:
     void attach() { dragOut.st = &st; }
@@ -1529,12 +1553,166 @@ private:
     void selectedRowsChanged (int) override { show(); }
 };
 
+
+// ---------------------------------------------------------------- Settings > Inner workings: how the drumming is shaped
+class InnerPage : public Page
+{
+public:
+    InnerPage (EditState& e) : Page ("INNER WORKINGS"), st (e)
+    {
+        embedded = true;
+        auto& ap = st.proc.apvts;
+        auto make = [&] (Label& l, FineSlider& s2, const char* id, const String& text, const String& suffix, const String& tip) {
+            setupLabel (*this, l, text); setupSlider (*this, s2); s2.setTextValueSuffix (suffix); s2.setTooltip (tip);
+            att.push_back (std::make_unique<AudioProcessorValueTreeState::SliderAttachment> (ap, id, s2));
+        };
+        setupLabel (*this, hFeel, "FEEL (like a drummer)", 11.0f, th::amber);
+        make (lDT, driftT, ids::driftTime, "Drift timing", " ms", "Timing leans ahead and lays back slowly over a few bars, instead of jumping on every note");
+        make (lDV, driftV, ids::driftVel, "Drift velocity", "", "Playing swells and settles slowly");
+        make (lDS, driftS, ids::driftBars, "Drift speed", " bars", "How many bars one lean takes");
+        make (lPh, phrase, ids::phrase, "Phrase dynamics", " %", "Builds into the one, lifts fills, eases the middle of the pattern");
+        make (lHT, humT, ids::humTime, "Random timing", " ms", "Small random timing on every note");
+        make (lHV, humV, ids::humVel, "Random velocity", "", "Small random velocity on every note");
+        setupLabel (*this, hVint, "VINTAGE MACHINES (Akai MPC, Linn era)", 11.0f, th::amber);
+        setupLabel (*this, lVc, "Clock");
+        setupCombo (*this, vint, { "Off", "96 per beat (MPC era)", "48 per beat (LM-1 era)", "24 per beat (early sync)" });
+        vintAtt = std::make_unique<AudioProcessorValueTreeState::ComboBoxAttachment> (ap, ids::vintRes, vint);
+        make (lW, wob, ids::vintJitter, "Clock wobble", " ms", "How much the old clock wanders");
+        setupButton (*this, stag, "MIDI cable stagger", true, "Notes that land together come out about 1 ms apart, like a 5-pin MIDI cable");
+        stagAtt = std::make_unique<AudioProcessorValueTreeState::ButtonAttachment> (ap, ids::stagger, stag);
+        setupLabel (*this, hHH, "HI-HAT", 11.0f, th::amber);
+        setupLabel (*this, lHH, "Openness by controller");
+        setupCombo (*this, hh, { "Off", "CC1 mod wheel (Groove Agent)", "CC4 foot controller", "CC11 expression", "CC2 breath" }, 1,
+                    "Before each hi-hat note, Drum Player sends how open it is, so plugins that follow a controller open the hat smoothly");
+        hh.onChange = [this] { static const int cc[] = { 0, 1, 4, 11, 2 }; const int v = cc[jlimit (0, 4, hh.getSelectedItemIndex())]; st.song().settings.hhCC = v; st.proc.publish(); };
+        setupLabel (*this, help, "Everything here is live: the notes in your patterns don't change. Shift-drag sliders for fine steps.", 10.5f, th::faint);
+    }
+    void refresh() override
+    {
+        const int v = st.song().settings.hhCC;
+        hh.setSelectedItemIndex (v == 1 ? 1 : v == 4 ? 2 : v == 11 ? 3 : v == 2 ? 4 : 0, dontSendNotification);
+    }
+    void resized() override
+    {
+        auto a = content(); const int lw = 150;
+        hFeel.setBounds (a.removeFromTop (20));
+        driftT.setBounds (row (a, lDT, lw)); driftV.setBounds (row (a, lDV, lw)); driftS.setBounds (row (a, lDS, lw));
+        phrase.setBounds (row (a, lPh, lw)); humT.setBounds (row (a, lHT, lw)); humV.setBounds (row (a, lHV, lw));
+        a.removeFromTop (4); hVint.setBounds (a.removeFromTop (20));
+        auto r = row (a, lVc, lw); vint.setBounds (r.removeFromLeft (190)); r.removeFromLeft (8); stag.setBounds (r.removeFromLeft (stag.getWidth()).reduced (0, 3));
+        wob.setBounds (row (a, lW, lw));
+        a.removeFromTop (4); hHH.setBounds (a.removeFromTop (20));
+        hh.setBounds (row (a, lHH, lw).removeFromLeft (230));
+        help.setBounds (a.removeFromTop (34));
+    }
+private:
+    EditState& st;
+    Label hFeel, lDT, lDV, lDS, lPh, lHT, lHV, hVint, lVc, lW, hHH, lHH, help;
+    FineSlider driftT, driftV, driftS, phrase, humT, humV, wob;
+    ComboBox vint, hh; TextButton stag;
+    std::unique_ptr<AudioProcessorValueTreeState::ComboBoxAttachment> vintAtt;
+    std::unique_ptr<AudioProcessorValueTreeState::ButtonAttachment> stagAtt;
+    std::vector<std::unique_ptr<AudioProcessorValueTreeState::SliderAttachment>> att;
+};
+
+// ---------------------------------------------------------------- drum map page
+class MapPage : public Page
+{
+public:
+    MapPage (EditState& e) : Page ("DRUM MAP"), st (e)
+    {
+        StringArray names; for (auto& m : builtInMaps()) names.add (m.name);
+        setupLabel (*this, lPlay, "Playing on");
+        setupCombo (*this, play, names, 1, "The drum plugin Drum Player feeds. Changing it converts every pattern (and changing back restores them)");
+        play.onChange = [this] {
+            const int to = play.getSelectedItemIndex();
+            if (loading || to < 0 || to == st.song().playMap) return;
+            st.applySong ("Drum map", [to] (Song& s) { convertSong (s, s.playMap, to); });
+            if (st.toast) st.toast ("All patterns now play on " + builtInMaps()[(size_t) to].name + ", MIDI channel " + String (st.song().settings.outChannel));
+            refresh();
+        };
+        StringArray from { "Same as above" }; from.addArray (names);
+        setupLabel (*this, lFrom, "Dropped MIDI is from");
+        setupCombo (*this, importFrom, from, 1, "Which plugin made the MIDI you drop in. It is converted on the way in");
+        importFrom.onChange = [this] { if (loading) return; const int v = importFrom.getSelectedItemIndex() - 1; st.applySong ("Import map", [v] (Song& s) { s.importMap = v; }); refresh(); };
+        StringArray chs; for (int c = 1; c <= 16; ++c) chs.add ("Channel " + String (c));
+        setupLabel (*this, lOut, "MIDI out"); setupCombo (*this, outCh, chs, 1, "The channel Drum Player sends on. It must match what the drum plugin's track lets through");
+        outCh.onChange = [this] { if (loading) return; const int c = outCh.getSelectedItemIndex() + 1; st.applySong ("MIDI out channel", [c] (Song& s) { s.settings.outChannel = c; }); refresh(); };
+        setupButton (*this, convertBtn, "Convert the edited pattern from...", false, "For a pattern that came from another plugin and sounds wrong");
+        convertBtn.onClick = [this] {
+            PopupMenu m;
+            for (int i = 0; i < (int) numMaps; ++i) if (i != st.song().playMap) m.addItem (i + 1, builtInMaps()[(size_t) i].name);
+            m.showMenuAsync (PopupMenu::Options().withTargetComponent (&convertBtn), [this] (int r) {
+                if (r <= 0) return;
+                const int from = r - 1;
+                st.applySong ("Convert pattern", [from] (Song& s) { convertPattern (s.keys[(size_t) s.editKey], s.map (from), s.map (s.playMap)); s.ensureLanesForPattern (s.keys[(size_t) s.editKey]); });
+            });
+        };
+        setupLabel (*this, info, "", 11.0f, th::dim); info.setJustificationType (Justification::topLeft);
+        setupLabel (*this, lCustom, "Custom map: the note for each sound", 11.5f, th::amber);
+        addAndMakeVisible (view); view.setViewedComponent (&list, false); view.setScrollBarsShown (true, false);
+        StringArray notes { "None" }; for (int n = 0; n < 128; ++n) notes.add (String (n) + "  " + keyName (n));
+        for (int a = 0; a < aCount; ++a) {
+            auto* l = labels.add (new Label()); setupLabel (list, *l, artName (a), 11.5f, th::text);
+            auto* c = combos.add (new ComboBox()); setupCombo (list, *c, notes);
+            c->onChange = [this, a, c] {
+                if (loading) return;
+                const int n = c->getSelectedItemIndex() - 1;
+                st.applySong ("Custom map", [a, n] (Song& s) {
+                    const int old = s.customNotes[(size_t) a];
+                    s.customNotes[(size_t) a] = n;
+                    if (s.playMap == mapCustom && old >= 0 && n >= 0)        // move existing notes of that sound along
+                        for (auto& p : s.keys) for (auto& x : p.notes) if (x.note == old) x.note = n;
+                    if (s.playMap == mapCustom && n >= 0) { s.ensureLane (n); if (auto* l2 = s.lane (n)) l2->name = artName (a); }
+                });
+            };
+        }
+    }
+    void refresh() override
+    {
+        loading = true;
+        auto& s = st.song();
+        play.setSelectedItemIndex (s.playMap, dontSendNotification);
+        importFrom.setSelectedItemIndex (s.importMap + 1, dontSendNotification);
+        outCh.setSelectedItemIndex (s.settings.outChannel - 1, dontSendNotification);
+        const auto& m = builtInMaps()[(size_t) s.playMap];
+        info.setText (m.note + "\nOutput: MIDI channel " + String (s.settings.outChannel) + ".  Notes the map doesn't know pass through unchanged.", dontSendNotification);
+        for (int a = 0; a < aCount; ++a) combos[a]->setSelectedItemIndex (s.customNotes[(size_t) a] + 1, dontSendNotification);
+        const bool custom = s.playMap == mapCustom || s.importMap == mapCustom;
+        view.setVisible (custom); lCustom.setVisible (custom);
+        loading = false;
+        resized();
+    }
+    void resized() override
+    {
+        auto a = content();
+        play.setBounds (row (a, lPlay, 150).removeFromLeft (300));
+        importFrom.setBounds (row (a, lFrom, 150).removeFromLeft (300));
+        outCh.setBounds (row (a, lOut, 150).removeFromLeft (130));
+        convertBtn.setBounds (a.removeFromTop (28).removeFromLeft (convertBtn.getWidth()).reduced (0, 3)); a.removeFromTop (4);
+        info.setBounds (a.removeFromTop (46)); a.removeFromTop (4);
+        lCustom.setBounds (a.removeFromTop (22));
+        view.setBounds (a);
+        list.setSize (jmax (100, a.getWidth() - 12), aCount * 26);
+        for (int i = 0; i < aCount; ++i) { labels[i]->setBounds (0, i * 26, 170, 24); combos[i]->setBounds (176, i * 26 + 1, 150, 22); }
+    }
+private:
+    EditState& st; bool loading = false;
+    Label lPlay, lFrom, info, lCustom, lOut;
+    ComboBox play, importFrom, outCh;
+    TextButton convertBtn;
+    Viewport view; Component list;
+    OwnedArray<Label> labels; OwnedArray<ComboBox> combos;
+};
+
+
 // ---------------------------------------------------------------- settings page
 class SettingsPage : public Page
 {
 public:
-    SettingsPage (EditState& e) : Page ("SETTINGS"), st (e)
+    SettingsPage (EditState& e) : Page ("SETTINGS"), st (e), map (e), inner (e)
     {
+        map.embedded = true; addChildComponent (map); addChildComponent (inner);
         StringArray ch; for (int c = 1; c <= 16; ++c) ch.add ("Channel " + String (c) + (c == 10 ? "  (GM drums)" : ""));
         setupLabel (*this, lOut, "MIDI out"); setupCombo (*this, out, ch);
         StringArray keys; for (int n = 0; n < 128; ++n) keys.add (keyName (n) + "  (" + String (n) + ")");
@@ -1555,10 +1733,14 @@ public:
         setupButton (*this, remember, "Open the way I left it", true, "New Drum Player instances start with your last patterns and settings");
         setupLabel (*this, help, "In Studio One: put Drum Player on an instrument track, then on the drum plugin's track choose Drum Player as the input.", 10.5f, th::faint);
         help.setJustificationType (Justification::topLeft);
-        setupButton (*this, tabGeneral, "General", true); setupButton (*this, tabLook, "Look", true);
-        tabGeneral.setRadioGroupId (91); tabLook.setRadioGroupId (91); tabGeneral.setToggleState (true, dontSendNotification);
-        tabGeneral.onClick = [this] { showTab (false); };
-        tabLook.onClick = [this] { showTab (true); };
+        setupButton (*this, tabGeneral, "General", true); setupButton (*this, tabMap, "Drum map", true);
+        setupButton (*this, tabInner, "Inner workings", true); setupButton (*this, tabLook, "Look", true);
+        for (auto* b : { &tabGeneral, &tabMap, &tabInner, &tabLook }) b->setRadioGroupId (91);
+        tabGeneral.setToggleState (true, dontSendNotification);
+        tabGeneral.onClick = [this] { showTab (0); };
+        tabMap.onClick = [this] { showTab (1); };
+        tabInner.onClick = [this] { showTab (2); };
+        tabLook.onClick = [this] { showTab (3); };
         addChildComponent (look);
         auto commit = [this] {
             if (loading) return;
@@ -1579,19 +1761,31 @@ public:
         for (auto* b : { &hostStop, &thru, &fills, &remember, &mirror }) b->onClick = commit;
     }
     LookEditor look;
-    void showTab (bool lookTab)
+    MapPage map; InnerPage inner;
+    void showTab (bool lookTab) { showTab (lookTab ? 3 : 0); }
+    void showTab (int t)
     {
+        tab = t;
         for (int i = 0; i < getNumChildComponents(); ++i) {
             auto* c = getChildComponent (i);
-            if (c == &tabGeneral || c == &tabLook) continue;
-            c->setVisible (c == &look ? lookTab : ! lookTab);
+            if (c == &tabGeneral || c == &tabLook || c == &tabMap || c == &tabInner) continue;
+            const bool special = c == &look || c == &map || c == &inner;
+            c->setVisible (special ? (c == &look ? t == 3 : c == &map ? t == 1 : t == 2) : t == 0);
         }
-        if (lookTab) look.refreshList();
-        title = lookTab ? "SETTINGS  ·  LOOK" : "SETTINGS";
+        tabGeneral.setToggleState (t == 0, dontSendNotification); tabMap.setToggleState (t == 1, dontSendNotification);
+        tabInner.setToggleState (t == 2, dontSendNotification); tabLook.setToggleState (t == 3, dontSendNotification);
+        if (t == 3) look.refreshList();
+        if (t == 1) map.refresh();
+        if (t == 2) inner.refresh();
+        static const char* names[] = { "SETTINGS", "SETTINGS  ·  DRUM MAP", "SETTINGS  ·  INNER WORKINGS", "SETTINGS  ·  LOOK" };
+        title = names[jlimit (0, 3, t)];
         repaint();
     }
+    int tab = 0;
     void refresh() override
     {
+        if (tab == 1) map.refresh();
+        if (tab == 2) inner.refresh();
         loading = true;
         const auto& o = st.song().settings;
         out.setSelectedItemIndex (o.outChannel - 1, dontSendNotification);
@@ -1609,10 +1803,9 @@ public:
     {
         auto a = content();
         auto tabs = a.removeFromTop (26);
-        tabGeneral.setBounds (tabs.removeFromLeft (tabGeneral.getWidth()).reduced (0, 2)); tabs.removeFromLeft (6);
-        tabLook.setBounds (tabs.removeFromLeft (tabLook.getWidth()).reduced (0, 2));
+        for (auto* b : { &tabGeneral, &tabMap, &tabInner, &tabLook }) { b->setBounds (tabs.removeFromLeft (b->getWidth()).reduced (0, 2)); tabs.removeFromLeft (6); }
         a.removeFromTop (8);
-        look.setBounds (a);
+        look.setBounds (a); map.setBounds (a); inner.setBounds (a);
         const int lw = 170;
         out.setBounds (row (a, lOut, lw).removeFromLeft (170));
         auto z = row (a, lZone, lw); zLo.setBounds (z.removeFromLeft (110)); z.removeFromLeft (8); zHi.setBounds (z.removeFromLeft (110));
@@ -1631,7 +1824,7 @@ private:
     EditState& st; bool loading = false;
     Label lOut, lZone, lStart, lMode, lStop, lSplit, help, lTrig, lPlayCh;
     ComboBox out, zLo, zHi, start, mode, stopKey, split, trigCh, playCh;
-    TextButton hostStop, thru, fills, remember, mirror, tabGeneral, tabLook;
+    TextButton hostStop, thru, fills, remember, mirror, tabGeneral, tabLook, tabMap, tabInner;
 };
 
 // ---------------------------------------------------------------- preset browser
@@ -1771,97 +1964,6 @@ private:
         favouritesFile().replaceWithText (favs.joinIntoString ("\n"));
         list.repaint();
     }
-};
-
-
-// ---------------------------------------------------------------- drum map page
-class MapPage : public Page
-{
-public:
-    MapPage (EditState& e) : Page ("DRUM MAP"), st (e)
-    {
-        StringArray names; for (auto& m : builtInMaps()) names.add (m.name);
-        setupLabel (*this, lPlay, "Playing on");
-        setupCombo (*this, play, names, 1, "The drum plugin Drum Player feeds. Changing it converts every pattern (and changing back restores them)");
-        play.onChange = [this] {
-            const int to = play.getSelectedItemIndex();
-            if (loading || to < 0 || to == st.song().playMap) return;
-            st.applySong ("Drum map", [to] (Song& s) { convertSong (s, s.playMap, to); });
-            if (st.toast) st.toast ("All patterns now play on " + builtInMaps()[(size_t) to].name + ", MIDI channel " + String (st.song().settings.outChannel));
-            refresh();
-        };
-        StringArray from { "Same as above" }; from.addArray (names);
-        setupLabel (*this, lFrom, "Dropped MIDI is from");
-        setupCombo (*this, importFrom, from, 1, "Which plugin made the MIDI you drop in. It is converted on the way in");
-        importFrom.onChange = [this] { if (loading) return; const int v = importFrom.getSelectedItemIndex() - 1; st.applySong ("Import map", [v] (Song& s) { s.importMap = v; }); refresh(); };
-        StringArray chs; for (int c = 1; c <= 16; ++c) chs.add ("Channel " + String (c));
-        setupLabel (*this, lOut, "MIDI out"); setupCombo (*this, outCh, chs, 1, "The channel Drum Player sends on. It must match what the drum plugin's track lets through");
-        outCh.onChange = [this] { if (loading) return; const int c = outCh.getSelectedItemIndex() + 1; st.applySong ("MIDI out channel", [c] (Song& s) { s.settings.outChannel = c; }); refresh(); };
-        setupButton (*this, convertBtn, "Convert the edited pattern from...", false, "For a pattern that came from another plugin and sounds wrong");
-        convertBtn.onClick = [this] {
-            PopupMenu m;
-            for (int i = 0; i < (int) numMaps; ++i) if (i != st.song().playMap) m.addItem (i + 1, builtInMaps()[(size_t) i].name);
-            m.showMenuAsync (PopupMenu::Options().withTargetComponent (&convertBtn), [this] (int r) {
-                if (r <= 0) return;
-                const int from = r - 1;
-                st.applySong ("Convert pattern", [from] (Song& s) { convertPattern (s.keys[(size_t) s.editKey], s.map (from), s.map (s.playMap)); s.ensureLanesForPattern (s.keys[(size_t) s.editKey]); });
-            });
-        };
-        setupLabel (*this, info, "", 11.0f, th::dim); info.setJustificationType (Justification::topLeft);
-        setupLabel (*this, lCustom, "Custom map: the note for each sound", 11.5f, th::amber);
-        addAndMakeVisible (view); view.setViewedComponent (&list, false); view.setScrollBarsShown (true, false);
-        StringArray notes { "None" }; for (int n = 0; n < 128; ++n) notes.add (String (n) + "  " + keyName (n));
-        for (int a = 0; a < aCount; ++a) {
-            auto* l = labels.add (new Label()); setupLabel (list, *l, artName (a), 11.5f, th::text);
-            auto* c = combos.add (new ComboBox()); setupCombo (list, *c, notes);
-            c->onChange = [this, a, c] {
-                if (loading) return;
-                const int n = c->getSelectedItemIndex() - 1;
-                st.applySong ("Custom map", [a, n] (Song& s) {
-                    const int old = s.customNotes[(size_t) a];
-                    s.customNotes[(size_t) a] = n;
-                    if (s.playMap == mapCustom && old >= 0 && n >= 0)        // move existing notes of that sound along
-                        for (auto& p : s.keys) for (auto& x : p.notes) if (x.note == old) x.note = n;
-                    if (s.playMap == mapCustom && n >= 0) { s.ensureLane (n); if (auto* l2 = s.lane (n)) l2->name = artName (a); }
-                });
-            };
-        }
-    }
-    void refresh() override
-    {
-        loading = true;
-        auto& s = st.song();
-        play.setSelectedItemIndex (s.playMap, dontSendNotification);
-        importFrom.setSelectedItemIndex (s.importMap + 1, dontSendNotification);
-        outCh.setSelectedItemIndex (s.settings.outChannel - 1, dontSendNotification);
-        const auto& m = builtInMaps()[(size_t) s.playMap];
-        info.setText (m.note + "\nOutput: MIDI channel " + String (s.settings.outChannel) + ".  Notes the map doesn't know pass through unchanged.", dontSendNotification);
-        for (int a = 0; a < aCount; ++a) combos[a]->setSelectedItemIndex (s.customNotes[(size_t) a] + 1, dontSendNotification);
-        const bool custom = s.playMap == mapCustom || s.importMap == mapCustom;
-        view.setVisible (custom); lCustom.setVisible (custom);
-        loading = false;
-        resized();
-    }
-    void resized() override
-    {
-        auto a = content();
-        play.setBounds (row (a, lPlay, 150).removeFromLeft (300));
-        importFrom.setBounds (row (a, lFrom, 150).removeFromLeft (300));
-        outCh.setBounds (row (a, lOut, 150).removeFromLeft (130));
-        convertBtn.setBounds (a.removeFromTop (28).removeFromLeft (convertBtn.getWidth()).reduced (0, 3)); a.removeFromTop (4);
-        info.setBounds (a.removeFromTop (46)); a.removeFromTop (4);
-        lCustom.setBounds (a.removeFromTop (22));
-        view.setBounds (a);
-        list.setSize (jmax (100, a.getWidth() - 12), aCount * 26);
-        for (int i = 0; i < aCount; ++i) { labels[i]->setBounds (0, i * 26, 170, 24); combos[i]->setBounds (176, i * 26 + 1, 150, 22); }
-    }
-private:
-    EditState& st; bool loading = false;
-    Label lPlay, lFrom, info, lCustom, lOut;
-    ComboBox play, importFrom, outCh;
-    TextButton convertBtn;
-    Viewport view; Component list;
-    OwnedArray<Label> labels; OwnedArray<ComboBox> combos;
 };
 
 

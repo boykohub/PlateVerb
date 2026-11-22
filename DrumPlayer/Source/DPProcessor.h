@@ -18,6 +18,10 @@ namespace ids {
     static const char* vintRes = "vintRes";       // vintage clock: 0 off, 96 / 48 / 24 steps per beat
     static const char* vintJitter = "vintJitter"; // ms of clock wobble
     static const char* stagger = "stagger";       // MIDI-cable stagger for notes that land together
+    static const char* driftTime = "driftTime";   // ms: timing that leans ahead and back slowly, like a drummer
+    static const char* driftVel = "driftVel";     // velocity that swells and settles slowly
+    static const char* driftBars = "driftBars";   // how slowly the drift moves (bars per swing)
+    static const char* phrase = "phrase";         // phrase dynamics: build into the one, lift fills, ease the middles
 }
 
 // deterministic noise in −1 … 1, so a pass sounds the same no matter how the host splits blocks
@@ -180,7 +184,12 @@ public:
         const auto dm = s->map (s->playMap);
         for (auto& p : s->keys) if (! p.notes.empty()) {
             computeAutoSwing (p);
-            for (auto& n : p.notes) n.silent = n.art >= 0 && dm.resolve (n.art) < 0 && dm.artFor (n.note) != n.art;
+            for (auto& n : p.notes) {
+                n.silent = n.art >= 0 && dm.resolve (n.art) < 0 && dm.artFor (n.note) != n.art;
+                const int a = n.art >= 0 && dm.resolve (n.art) == n.note ? n.art : dm.artFor (n.note);
+                n.hhOpen = a == aHHClosed || a == aHHClosedEdge || a == aHHBell ? 0 : a == aHHTight ? 20 : a == aHHPedal ? 0
+                         : a == aHHLoose ? 64 : a == aHHOpen ? 100 : a == aHHOpenWide ? 127 : a == aHHSplash ? 90 : -1;
+            }
         }
         std::shared_ptr<const Song> old;
         { SpinLock::ScopedLockType l (liveLock); old = live; live = s; }
@@ -214,6 +223,15 @@ public:
     void uiRecord (bool start, int key) { pushCmd (start ? CmdRecStart : CmdRecStop, key); }
     void uiSongPlay (bool start, double fromBeat) { pushCmd (start ? CmdSongPlay : CmdSongStop, (int) std::round (fromBeat * 100)); }
     std::atomic<double> songBeatUi { -1.0 };          // song lane playhead (beats), -1 = not playing
+    // recording what you play live (pattern keys) onto the song lane
+    std::atomic<bool> songRecArmed { false };
+    std::atomic<double> songRecCursor { 0.0 };          // where on the lane a recording starts when Studio One isn't playing
+    std::atomic<double> nowPpqUi { 0.0 };
+    void setSongRecord (bool on)
+    {
+        if (on) { perfOpen = -1; perfFirst = -1; perfSession++; songRecArmed = true; }
+        else { songRecArmed = false; }
+    }
     std::atomic<bool> recArmed { false };            // true while counting in or recording
     std::atomic<int> recStateUi { 0 };               // 0 off, 1 counting in, 2 recording
     std::atomic<int> recSession { 0 };
@@ -259,6 +277,14 @@ private:
         p.push_back (std::make_unique<AudioParameterFloat> (ParameterID { ids::vintJitter, 1 }, "Vintage Wobble",
             NormalisableRange<float> (0.0f, 4.0f, 0.01f), 0.0f, AudioParameterFloatAttributes().withLabel ("ms")));
         p.push_back (std::make_unique<AudioParameterBool> (ParameterID { ids::stagger, 1 }, "MIDI Cable Stagger", false));
+        p.push_back (std::make_unique<AudioParameterFloat> (ParameterID { ids::driftTime, 1 }, "Drift Timing",
+            NormalisableRange<float> (0.0f, 30.0f, 0.1f), 0.0f, AudioParameterFloatAttributes().withLabel ("ms")));
+        p.push_back (std::make_unique<AudioParameterFloat> (ParameterID { ids::driftVel, 1 }, "Drift Velocity",
+            NormalisableRange<float> (0.0f, 30.0f, 0.5f), 0.0f));
+        p.push_back (std::make_unique<AudioParameterFloat> (ParameterID { ids::driftBars, 1 }, "Drift Speed",
+            NormalisableRange<float> (1.0f, 16.0f, 0.5f), 4.0f, AudioParameterFloatAttributes().withLabel ("bars")));
+        p.push_back (std::make_unique<AudioParameterFloat> (ParameterID { ids::phrase, 1 }, "Phrase Dynamics",
+            NormalisableRange<float> (0.0f, 100.0f, 1.0f), 0.0f, AudioParameterFloatAttributes().withLabel ("%")));
         return { p.begin(), p.end() };
     }
 
@@ -296,9 +322,64 @@ private:
         } else if (editStart != nullptr && ! recArmed && ++recIdle > 10) {
             endEdit ("Record");
         }
+        mergePerformance();
         if (dirty && ++saveCounter > 60) { saveCounter = 0; dirty = false; saveLastSession(); }
     }
     int lastRecSession = -1;
+    // ---------------------------------------------------------------- performance → song lane
+    struct PerfEvent { int key; double ppq, offset; bool host; };
+    AbstractFifo perfFifo { 256 }; std::array<PerfEvent, 256> perfBuf;
+    int perfOpen = -1, perfSession = 0, perfEditSession = -1; double perfFirst = -1;
+    double perfBeat (const PerfEvent& e)
+    {
+        if (e.host) return jmax (0.0, e.ppq);                               // Studio One playing: its own song position
+        if (perfFirst < 0) perfFirst = e.ppq;                               // otherwise from the lane cursor
+        return songRecCursor.load() + (e.ppq - perfFirst);
+    }
+    void mergePerformance()
+    {
+        const int ready = perfFifo.getNumReady();
+        if (ready > 0) {
+            int s1, n1, s2, n2;
+            perfFifo.prepareToRead (ready, s1, n1, s2, n2);
+            if (perfEditSession != perfSession) { if (editStart == nullptr) beginEdit(); perfEditSession = perfSession; }
+            for (int i = 0; i < n1 + n2; ++i) {
+                const auto e = perfBuf[(size_t) (i < n1 ? s1 + i : s2 + i - n1)];
+                const double b = perfBeat (e);
+                if (perfOpen >= 0 && perfOpen < (int) edit.clips.size()) { auto& c = edit.clips[(size_t) perfOpen]; c.length = jmax (0.25, b - c.start); }
+                perfOpen = -1;
+                if (e.key >= 0) {
+                    Clip c; c.start = b; c.key = e.key; c.offset = jmax (0.0, e.offset); c.length = 0.25;
+                    // whatever was already on the lane there gets replaced
+                    edit.clips.erase (std::remove_if (edit.clips.begin(), edit.clips.end(), [b] (const Clip& x) { return x.start >= b - 1e-6 && x.start < b + 0.01; }), edit.clips.end());
+                    edit.clips.push_back (c);
+                    perfOpen = (int) edit.clips.size() - 1;
+                }
+            }
+            perfFifo.finishedRead (n1 + n2);
+            publish(); stateVersion++;
+        }
+        // the open chunk grows while its pattern plays
+        if (perfOpen >= 0 && perfOpen < (int) edit.clips.size()) {
+            auto& c = edit.clips[(size_t) perfOpen];
+            const double b = perfBeat ({ 0, nowPpqUi.load(), 0, hostPlaying.load() });
+            if (b > c.start + c.length + 0.05) { c.length = b - c.start; publish(); stateVersion++; }
+        }
+        if (! songRecArmed && perfEditSession == perfSession) {             // recording ended: one undo step
+            perfOpen = -1; perfEditSession = -1;
+            if (editStart != nullptr && ! recArmed) endEdit ("Record song");
+        }
+    }
+    void pushPerf (int key, double ppq, double offset)
+    {
+        if (! songRecArmed || songOn()) return;
+        int s1, n1, s2, n2;
+        perfFifo.prepareToWrite (1, s1, n1, s2, n2);
+        const PerfEvent e { key, ppq, offset, wasPlaying };
+        if (n1 > 0) perfBuf[(size_t) s1] = e; else if (n2 > 0) perfBuf[(size_t) s2] = e;
+        perfFifo.finishedWrite (n1 + n2);
+    }
+    double nowPpq = 0;
     std::set<int> replacedLanes;
 
     // ---------------------------------------------------------------- audio
@@ -376,6 +457,7 @@ private:
 
         midi.swapWith (out);
         lastPpqEnd = ppqEnd;
+        nowPpqUi = ppqEnd; nowPpq = ppqEnd;
         if (! playing) internalPpq = ppqEnd;
         const bool songNow = songOn() && cur.key < 0 && ! queued.active;
         playingKey = songNow ? songKeyNow : cur.key;
@@ -458,6 +540,7 @@ private:
 
     void stopNow (MidiBuffer& o, int)
     {
+        if (cur.key >= 0) pushPerf (-1, nowPpq, 0);
         flushOffs (o, 0, true);
         cur = {}; queued = {};
         recState = 0;
@@ -568,6 +651,7 @@ private:
 
     void handleCommand (const Cmd& c, double now)
     {
+        nowPpq = now;
         if (c.type == CmdNoteOn) triggerKey (c.value, now);
         else if (c.type == CmdNoteOff) { if (! S->settings.latch && (c.value == cur.key || (queued.active && c.value == queued.key))) { stopNow (out, 0); chain = -1; } }
         else if (c.type == CmdStop) { stopNow (out, 0); chain = -1; songPlaying = false; }
@@ -587,6 +671,7 @@ private:
 
     void handleInput (const MidiMessage& m, int sample, double ppq)
     {
+        nowPpq = ppq;
         const auto& st = S->settings;
         if (m.isNoteOnOrOff()) {
             const int nn = m.getNoteNumber();
@@ -625,16 +710,19 @@ private:
     void applyQueue()
     {
         const auto q = queued; queued = {};
+        nowPpq = q.ppq;
         if (q.key < 0) { stopNow (out, sampleAt (q.ppq)); chain = -1; return; }
         cur = { q.key, q.virtStart >= 0 ? q.virtStart : q.ppq, q.returnKey, q.anchor >= 0 ? q.anchor : q.ppq };
+        pushPerf (cur.key, q.ppq, q.ppq - cur.start);
         if (q.force && recState == 1 && q.key == recKey) { recState = 2; recStartPpq = q.ppq; }
         const auto& p = S->keys[(size_t) cur.key];
         const double len = p.lengthTicks() / (double) PPQ;
         if (chain >= (int) S->chains.size()) chain = -1;
         if (chain >= 0) {
             const auto& ch = S->chains[(size_t) chain];
-            const int reps = (chainIdx >= 0 && chainIdx < (int) ch.steps.size()) ? jmax (1, ch.steps[(size_t) chainIdx].repeats) : 1;
-            int next = chainIdx + 1;
+            const bool holdHere = chainIdx >= 0 && chainIdx < (int) ch.steps.size() && ch.steps[(size_t) chainIdx].looping;
+            const int reps = holdHere ? 1 : (chainIdx >= 0 && chainIdx < (int) ch.steps.size()) ? jmax (1, ch.steps[(size_t) chainIdx].repeats) : 1;
+            int next = holdHere ? chainIdx : chainIdx + 1;
             if (next >= (int) ch.steps.size()) next = ch.loop ? 0 : -1;
             if (next >= 0 && keyHasPattern (ch.steps[(size_t) next].key)) { queued = { true, cur.start + reps * len, ch.steps[(size_t) next].key, -1, true }; pendingChainIdx = next; }
             else queued = { true, cur.start + reps * len, -1, -1, true };
@@ -650,6 +738,14 @@ private:
             queued = { true, cur.start + len, -1, -1, false };
     }
     int pendingChainIdx = 0;
+    int lastHH = -1;
+    // smooth, slow wandering in -1 … 1 (three sine waves at unrelated speeds), the same every time for a song position
+    static float slowDrift (double beats, double cycleBeats, int which)
+    {
+        const double t = beats / jmax (1.0, cycleBeats) * MathConstants<double>::twoPi;
+        const double ph = which * 1.7;
+        return (float) ((std::sin (t + ph) * 0.55 + std::sin (t * 1.618 + ph * 2.3) * 0.3 + std::sin (t * 0.382 + ph * 0.7) * 0.15));
+    }
     int lastStagSample = -1000000;
 
     // ---------------------------------------------------------------- song lane playback
@@ -714,7 +810,13 @@ private:
         const int vstep = vres == 1 ? PPQ / 96 : vres == 2 ? PPQ / 48 : vres == 3 ? PPQ / 24 : 0;
         const double wob = apvts.getRawParameterValue (ids::vintJitter)->load() * ticksPerMs;
         const bool stag = apvts.getRawParameterValue (ids::stagger)->load() > 0.5f;
-        const double margin = 260.0 + humT + std::abs (pushT) + wob + 40;
+        const double driftT = apvts.getRawParameterValue (ids::driftTime)->load() * ticksPerMs;
+        const float driftV = apvts.getRawParameterValue (ids::driftVel)->load();
+        const double driftLen = jmax (1.0f, apvts.getRawParameterValue (ids::driftBars)->load()) * p.beatsPerBar;
+        const float phraseAmt = apvts.getRawParameterValue (ids::phrase)->load() / 100.0f;
+        const int hhCC = S->settings.hhCC;
+        const double L = p.lengthTicks();
+        const double margin = 260.0 + humT + std::abs (pushT) + wob + 40 + apvts.getRawParameterValue (ids::driftTime)->load() * ticksPerMs;
         bool anySolo = false; for (auto& l : S->lanes) anySolo |= l.solo;
 
         for (size_t i = 0; i < p.notes.size(); ++i) {
@@ -735,6 +837,8 @@ private:
             for (int k = k0; k <= k1; ++k) {
                 const uint32 salt = (uint32) key * 131u + (uint32) i;
                 double T = (double) k * LL + nt.tick + swOff + pushT + hashNoise ((uint32) k, (uint32) i, (uint32) key, 7) * humT * 0.6;
+                const double here = start + T / PPQ;                                      // where this hit falls in the song
+                if (driftT > 0) T += slowDrift (here, driftLen, 1) * driftT;
                 if (vstep > 0) T = std::round (T / vstep) * vstep;                       // coarse vintage clock
                 if (wob > 0) T += hashNoise ((uint32) k, (uint32) i, (uint32) key, 19) * wob;   // clock wobble
                 if (k == 0 && nt.tick == 0) T = jmax (T, 0.0);
@@ -743,6 +847,14 @@ private:
                 float v = (float) nt.velocity * (lane != nullptr ? lane->level : 1.0f);
                 v = 64.0f + (v - 64.0f) * dyn;
                 v *= inten;
+                if (driftV > 0) v += slowDrift (here, driftLen, 2) * driftV;
+                if (phraseAmt > 0) {                                                       // phrase dynamics
+                    double pos = std::fmod (T, L) / L; if (pos < 0) pos += 1.0;
+                    float g = -0.07f * (float) std::sin (pos * MathConstants<double>::pi) + 0.12f * (float) std::pow (pos, 4.0);
+                    if (std::fmod (T, L) < 12.0) g += 0.10f;                                // the one
+                    if (p.type == PatternType::Fill) g += 0.22f * (float) pos - 0.08f;       // fills build up
+                    v *= 1.0f + phraseAmt * g;
+                }
                 v += hashNoise ((uint32) k, (uint32) i, salt, 11) * humV;
                 const int vel = jlimit (1, 127, (int) std::round (v));
                 const int ch = (lane != nullptr && lane->channel > 0) ? lane->channel : S->settings.outChannel;
@@ -754,6 +866,7 @@ private:
                 }
                 for (size_t o = 0; o < offs.size(); ++o)
                     if (offs[o].note == nt.note && offs[o].ch == ch) { out.addEvent (MidiMessage::noteOff (ch, nt.note), smp); offs[o] = offs.back(); offs.pop_back(); break; }
+                if (hhCC > 0 && nt.hhOpen >= 0 && nt.hhOpen != lastHH) { out.addEvent (MidiMessage::controllerEvent (ch, hhCC, nt.hhOpen), smp); lastHH = nt.hhOpen; }
                 out.addEvent (MidiMessage::noteOn (ch, nt.note, (uint8) vel), smp);
                 notesSent++;
                 offs.push_back ({ evPpq + jmax (10, nt.length) / (double) PPQ, nt.note, ch });
