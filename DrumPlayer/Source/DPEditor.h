@@ -1871,13 +1871,13 @@ private:
         m.addSectionHeader (keyName (k) + (p.isEmpty() ? "  (empty)" : "  " + p.name));
         if (! p.isEmpty()) m.addItem (-1, String (p.bars) + (p.bars == 1 ? " bar" : " bars") + "   (" + typeName (p.type) + ", " + String (p.beatsPerBar) + "/4)", false);
         std::set<int> targets = st.keySel; targets.insert (k);
-        if (targets.size() > 1) m.addSectionHeader (String ((int) targets.size()) + " keys picked (Option/Alt+click): group and colour go to all of them");
+        if (targets.size() > 1) m.addSectionHeader (String ((int) targets.size()) + " keys picked (Alt+click, Shift+click for a range): type, group and star go to all of them");
         m.addItem (1, "Edit");
         if (! p.isEmpty()) m.addItem (50, String (p.fav ? "Remove the star" : "Favourite (star)") + (targets.size() > 1 ? "  (all picked keys)" : ""), true, p.fav);
         if (! p.notes.empty()) m.addItem (2, "Play");
         if (! p.isEmpty()) {
             PopupMenu type; for (int t = 0; t < 4; ++t) type.addItem (10 + t, typeName ((PatternType) t), true, (int) p.type == t);
-            m.addSubMenu ("Type", type);
+            m.addSubMenu (targets.size() > 1 ? "Type  (all picked keys)" : "Type", type);
             PopupMenu grp;
             grp.addItem (3000, "No group", true, p.group < 0);
             for (int i = 0; i < (int) s.groups.size() && i < 60; ++i) grp.addColouredItem (3001 + i, s.groups[(size_t) i].name, Colour (s.groups[(size_t) i].colour), true, p.group == i);
@@ -1946,7 +1946,7 @@ private:
                         const int n = r - 2910;
                         st.applySong ("Key group", [k, n] (Song& s2) { const int g = s2.keys[(size_t) k].group; for (int i = 1; i <= n && k + i < 128; ++i) s2.keys[(size_t) (k + i)].group = g; });
                     }
-                    else if (r >= 10 && r < 14) { const int t = r - 10; st.applySong ("Pattern type", [k, t] (Song& s2) { s2.keys[(size_t) k].type = (PatternType) t; }); }
+                    else if (r >= 10 && r < 14) { const int t = r - 10; st.applySong ("Pattern type", [targets, t] (Song& s2) { for (int q : targets) if (! s2.keys[(size_t) q].isEmpty()) s2.keys[(size_t) q].type = (PatternType) t; }); st.keySel.clear(); strip.repaint(); }
                     else if (r >= 2000 && r < 2200) { const int c = r - 2000; st.applySong ("Add to chain", [k, c] (Song& s2) { if (c < (int) s2.chains.size()) s2.chains[(size_t) c].steps.push_back ({ k, 1 }); }); showToast ("Added to the chain"); }
                     break;
             }

@@ -204,6 +204,11 @@ public:
             if (st.keySel.count (k)) st.keySel.erase (k); else st.keySel.insert (k);
             repaint(); return;
         }
+        if (e.mods.isShiftDown()) {                                 // Shift+click: pick every key from the last one to here
+            const int from = st.keySel.empty() ? st.song().editKey : (k > *st.keySel.rbegin() ? *st.keySel.rbegin() : *st.keySel.begin());
+            for (int q = jmin (from, k); q <= jmax (from, k); ++q) if (isPatternKey (q)) st.keySel.insert (q);
+            repaint(); return;
+        }
         if (! st.keySel.empty()) { st.keySel.clear(); repaint(); }
         st.song().editKey = k;
         st.focusLane = -1;
