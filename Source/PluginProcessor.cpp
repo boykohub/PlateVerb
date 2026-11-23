@@ -111,6 +111,8 @@ public:
         { StringArray m; for (int i = 0; i < cs::kNumEqModels; ++i) m.add (cs::eqModelName (i)); l.add (cp ("eqModel", "EQ Model", m, 1)); }
         l.add (fp ("eqDrive", "EQ Colour", 0.0f, 1.0f, 0.5f, false, "%"));
         l.add (fp ("erAtk", "Reflection Attack", 0.0f, 100.0f, 0.0f, false, "ms", 1));
+        l.add (fp ("loopAmt", "480 Depth", 0.0f, 2.0f, 1.0f, false, "%"));      // the measured long recirculation (stone depth)
+        l.add (cp ("addOn", "Add-On (Machine B)", StringArray { "Off", "Beside", "Before", "After" }, 0));   // delay / chorus with the reverb
         l.add (fp ("dlAtk", "Delay Attack", 0.0f, 500.0f, 0.0f, false, "ms", 0));
         const char* bn[] = { "Low", "Low Mid", "High Mid", "High" };
         const float fLo[] = { 20, 100, 800, 2000 }, fHi[] = { 500, 2000, 8000, 20000 }, fDef[] = { 100, 400, 2500, 8000 };
@@ -480,6 +482,8 @@ public:
         p.anColour = jlimit (0, 3, (int) f (pAnColour)); p.anDrive = f (pAnDrive); p.anOut = f (pAnOut);
         p.eqOn = on (pEqOn);
         p.eqModel = jlimit (0, cs::kNumEqModels - 1, (int) apvts.getRawParameterValue ("eqModel")->load()); p.eqDrive = apvts.getRawParameterValue ("eqDrive")->load();
+        p.loopAmt = apvts.getRawParameterValue ("loopAmt")->load();
+        p.addOn = jlimit (0, 3, (int) apvts.getRawParameterValue ("addOn")->load());
         p.erAtkMs = apvts.getRawParameterValue ("erAtk")->load(); p.dlAtkMs = apvts.getRawParameterValue ("dlAtk")->load(); for (int b = 0; b < 4; ++b) { p.eqF[b] = f (pEqF[b]); p.eqG[b] = f (pEqG[b]); }
         auto& c = p.comp;
         c.on = on (pCpOn); c.type = jlimit (0, 2, (int) f (pCpType)); c.vintage = on (pCpColor); c.duck = on (pCpDuck);

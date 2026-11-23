@@ -3,6 +3,7 @@
 #pragma once
 #include "L480Dsp.h"
 #include "CSEngine.h"          // the ChannelStrip preamp (ANALOG)
+#include "L480Loops.h"        // the measured long recirculation per preset
 
 namespace l480 {
 
@@ -70,6 +71,8 @@ struct EngineParams {
     int reflN[2] = { 0, 0 }; float reflMs[2][32] = {}, reflDb[2][32] = {}, reflPan[2][32] = {};   // your own early reflections
     int tapN[2] = { 0, 0 }; float tapMs[2][32] = {}, tapDb[2][32] = {};                         // your edits of the algorithm's own taps
     bool mute = false;
+    float loopAmt = 1.0f;
+    int addOn = 0;                           // machine B as an add-on to A: 0 off, 1 beside, 2 before (B feeds A), 3 after (A feeds B)                    // the 480L's long recirculation (stone depth): 0 off, 1 as measured, 2 double
     // drawer: EQ
     bool eqOn = false; float eqF[4] = { 100, 400, 2500, 8000 }, eqG[4] = {};
     // drawer: compressor
@@ -121,7 +124,8 @@ public:
         setOversampling (p.oversampling);
         for (auto& m : mach) m.erAtk = p.erAtkMs;
         for (int m = 0; m < 2; ++m) { const auto& pr = programs()[(size_t) p.prog[m]]; mach[m].update (pr.algo, pr.bank, p.val[m], pr.trimDb, p.curveOn[m] ? p.curveMul[m] : nullptr, pr.shape);
-                                      mach[m].refl.set (p.reflN[m], p.reflMs[m], p.reflDb[m], p.reflPan[m]); mach[m].setTapEdits (p.tapN[m], p.tapMs[m], p.tapDb[m]); }
+                                      mach[m].refl.set (p.reflN[m], p.reflMs[m], p.reflDb[m], p.reflPan[m]); mach[m].setTapEdits (p.tapN[m], p.tapMs[m], p.tapDb[m]);
+                                      if (mach[m].fadeState != 1) mach[m].loop.set (loopFor (p.prog[m]), p.loopAmt); }
         if (p.anModel != anM || p.anColour != anC || p.anDrive != anD || p.anOut != anO)
         { anVerb.set (p.anModel, p.anColour, p.anDrive, p.anOut, false, 70.0); anEq.set (p.anModel, p.anColour, p.anDrive, p.anOut, false, 70.0);
           anM = p.anModel; anC = p.anColour; anD = p.anDrive; anO = p.anOut; }
@@ -154,6 +158,13 @@ public:
             if (hwInOn) hwIn.input (hL, hR, p.hw);
             Ctx c; c.dryL = xL; c.dryR = xR;
             float yL, yR;
+            if (p.addOn > 0) {   // a delay or chorus (machine B) together with the reverb (machine A)
+                float aL = hL, aR = hR, bL = hL, bR = hR;
+                if (p.addOn == 2) { mach[1].process (bL, bR, c); aL = bL; aR = bR; mach[0].process (aL, aR, c); yL = aL + bL; yR = aR + bR; }   // B feeds A
+                else if (p.addOn == 3) { mach[0].process (aL, aR, c); bL = aL; bR = aR; mach[1].process (bL, bR, c); yL = bL; yR = bR; }      // A feeds B
+                else { mach[0].process (aL, aR, c); mach[1].process (bL, bR, c); yL = aL + bL; yR = aR + bR; }                                 // side by side
+                if (hwOutOn) hwA.output (yL, yR, p.hw);
+            } else
             {
             switch (p.config) {
                 case kCascade: {

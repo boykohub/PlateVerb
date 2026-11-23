@@ -1162,13 +1162,45 @@ struct UserRefl {
     }
 };
 
+// The 480L's long recirculation ("stone / cave depth"): its tail returns at fixed intervals that grow with the room
+// (about 137 ms in Large Hall, 45 ms in Short Plate), measured from real 480L impulse responses. Flexiverb's own tank
+// repeats much faster and more smoothly, so this adds the measured returns: a few feedback taps on the machine's output,
+// crossing sides on alternate taps, level-compensated so the loudness and the decay time stay as they were.
+struct LoopSpec { int n = 0; float ms[3] = {}, g[3] = {}; };
+struct LoopStage {
+    Line l, r; int n = 0, d[3] = {}; float g[3] = {}, norm = 1, fs = 48000, amt = -1; const LoopSpec* cur = nullptr;
+    void prepare (float sr) { fs = sr; l.init ((int) (0.4f * sr) + 8); r.init ((int) (0.4f * sr) + 8); l.clear(); r.clear(); cur = nullptr; amt = -1; n = 0; }
+    void reset() { l.clear(); r.clear(); }
+    void set (const LoopSpec* s, float amount) {
+        if (s == cur && amount == amt) return;
+        if (s != cur) reset();
+        cur = s; amt = amount; n = (s && amount > 0.001f) ? s->n : 0;
+        float sum = 0, sq = 0;
+        for (int k = 0; k < n; ++k) { d[k] = std::max (1, std::min ((int) (0.39f * fs), (int) std::lround (s->ms[k] * 0.001f * fs))); g[k] = s->g[k] * amount; sum += std::fabs (g[k]); }
+        if (sum > 0.85f) for (int k = 0; k < n; ++k) g[k] *= 0.85f / sum;          // always stable
+        for (int k = 0; k < n; ++k) sq += g[k] * g[k];
+        norm = std::sqrt (std::max (0.05f, 1.0f - sq));
+    }
+    inline void process (float& L, float& R) {
+        if (n == 0) return;
+        float yL = L, yR = R;
+        for (int k = 0; k < n; ++k) {
+            const float a = l.readI (d[k]), b = r.readI (d[k]);
+            if (k & 1) { yL += g[k] * b; yR += g[k] * a; } else { yL += g[k] * a; yR += g[k] * b; }
+        }
+        l.push (yL); r.push (yR);
+        L = yL * norm; R = yR * norm;
+    }
+};
+
 struct Machine {
     std::unique_ptr<AlgoBase> algos[kNumAlgos];
     UserRefl refl;
     int cur = -1, bank = 1; float fs = 48000;
     float fadeG = 1; int fadeState = 0, nextAlgo = -1, nextBank = 1;   // 10 ms fade out/in on program change
+    LoopStage loop;
     void prepare (float sr) {
-        fs = sr; refl.prepare (sr);
+        fs = sr; refl.prepare (sr); loop.prepare (sr);
         for (auto& d : shapeDb) d = 999.0f;                      // redesign the shaping EQ at the new rate
         for (auto& c : shapeEq) for (auto& b : c) b.reset();
         for (int a = 0; a < kNumAlgos; ++a) { if (! algos[a]) algos[a] = makeAlgo (a); algos[a]->prepare (fs); algos[a]->reset(); }
@@ -1222,6 +1254,7 @@ struct Machine {
         if (cur < 0) return;
         const float iL = L, iR = R;
         algos[cur]->process (L, R, c);
+        if (fadeState != 1) loop.process (L, R);
         trimS += (trimG - trimS) * 0.0005f; L *= trimS; R *= trimS;
         if (shapeOn) for (int b = 0; b < 4; ++b) { L = shapeEq[0][b].process (L); R = shapeEq[1][b].process (R); }
         refl.process (iL, iR, L, R);
