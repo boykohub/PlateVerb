@@ -131,6 +131,7 @@ public:
         String pn; { const ScopedLock l (uiLock); pn = presetName; }
         ui->setAttribute ("scale", uiScale); ui->setAttribute ("preset", pn); ui->setAttribute ("grid", uiGrid);
         ui->setAttribute ("zoomX", uiZoomX); ui->setAttribute ("strip", uiStripTools); ui->setAttribute ("headW", uiHeadW);
+        ui->setAttribute ("stopkey", uiStopKey);
         return x;
     }
     void restoreUi (const XmlElement& x)
@@ -141,6 +142,7 @@ public:
             uiGrid = jlimit (0, numNoteValues - 1, ui->getIntAttribute ("grid", 3));
             uiZoomX = (float) jlimit (0.25, 8.0, ui->getDoubleAttribute ("zoomX", 1.0));
             uiStripTools = ui->getStringAttribute ("strip", uiStripTools); uiHeadW = jlimit (70, 360, ui->getIntAttribute ("headW", 200));
+            uiStopKey = ui->getIntAttribute ("stopkey", KeyPress::spaceKey);
         }
     }
     void saveLastSession() const
@@ -177,6 +179,8 @@ public:
     UndoManager undo { 1000, 100 };
     String presetName; CriticalSection uiLock;
     float uiScale = 1.0f, uiZoomX = 1.0f; int uiGrid = 3, uiHeadW = 200;
+    int uiStopKey = KeyPress::spaceKey;          // the computer key that stops (0 = none)
+    bool uiLearnStopKey = false;                 // the next key you press becomes the stop key
     String uiStripTools = "fit,grid,tools,play,stop,rec,quantize,undo,redo";   // the Option-key strip: what you put on it
     std::atomic<int> stateVersion { 0 };
 
@@ -247,7 +251,7 @@ public:
     // ---------------------------------------------------------------- display (read by the editor)
     std::atomic<int> playingKey { -1 }, queuedKey { -2 }, chainPlaying { -1 }, chainStep { -1 };
     std::atomic<double> playRelTicks { 0.0 };
-    std::atomic<double> lastBpm { 120.0 };
+    std::atomic<double> lastBpm { 120.0 }, hostBpm { 120.0 };
     std::atomic<bool> hostPlaying { false };
     std::atomic<uint32> activity { 0 };          // bit per lane note hit recently, for the lane lights (low 0..63 notes folded)
     std::atomic<int> lastHitNote { -1 }, lastHitSerial { 0 };
@@ -424,6 +428,8 @@ private:
                 playing = pos->getIsPlaying();
                 if (playing) if (auto pp = pos->getPpqPosition()) ppq = *pp;
             }
+        hostBpm = bpm;
+        if (! playing && ! S->settings.followHost) bpm = jlimit (20.0, 400.0, S->settings.ownBpm);   // your own tempo while Studio One is stopped
         const double beatsPerSample = bpm / 60.0 / sampleRate;
         samplesPerBeat = 1.0 / beatsPerSample;
         curBpm = bpm;
@@ -648,10 +654,7 @@ private:
         if (! fromChain && recState == 1) recState = 0;          // a key press cancels a waiting count-in
         if (! fromChain) chain = -1;
         const auto type = S->keys[(size_t) k].type;
-        if (S->settings.latch && ! fromChain && k == cur.key && ! queued.active && type == PatternType::Groove) {   // same key again: stop
-            queued = { true, boundary (now), -1, -1, false };
-            return;
-        }
+        if (! fromChain && k == cur.key && ! queued.active && type == PatternType::Groove) return;   // same key again: keeps playing (only STOP stops)
         int ret = -1;
         if (type == PatternType::Fill || type == PatternType::Intro) {
             ret = cur.key >= 0 ? (S->keys[(size_t) cur.key].type == PatternType::Groove ? cur.key : cur.returnKey) : -1;
@@ -706,16 +709,14 @@ private:
             for (int c = 0; c < (int) S->chains.size(); ++c)
                 if (S->chains[(size_t) c].triggerNote == nn) { if (m.isNoteOn()) { lastTrigger = 5; lastInNote = nn; lastInKey = -1; lastInSerial++; startChain (c, ppq); } return; }
             const int key = st.keyForNote (nn, m.getChannel());
-            const int stop = st.resolveStop();
             if (m.isNoteOn()) { lastInNote = nn; lastInKey = key; lastInSerial++; }
-            if (stop >= 0 && (key == stop || (key < 0 && nn == stop && st.keyForNote (nn, m.getChannel()) < 0 && stop > st.zoneHigh))) {
+            if (st.isStop (nn) && st.keyMode != 1 && (st.triggerChannel == 0 || m.getChannel() == st.triggerChannel)) {
                 if (m.isNoteOn()) { stopNow (out, sample); chain = -1; lastTrigger = 4; }
                 return;
             }
             if (key >= 0) {
                 if (m.isNoteOn()) {
-                    const bool stops = S->settings.latch && key == cur.key && ! queued.active && S->keys[(size_t) key].type == PatternType::Groove;
-                    lastTrigger = ! keyHasPattern (key) ? 2 : stops ? 3 : 1;
+                    lastTrigger = ! keyHasPattern (key) ? 2 : 1;
                     triggerKey (key, ppq);
                 }
                 else if (! st.latch && (key == cur.key || (queued.active && key == queued.key))) { stopNow (out, sample); chain = -1; }

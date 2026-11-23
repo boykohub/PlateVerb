@@ -146,13 +146,231 @@ public:
     void closeButtonPressed() override { if (onClose) onClose(); }
 };
 
+// ---------------------------------------------------------------- export every key into folders, like EZdrummer's groove browser:
+// main folder / style / tempo type / feel / tune (BPM) / part (the key's colour group) / Variation 01.mid
+class ExportPage : public Page
+{
+public:
+    explicit ExportPage (EditState& e) : Page ("EXPORT ALL KEYS TO FOLDERS"), st (e)
+    {
+        setupLabel (*this, lFolder, "Main folder"); setupCombo (*this, folder, {}, 1, "The top folder. In EZdrummer 2: Settings > MIDI Libraries > Add Folder to User Libraries, once per main folder");
+        setupButton (*this, newFolder, "New folder...", false, "Make a new main folder next to the current one");
+        setupButton (*this, chooseFolder, "Choose...", false, "Pick any folder as the main folder");
+        setupLabel (*this, lStyle, "Style"); setupCombo (*this, style, {}, 1, "Fusion, Rock, Latin... (type a new one)"); style.setEditableText (true);
+        setupLabel (*this, lTempo, "Tempo type"); setupCombo (*this, tempoType, {}, 1, "Halftime, Midtempo, Uptempo... (type a new one)"); tempoType.setEditableText (true);
+        setupLabel (*this, lFeel, "Feel"); setupCombo (*this, feel, {}, 1, "Straight 4/4, Swing 4/4... (type a new one)"); feel.setEditableText (true);
+        setupLabel (*this, lTune, "Tune");
+        addAndMakeVisible (tune); tune.setFont (font (12.5f, 2)); tune.setTextToShowWhenEmpty ("Tune name", th::faint);
+        setupButton (*this, addBpm, "Add the tempo", true, "Add the tempo to the tune folder, like 'Straight 44 140 BPM'");
+        setupLabel (*this, lNames, "Files named"); setupCombo (*this, naming, { "Variation 01, 02...", "Pattern names" });
+        setupLabel (*this, path, "", 11.5f, th::text); path.setJustificationType (Justification::topLeft);
+        setupButton (*this, exportBtn, "Export"); exportBtn.onClick = [this] { run(); };
+        setupButton (*this, showBtn, "Show folder"); showBtn.onClick = [this] { auto f = tuneDir(); (f.isDirectory() ? f : File (folder.getText())).revealToUser(); };
+        newFolder.onClick = [this] { makeFolder(); };
+        chooseFolder.onClick = [this] {
+            chooser = std::make_unique<FileChooser> ("Main folder", File (folder.getText()).isDirectory() ? File (folder.getText()) : File::getSpecialLocation (File::userDocumentsDirectory));
+            chooser->launchAsync (FileBrowserComponent::openMode | FileBrowserComponent::canSelectDirectories, [this] (const FileChooser& fc) {
+                auto f = fc.getResult(); if (f.isDirectory()) { remember ("Folders", f.getFullPathName()); fillLists(); folder.setText (f.getFullPathName(), dontSendNotification); update(); } });
+        };
+        for (auto* c : { &folder, &style, &tempoType, &feel, &naming }) c->onChange = [this] { update(); };
+        tune.onTextChange = [this] { update(); };
+        addBpm.onClick = [this] { update(); };
+    }
+    std::function<String()> defaultTune;            // the project or preset name
+    std::function<double()> currentBpm;
+    std::function<void (const String&)> toast;
+
+    void refresh() override
+    {
+        fillLists();
+        const auto& e = st.song().exportInfo;
+        auto lists = loadLists();
+        folder.setText (e.folder.isNotEmpty() ? e.folder : lists[0].isEmpty() ? File::getSpecialLocation (File::userDocumentsDirectory).getChildFile ("Drum Player Grooves").getFullPathName() : lists[0][0], dontSendNotification);
+        style.setText (e.style, dontSendNotification); tempoType.setText (e.tempoType, dontSendNotification);
+        feel.setText (e.feel.isNotEmpty() ? e.feel : suggestFeel(), dontSendNotification);
+        tune.setText (e.tune.isNotEmpty() ? e.tune : (defaultTune ? defaultTune() : String()), false);
+        addBpm.setToggleState (e.addBpm, dontSendNotification);
+        naming.setSelectedItemIndex (e.naming, dontSendNotification);
+        update();
+    }
+    void resized() override
+    {
+        auto a = content();
+        const int lw = 110;
+        {   auto r = row (a, lFolder, lw);
+            showBtn.setBounds (r.removeFromRight (showBtn.getWidth()).withSizeKeepingCentre (showBtn.getWidth(), btnH)); r.removeFromRight (4);
+            chooseFolder.setBounds (r.removeFromRight (chooseFolder.getWidth()).withSizeKeepingCentre (chooseFolder.getWidth(), btnH)); r.removeFromRight (4);
+            newFolder.setBounds (r.removeFromRight (newFolder.getWidth()).withSizeKeepingCentre (newFolder.getWidth(), btnH)); r.removeFromRight (6);
+            folder.setBounds (r); }
+        style.setBounds (row (a, lStyle, lw).removeFromLeft (220));
+        tempoType.setBounds (row (a, lTempo, lw).removeFromLeft (220));
+        feel.setBounds (row (a, lFeel, lw).removeFromLeft (220));
+        {   auto r = row (a, lTune, lw); tune.setBounds (r.removeFromLeft (260)); r.removeFromLeft (8);
+            addBpm.setBounds (r.removeFromLeft (addBpm.getWidth()).withSizeKeepingCentre (addBpm.getWidth(), btnH)); }
+        naming.setBounds (row (a, lNames, lw).removeFromLeft (220));
+        a.removeFromTop (6);
+        auto b = a.removeFromBottom (btnH + 6);
+        exportBtn.setBounds (b.removeFromLeft (exportBtn.getWidth()).withSizeKeepingCentre (exportBtn.getWidth(), btnH));
+        path.setBounds (a);
+    }
+private:
+    EditState& st;
+    Label lFolder, lStyle, lTempo, lFeel, lTune, lNames, path;
+    ComboBox folder, style, tempoType, feel, naming;
+    TextEditor tune;
+    TextButton newFolder, chooseFolder, addBpm, exportBtn, showBtn;
+    std::unique_ptr<FileChooser> chooser;
+
+    // folder names: a "/" (as in 4/4) becomes a look-alike slash, since Windows doesn't allow "/" in names
+    static String folderName (const String& t) { return File::createLegalFileName (t.replace ("/", String::charToString ((juce_wchar) 0x2215))); }
+    String suggestFeel()
+    {
+        const auto& p = st.pat();
+        return String (st.proc.apvts.getRawParameterValue ("swing") != nullptr && st.proc.apvts.getRawParameterValue ("swing")->load() > 52.0f ? "Swing " : "Straight ")
+               + String (p.beatsPerBar) + "/4";
+    }
+    String tuneFolderName()
+    {
+        auto t = tune.getText().trim();
+        if (t.isEmpty()) t = "My tune";
+        if (addBpm.getToggleState() && currentBpm) t << " " << String (roundToInt (currentBpm())) << " BPM";
+        return folderName (t);
+    }
+    File tuneDir()
+    {
+        File d (folder.getText().trim());
+        if (! File::isAbsolutePath (folder.getText().trim())) return {};
+        for (auto* c : { &style, &tempoType, &feel }) { const auto t = c->getText().trim(); if (t.isNotEmpty()) d = d.getChildFile (folderName (t)); }
+        return d.getChildFile (tuneFolderName());
+    }
+    String partName (const Pattern& p)
+    {
+        const auto& g = st.song().groups;
+        if (p.group >= 0 && p.group < (int) g.size() && g[(size_t) p.group].name.trim().isNotEmpty()) return folderName (g[(size_t) p.group].name.trim());
+        return "Other";
+    }
+    // the parts and their keys, in key order
+    std::map<String, std::vector<int>> parts()
+    {
+        std::map<String, std::vector<int>> m;
+        const auto& s = st.song();
+        for (int k = 0; k < 128; ++k) if (! s.keys[(size_t) k].notes.empty() && ! s.settings.isStop (k)) m[partName (s.keys[(size_t) k])].push_back (k);
+        return m;
+    }
+    void update()
+    {
+        const auto d = tuneDir();
+        const auto ps = parts();
+        int n = 0; String names; for (auto& [name, keys] : ps) { n += (int) keys.size(); names << (names.isEmpty() ? "" : ", ") << name << " (" << (int) keys.size() << ")"; }
+        String t;
+        if (d == File()) t << "Choose a main folder first.";
+        else {
+            t << d.getFullPathName() << File::getSeparatorString() << "...\n\n";
+            t << n << " grooves into " << (int) ps.size() << " part folders: " << (names.isEmpty() ? String ("none - put grooves on keys first") : names);
+            t << "\n\nEach part is a key colour (Intro, Verse, Pre Chorus, Chorus, Bridge, Fills...). Keys with no colour go to 'Other'.";
+            t << "\nIn EZdrummer 2, add the main folder once: Settings > MIDI Libraries > Add Folder to User Libraries.";
+        }
+        path.setText (t, dontSendNotification);
+    }
+    void run()
+    {
+        const auto d = tuneDir();
+        if (d == File()) { if (toast) toast ("Choose a main folder first"); return; }
+        const auto ps = parts();
+        if (ps.empty()) { if (toast) toast ("No grooves on the keys to export"); return; }
+        const auto& s = st.song();
+        const double bpm = currentBpm ? currentBpm() : 0.0;
+        const bool byName = naming.getSelectedItemIndex() == 1;
+        int written = 0;
+        for (auto& [name, keys] : ps) {
+            auto dir = d.getChildFile (name);
+            if (! dir.createDirectory()) continue;
+            int num = 1;
+            for (int k : keys) {
+                const auto& p = s.keys[(size_t) k];
+                File f;
+                if (byName) {
+                    auto base = File::createLegalFileName (p.name.trim().isNotEmpty() ? p.name.trim() : "Groove " + keyName (k));
+                    f = dir.getChildFile (base + ".mid");
+                    for (int i = 2; f.existsAsFile() && written > 0 && i < 999; ++i) {        // two patterns with one name in this export
+                        bool ours = false; for (auto& w : writtenNow) if (w == f) ours = true;
+                        if (! ours) break;
+                        f = dir.getChildFile (base + " (" + String (i) + ").mid");
+                    }
+                } else f = dir.getChildFile ("Variation " + String (num++).paddedLeft ('0', 2) + ".mid");
+                writeMidiFile ({ &p }, f, s.settings.outChannel, bpm);
+                writtenNow.push_back (f); ++written;
+            }
+        }
+        writtenNow.clear();
+        // remember this tune's choices and the lists
+        ExportInfo e { folder.getText().trim(), style.getText().trim(), tempoType.getText().trim(), feel.getText().trim(), tune.getText().trim(), addBpm.getToggleState(), naming.getSelectedItemIndex() };
+        st.applySong ("Export settings", [e] (Song& so) { so.exportInfo = e; });
+        remember ("Folders", e.folder); remember ("Styles", e.style); remember ("TempoTypes", e.tempoType); remember ("Feels", e.feel);
+        fillLists(); update();
+        if (toast) toast ("Exported " + String (written) + " grooves to " + d.getFileName());
+    }
+    std::vector<File> writtenNow;
+
+    // ---- the lists you've used before (shared by all tunes)
+    static std::array<StringArray, 4> loadLists()
+    {
+        std::array<StringArray, 4> l;
+        static const char* names[] = { "Folders", "Styles", "TempoTypes", "Feels" };
+        if (auto x = XmlDocument::parse (exportListsFile()))
+            for (int i = 0; i < 4; ++i) if (auto* e = x->getChildByName (names[i])) for (auto* it : e->getChildIterator()) l[(size_t) i].add (it->getStringAttribute ("v"));
+        return l;
+    }
+    static void remember (const String& list, const String& v)
+    {
+        if (v.isEmpty()) return;
+        auto x = XmlDocument::parse (exportListsFile());
+        if (x == nullptr) x = std::make_unique<XmlElement> ("ExportLists");
+        auto* e = x->getChildByName (list); if (e == nullptr) e = x->createNewChildElement (list);
+        for (auto* it : e->getChildIterator()) if (it->getStringAttribute ("v") == v) { e->removeChildElement (it, true); break; }
+        auto* n = new XmlElement ("I"); n->setAttribute ("v", v); e->insertChildElement (n, 0);     // newest first
+        x->writeTo (exportListsFile());
+    }
+    void fillLists()
+    {
+        auto l = loadLists();
+        StringArray styles { "Fusion", "Rock", "Pop", "Funk", "Jazz", "Latin", "Blues", "Metal", "Country" };
+        StringArray tempos { "Halftime", "Slow", "Midtempo", "Uptempo", "Fast" };
+        StringArray feels { "Straight 4/4", "Swing 4/4", "Shuffle 4/4", "Straight 3/4", "Swing 3/4", "6/8", "12/8" };
+        auto fill = [] (ComboBox& c, const StringArray& used, const StringArray& defaults) {
+            const auto keep = c.getText(); c.clear (dontSendNotification);
+            StringArray all (used); for (auto& d : defaults) if (! all.contains (d)) all.add (d);
+            for (int i = 0; i < all.size(); ++i) c.addItem (all[i], i + 1);
+            c.setText (keep, dontSendNotification);
+        };
+        auto folders = l[0]; folders.removeEmptyStrings();
+        fill (folder, folders, {}); fill (style, l[1], styles); fill (tempoType, l[2], tempos); fill (feel, l[3], feels);
+    }
+    void makeFolder()
+    {
+        auto* w = new AlertWindow ("New main folder", "Name of the new folder (made next to the current main folder):", MessageBoxIconType::NoIcon, this);
+        w->addTextEditor ("name", "", "Folder name");
+        w->addButton ("Make", 1, KeyPress (KeyPress::returnKey)); w->addButton ("Cancel", 0, KeyPress (KeyPress::escapeKey));
+        w->enterModalState (true, ModalCallbackFunction::create ([this, w] (int r) {
+            const auto name = File::createLegalFileName (w->getTextEditorContents ("name").trim());
+            if (r == 1 && name.isNotEmpty()) {
+                File cur (folder.getText().trim());
+                File parent = File::isAbsolutePath (cur.getFullPathName()) && cur.getFullPathName().isNotEmpty() ? cur.getParentDirectory() : File::getSpecialLocation (File::userDocumentsDirectory);
+                auto d = parent.getChildFile (name);
+                if (d.createDirectory()) { remember ("Folders", d.getFullPathName()); fillLists(); folder.setText (d.getFullPathName(), dontSendNotification); update(); if (toast) toast ("Made " + d.getFullPathName()); }
+                else if (toast) toast ("Couldn't make " + d.getFullPathName());
+            }
+        }), true);
+    }
+};
+
 class DrumPlayerEditor : public AudioProcessorEditor, public DragAndDropContainer, public FileDragAndDropTarget, private Timer, public MenuBarModel
 {
 public:
     explicit DrumPlayerEditor (DrumPlayerProcessor& p)
         : AudioProcessorEditor (p), proc (p), st (p),
           strip (st, false), bigStrip (st, true), tray (st), bigTray (st), chainStrip (st), ruler (st), headers (st), grid (st), vel (st), songLane (st), songHeader (st, songLane),
-          quantPage (st), humPage (st), chainPage (st), setPage (st), presetPage (st), mapPage (st), recPage (st), groovePage (st), mixerPage (st)
+          quantPage (st), humPage (st), chainPage (st), setPage (st), presetPage (st), mapPage (st), recPage (st), groovePage (st), mixerPage (st), exportPage (st)
     {
         setLookAndFeel (&lnf);
         LookAndFeel::setDefaultLookAndFeel (&lnf);
@@ -282,7 +500,7 @@ public:
         guideBox.onChange = [this] { static const int g[] = { 0, 8, 16, 20, 32 }; st.velGuide = g[jlimit (0, 4, guideBox.getSelectedItemIndex())]; vel.repaint(); };
         setupButton (body, playBtn, "Play", false, "Play the pattern being edited");
         playBtn.onClick = [this] { proc.uiTrigger (st.song().editKey); };
-        setupButton (body, stopBtn, "Stop"); stopBtn.onClick = [this] { proc.uiStop(); stopFlashUntil = Time::getMillisecondCounter() + 450; };
+        setupButton (body, stopBtn, "Stop"); stopBtn.onClick = [this] { stopAll(); };
         playBtn.getProperties().set ("lit", (int) 0xff6fe08f);           // Play glows green while playing
         stopBtn.getProperties().set ("lit", (int) 0xffff5a5a);           // Stop flashes red
         recBtn.getProperties().set ("lit", (int) 0xffff5a5a);            // Rec blinks red on the count-in, stays red while recording
@@ -389,7 +607,29 @@ public:
         };
 
         // ---------------- pages
-        for (Page* pg : { (Page*) &quantPage, (Page*) &humPage, (Page*) &chainPage, (Page*) &setPage, (Page*) &presetPage, (Page*) &mapPage, (Page*) &recPage, (Page*) &groovePage, (Page*) &mixerPage }) body.addChildComponent (pg);
+        for (Page* pg : { (Page*) &quantPage, (Page*) &humPage, (Page*) &chainPage, (Page*) &setPage, (Page*) &presetPage, (Page*) &mapPage, (Page*) &recPage, (Page*) &groovePage, (Page*) &mixerPage, (Page*) &exportPage }) body.addChildComponent (pg);
+        exportPage.defaultTune = [this] { return projectFile.existsAsFile() ? projectFile.getFileNameWithoutExtension() : presetName.getButtonText() != "Presets" ? presetName.getButtonText() : String(); };
+        exportPage.currentBpm = [this] { return effectiveTempo(); };
+        exportPage.toast = [this] (const String& t) { showToast (t); };
+        {   // tempo
+            setupLabel (body, lTempo, "Tempo");
+            setupButton (body, tempoDown, "-", false, "Slower (Shift: 0.1 BPM)"); setupButton (body, tempoUp, "+", false, "Faster (Shift: 0.1 BPM)");
+            tempoDown.onClick = [this] { setOwnTempo (std::round (effectiveTempo()) - (ModifierKeys::currentModifiers.isShiftDown() ? 0.1 : 1.0)); };
+            tempoUp.onClick = [this] { setOwnTempo (std::round (effectiveTempo()) + (ModifierKeys::currentModifiers.isShiftDown() ? 0.1 : 1.0)); };
+            body.addAndMakeVisible (tempoLbl); tempoLbl.setEditable (false, true, false); tempoLbl.setJustificationType (Justification::centred);
+            tempoLbl.setFont (font (13.0f, 3)); tempoLbl.setTooltip ("Double-click to type a tempo. It's used when Studio One is stopped; while Studio One plays, its tempo rules");
+            tempoLbl.setColour (Label::backgroundColourId, Colours::black.withAlpha (0.25f));
+            tempoLbl.onTextChange = [this] { const double b = tempoLbl.getText().getDoubleValue(); if (b >= 20.0) setOwnTempo (b); else showTempo(); };
+            setupButton (body, tapBtn, "Tap", false, "Tap the tempo (4 taps or more)");
+            tapBtn.onClick = [this] {
+                const double now = Time::getMillisecondCounterHiRes();
+                if (! taps.empty() && now - taps.back() > 2000.0) taps.clear();
+                taps.push_back (now); if (taps.size() > 8) taps.erase (taps.begin());
+                if (taps.size() >= 2) setOwnTempo (60000.0 / ((taps.back() - taps.front()) / (double) (taps.size() - 1)));
+            };
+            setupButton (body, followBtn, "Follow Studio One", true, "On: Studio One's tempo always. Off: your tempo here while Studio One is stopped (while it plays, its tempo rules)");
+            followBtn.onClick = [this] { const bool on = followBtn.getToggleState(); st.applySong ("Follow tempo", [on] (Song& s) { s.settings.followHost = on; }); showTempo(); };
+        }
         groovePage.onLoad = [this] (const File& f, int k) { importFiles ({ f.getFullPathName() }, k); };
         presetPage.onLoaded = [this] { refreshAll(); };
         setPage.look.collectIds = [this] {
@@ -465,6 +705,26 @@ public:
     bool keyPressed (const KeyPress& k) override
     {
         altClean = false;
+        if (proc.uiLearnStopKey) {                                   // Settings > Learn: this key becomes the stop key
+            proc.uiLearnStopKey = false; proc.uiStopKey = k.getKeyCode();
+            showToast ("Stop key: " + KeyPress (k.getKeyCode()).getTextDescription());
+            if (openPage != nullptr) openPage->refresh();
+            return true;
+        }
+        if (! k.getModifiers().isCommandDown() && ! k.getModifiers().isAltDown()) {
+            // the stop key stops at once; Space starts when nothing plays
+            if (proc.uiStopKey != 0 && k.getKeyCode() == proc.uiStopKey) {
+                if (anythingPlaying()) stopAll();
+                else if (k.getKeyCode() == KeyPress::spaceKey) { if (songLane.hasKeyboardFocus (false)) { songHeader.refresh(); proc.uiSongPlay (true, songLane.cursorBeat); } else proc.uiTrigger (st.song().editKey); }
+                return true;
+            }
+            if (k.getKeyCode() == KeyPress::spaceKey) {
+                if (anythingPlaying()) stopAll();
+                else if (songLane.hasKeyboardFocus (false)) { songHeader.refresh(); proc.uiSongPlay (true, songLane.cursorBeat); }
+                else proc.uiTrigger (st.song().editKey);
+                return true;
+            }
+        }
         const auto m = k.getModifiers();
         const int code = k.getKeyCode();
         const juce_wchar ch = CharacterFunctions::toUpperCase (k.getTextCharacter());
@@ -548,6 +808,7 @@ public:
                 m.addSeparator();
                 m.addItem (2, "Presets..."); m.addItem (3, "Save preset");
                 m.addSeparator(); m.addItem (4, "Import MIDI files..."); m.addItem (5, "Export this pattern as MIDI..."); m.addItem (6, "Export the song lane as MIDI...");
+                m.addItem (15, "Export all keys to folders (EZdrummer style)...");
                 m.addSeparator(); m.addItem (7, "Drum map..."); m.addItem (8, "Settings..."); m.addItem (9, "Look...");
                 break;
             case 1:
@@ -672,6 +933,7 @@ public:
             case 612: togglePage (chainPage, chainsBtn); break;
             case 613: togglePage (recPage, recOptBtn); break;
             case 614: togglePage (mixerPage, mixerBtn); break;
+            case 15: togglePage (exportPage, exportDummy); break;
             case 615: toggleStrip(); break;
             case 616: MessageManager::callAsync ([sp = Component::SafePointer<DrumPlayerEditor> (this)] { if (sp) sp->toggleDetach(); }); break;
             default:
@@ -886,8 +1148,38 @@ private:
             owner->repaintRoll();
         }
     } scrollRelay;
-    QuantizePage quantPage; HumanizePage humPage; ChainPage chainPage; SettingsPage setPage; PresetPage presetPage; MapPage mapPage; RecordPage recPage; GroovePage groovePage; MixerPage mixerPage;
-    TextButton mixerBtn;
+    QuantizePage quantPage; HumanizePage humPage; ChainPage chainPage; SettingsPage setPage; PresetPage presetPage; MapPage mapPage; RecordPage recPage; GroovePage groovePage; MixerPage mixerPage; ExportPage exportPage;
+    TextButton mixerBtn, exportDummy;
+    // tempo: your own when Studio One is stopped, or follow Studio One
+    TextButton tempoDown, tempoUp, tapBtn, followBtn; Label tempoLbl, lTempo;
+    std::vector<double> taps;
+    double ownTempo() { return st.song().settings.ownBpm; }
+    void setOwnTempo (double b)
+    {
+        b = jlimit (20.0, 400.0, std::round (b * 10.0) / 10.0);
+        st.applySong ("Tempo", [b] (Song& s) { s.settings.ownBpm = b; s.settings.followHost = false; });
+        showTempo();
+    }
+    double effectiveTempo() { return st.song().settings.followHost || proc.hostPlaying.load() ? proc.hostBpm.load() : ownTempo(); }
+    void showTempo()
+    {
+        if (tempoLbl.isBeingEdited()) return;
+        const bool follow = st.song().settings.followHost;
+        const double b = effectiveTempo();
+        const auto t = String (b, std::abs (b - std::round (b)) < 0.05 ? 0 : 1);
+        if (tempoLbl.getText() != t) tempoLbl.setText (t, dontSendNotification);
+        tempoLbl.setColour (Label::textColourId, follow || proc.hostPlaying.load() ? th::dim : th::text);
+        followBtn.setToggleState (follow, dontSendNotification);
+    }
+    bool anythingPlaying()
+    {
+        return proc.playingKey.load() >= 0 || proc.queuedKey.load() >= 0 || proc.chainPlaying.load() >= 0 || proc.songBeatUi.load() >= 0;
+    }
+    void stopAll()
+    {
+        if (proc.songBeatUi.load() >= 0) proc.uiSongPlay (false, 0);
+        proc.uiStop(); stopFlashUntil = Time::getMillisecondCounter() + 450;
+    }
     Component exchange;
     Page* openPage = nullptr; TextButton* openPageBtn = nullptr;
     TextButton pageClose;                    // the X in the corner of an open page
@@ -937,7 +1229,8 @@ private:
         r1.place (lLen, 44); r1.place (barsEd, 40); r1.place (lenMenuBtn); r1.place (bpbBox, 58); r1.skip (6);
         r1.place (lGrid, 30); r1.place (gridBox, 70); r1.skip (10);
         for (auto* b : toolBtns) b->setVisible (false);     // tools live in the right-click menu, the Tools menu and keys 1-7
-        r1.place (undoBtn); r1.place (redoBtn);
+        r1.place (undoBtn); r1.place (redoBtn); r1.skip (14);
+        r1.place (lTempo, 44); r1.place (tempoDown, 24); r1.place (tempoLbl, 58); r1.place (tempoUp, 24); r1.place (tapBtn); r1.place (followBtn);
         a.removeFromTop (4);
         // toolbar 2
         auto t2 = a.removeFromTop (jmax (28, (int) btnH + 6));
@@ -963,10 +1256,12 @@ private:
         const auto ra = bodyRest;
         auto pageArea = ra.withTrimmedLeft (jmax (0, ra.getWidth() - 520)).withTrimmedBottom (velH / 2);
         for (Page* pg : { (Page*) &quantPage, (Page*) &humPage, (Page*) &chainPage, (Page*) &setPage, (Page*) &recPage }) pg->setBounds (pageArea);
+        setPage.setBounds (pageArea.withBottom (ra.getBottom()));
         mapPage.setBounds (ra.withTrimmedLeft (jmax (0, ra.getWidth() - 520)));
         presetPage.setBounds (ra.withTrimmedLeft (jmax (0, ra.getWidth() - 600)));
         groovePage.setBounds (ra.withTrimmedLeft (jmax (0, ra.getWidth() - 900)));
         mixerPage.setBounds (ra);
+        exportPage.setBounds (ra.withTrimmedLeft (jmax (0, ra.getWidth() - 760)));
         exchange.setBounds (ra.withTrimmedTop (-90));
         auto ex = exchange.getLocalBounds().reduced (12);
         exchangeHelp.setBounds (ex.removeFromTop (24));
@@ -1111,6 +1406,7 @@ private:
         if (pk != lastPlayKey) { lastPlayKey = pk; strip.repaint(); bigStrip.repaint(); }
         if (pt != lastPlayTicks) { lastPlayTicks = pt; grid.playTicks = pt; grid.repaint(); }
         if (proc.queuedKey.load() != -2) { strip.repaint(); bigStrip.repaint(); }
+        showTempo();
         {   // Rec lamp: steady while recording, blinking during the count-in
             const int rs = proc.recStateUi.load();
             const bool lit = rs == 2 || ((rs == 1 || rs == 3) && (Time::getMillisecondCounter() / 200) % 2 == 0);
@@ -1134,7 +1430,7 @@ private:
             if (learnFrom >= 0 && ser != learnSerial && n >= 0) {          // "move to the next key I press"
                 const int from = learnFrom, to = n; learnFrom = -1;
                 if (to == from) showToast ("That's the same key");
-                else if (to < st.song().settings.zoneLow || to == st.song().settings.resolveStop()) showToast (keyName (to) + " isn't a pattern key");
+                else if (to < st.song().settings.zoneLow || st.song().settings.isStop (to)) showToast (keyName (to) + " isn't a pattern key");
                 else {
                     st.applySong ("Move pattern", [from, to] (Song& s2) {
                         std::swap (s2.keys[(size_t) from], s2.keys[(size_t) to]);
@@ -1311,8 +1607,10 @@ private:
                     const bool wantBlack = p.type == PatternType::Fill;
                     while (k < 128 && isBlackKey (k) != wantBlack) ++k;
                 }
+                while (k < 128 && s.settings.isStop (k)) ++k;           // never onto a STOP key
                 if (k > 127) break;
                 s.keys[(size_t) k] = p;
+                if (isBlackKey (k)) s.keys[(size_t) k].type = PatternType::Fill;   // imported onto a black key: a fill (change it by hand if not)
                 s.ensureLanesForPattern (p);
                 if (first < 0) first = k;
                 last = k;

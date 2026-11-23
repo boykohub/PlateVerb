@@ -148,8 +148,8 @@ struct ChainStep { int key = -1, repeats = 1; bool looping = false; };   // loop
 struct Group { String name; uint32 colour = 0xff7fd1ff; };          // your own designations, each with a colour
 inline std::vector<Group> defaultGroups()
 {
-    return { { "Intro", 0xff5aa9ff }, { "Verse", 0xffb8f28b }, { "Pre-chorus", 0xff6ee7d8 }, { "Chorus", 0xffffc15e },
-             { "Bridge", 0xffc9a7ff }, { "Fill", 0xffffa36e }, { "Breakdown", 0xffe3e37a }, { "Outro", 0xffff8fa3 } };
+    return { { "Intro", 0xff5aa9ff }, { "Verse", 0xffb8f28b }, { "Pre Chorus", 0xff6ee7d8 }, { "Chorus", 0xffffc15e },
+             { "Bridge", 0xffc9a7ff }, { "Fills", 0xffffa36e }, { "Breakdown", 0xffe3e37a }, { "Outro", 0xffff8fa3 } };
 }
 // a chunk on the song lane: plays a key's pattern from `start` for `length` beats, `offset` beats into it (it repeats if longer)
 struct Clip { double start = 0, length = 4, offset = 0; int key = 12; bool muted = false, selected = false; };
@@ -169,7 +169,9 @@ struct Settings
     bool passThrough = true;
     bool fillsToBlack = false;                     // multi-file import: names containing "fill" go to black keys
     bool rememberLast = true;
-    int stopNote = 11;                             // B-2, just below the patterns; any key under C-1 (-1 none, -2 the last pattern key)
+    int stopNote = 24, stopNote2 = 108;            // two STOP keys (C0 and C7), any key or -1 for none
+    bool followHost = true;                        // tempo: follow Studio One; off = your own tempo while Studio One is stopped
+    double ownBpm = 120.0;
     int triggerChannel = 0;                        // pattern keys listen on this channel (0 = any)
     int playChannel = 0;                           // drum pads / live notes come on this channel (0 = any)
     bool mirrorOctaves = false;                    // pattern keys repeat in every octave
@@ -183,6 +185,7 @@ struct Settings
     int hhCC = 0;                                  // send hi-hat openness on this controller before hi-hat notes (0 = off)
 
     int resolveStop() const { return stopNote == -2 ? zoneHigh : stopNote; }
+    bool isStop (int n) const { return n >= 0 && (n == resolveStop() || n == stopNote2); }
     // the pattern key an incoming note triggers, or -1 (stop key included)
     int keyForNote (int n, int ch) const
     {
@@ -208,8 +211,12 @@ struct Settings
     int splitBars = 4;                             // when you choose to cut a groove into keys: every N bars
 };
 
+// how "export all keys to folders" files this tune (the levels of EZdrummer's groove browser)
+struct ExportInfo { String folder, style, tempoType, feel, tune; bool addBpm = true; int naming = 0; };
+
 struct Song
 {
+    ExportInfo exportInfo;
     int playMap = mapGM;                           // the drum plugin Drum Player feeds
     int importMap = -1;                            // where dropped MIDI comes from (-1 = same as playMap)
     std::array<int, aCount> customNotes {};        // Custom map: note per articulation (-1 = none)
@@ -635,7 +642,7 @@ inline std::vector<Pattern> splitToPatterns (const ImportedPart& part, int barsP
     return out;
 }
 
-inline File writeMidiFile (const std::vector<const Pattern*>& parts, const File& f, int channel)
+inline File writeMidiFile (const std::vector<const Pattern*>& parts, const File& f, int channel, double bpm = 0.0)
 {
     MidiMessageSequence seq;
     int offset = 0;
@@ -650,6 +657,7 @@ inline File writeMidiFile (const std::vector<const Pattern*>& parts, const File&
     seq.updateMatchedPairs();
     MidiMessageSequence meta;
     if (! parts.empty()) meta.addEvent (MidiMessage::timeSignatureMetaEvent (parts.front()->beatsPerBar, 4), 0);
+    if (bpm > 0) meta.addEvent (MidiMessage::tempoMetaEvent ((int) std::round (60000000.0 / bpm)), 0);
     meta.addEvent (MidiMessage::endOfTrack(), (double) offset);
     MidiFile mf; mf.setTicksPerQuarterNote (PPQ);
     mf.addTrack (meta); mf.addTrack (seq);
@@ -773,6 +781,9 @@ inline std::unique_ptr<XmlElement> songToXml (const Song& s)
     }
     auto* gs = x->createNewChildElement ("Groups");
     for (auto& g : s.groups) { auto* e = gs->createNewChildElement ("G"); e->setAttribute ("name", g.name); e->setAttribute ("colour", String::toHexString ((int) g.colour)); }
+    {   auto* ex = x->createNewChildElement ("Export"); const auto& e = s.exportInfo;
+        ex->setAttribute ("folder", e.folder); ex->setAttribute ("style", e.style); ex->setAttribute ("tempotype", e.tempoType);
+        ex->setAttribute ("feel", e.feel); ex->setAttribute ("tune", e.tune); ex->setAttribute ("addbpm", e.addBpm); ex->setAttribute ("naming", e.naming); }
     auto* sg = x->createNewChildElement ("SongLane");
     sg->setAttribute ("on", s.songMode);
     for (auto& c : s.clips) {
@@ -785,7 +796,8 @@ inline std::unique_ptr<XmlElement> songToXml (const Song& s)
     st->setAttribute ("out", o.outChannel); st->setAttribute ("zlo", o.zoneLow); st->setAttribute ("zhi", o.zoneHigh);
     st->setAttribute ("sq", (int) o.startQuant); st->setAttribute ("latch", o.latch); st->setAttribute ("hoststop", o.stopWithHost);
     st->setAttribute ("thru", o.passThrough); st->setAttribute ("fillsblack", o.fillsToBlack); st->setAttribute ("remember", o.rememberLast);
-    st->setAttribute ("stop", o.stopNote); st->setAttribute ("recq", o.recQuantize); st->setAttribute ("split", o.splitBars);
+    st->setAttribute ("stopA", o.stopNote); st->setAttribute ("stopB", o.stopNote2);
+    st->setAttribute ("follow", o.followHost); st->setAttribute ("bpm", o.ownBpm); st->setAttribute ("recq", o.recQuantize); st->setAttribute ("split", o.splitBars);
     st->setAttribute ("trigch", o.triggerChannel); st->setAttribute ("playch", o.playChannel); st->setAttribute ("mirror", o.mirrorOctaves);
     st->setAttribute ("countin", o.countInBars); st->setAttribute ("metro", o.metroMode); st->setAttribute ("metrolvl", o.metroLevel);
     st->setAttribute ("keymode", o.keyMode); st->setAttribute ("hhcc", o.hhCC);
@@ -794,9 +806,24 @@ inline std::unique_ptr<XmlElement> songToXml (const Song& s)
     return x;
 }
 
+// a pattern sitting on a STOP key moves to the first free pattern key (chains and the song lane follow it)
+inline void movePatternOffKey (Song& s, int from)
+{
+    if (from < 0 || from > 127 || s.keys[(size_t) from].isEmpty()) return;
+    const auto& o = s.settings;
+    for (int k = o.zoneLow; k <= o.zoneHigh; ++k)
+        if (! o.isStop (k) && s.keys[(size_t) k].isEmpty()) {
+            std::swap (s.keys[(size_t) k], s.keys[(size_t) from]);
+            for (auto& c : s.chains) for (auto& step : c.steps) if (step.key == from) step.key = k;
+            for (auto& c : s.clips) if (c.key == from) c.key = k;
+            if (s.editKey == from) s.editKey = k;
+            return;
+        }
+}
 inline Song songFromXml (const XmlElement& x)
 {
     Song s;
+    bool movePatternsOffStops = false;
     s.editKey = jlimit (0, 127, x.getIntAttribute ("editKey", 0));
     s.playMap = jlimit (0, (int) numMaps - 1, x.getIntAttribute ("playMap", mapGM));
     s.importMap = jlimit (-1, (int) numMaps - 1, x.getIntAttribute ("importMap", -1));
@@ -827,7 +854,17 @@ inline Song songFromXml (const XmlElement& x)
     }
     if (auto* gs = x.getChildByName ("Groups")) {
         s.groups.clear();
-        for (auto* e : gs->getChildIterator()) s.groups.push_back ({ e->getStringAttribute ("name"), (uint32) e->getStringAttribute ("colour", "ff7fd1ff").getHexValue32() });
+        for (auto* e : gs->getChildIterator()) {
+            auto n = e->getStringAttribute ("name");
+            if (n == "Fill") n = "Fills"; else if (n == "Pre-chorus") n = "Pre Chorus";     // the names EZdrummer uses
+            s.groups.push_back ({ n, (uint32) e->getStringAttribute ("colour", "ff7fd1ff").getHexValue32() });
+        }
+    }
+    if (auto* ex = x.getChildByName ("Export")) {
+        auto& e = s.exportInfo;
+        e.folder = ex->getStringAttribute ("folder"); e.style = ex->getStringAttribute ("style"); e.tempoType = ex->getStringAttribute ("tempotype");
+        e.feel = ex->getStringAttribute ("feel"); e.tune = ex->getStringAttribute ("tune"); e.addBpm = ex->getBoolAttribute ("addbpm", true);
+        e.naming = jlimit (0, 1, ex->getIntAttribute ("naming", 0));
     }
     if (auto* sg = x.getChildByName ("SongLane")) {
         s.songMode = sg->getBoolAttribute ("on", false);
@@ -847,7 +884,10 @@ inline Song songFromXml (const XmlElement& x)
         o.startQuant = (StartQuant) jlimit (0, 4, st->getIntAttribute ("sq", 4));
         o.latch = st->getBoolAttribute ("latch", true); o.stopWithHost = st->getBoolAttribute ("hoststop", true);
         o.passThrough = st->getBoolAttribute ("thru", true); o.fillsToBlack = st->getBoolAttribute ("fillsblack", false);
-        o.rememberLast = st->getBoolAttribute ("remember", true); o.stopNote = jlimit (-2, 127, st->getIntAttribute ("stop", -2));
+        o.rememberLast = st->getBoolAttribute ("remember", true); 
+        o.followHost = st->getBoolAttribute ("follow", true); o.ownBpm = jlimit (20.0, 400.0, st->getDoubleAttribute ("bpm", 120.0));
+        if (st->hasAttribute ("stopA")) { o.stopNote = jlimit (-1, 127, st->getIntAttribute ("stopA", 24)); o.stopNote2 = jlimit (-1, 127, st->getIntAttribute ("stopB", 108)); }
+        else { o.stopNote = 24; o.stopNote2 = 108; movePatternsOffStops = true; }      // the STOP keys moved to C0 and C7
         o.triggerChannel = jlimit (0, 16, st->getIntAttribute ("trigch", 0)); o.playChannel = jlimit (0, 16, st->getIntAttribute ("playch", 0));
         o.mirrorOctaves = st->getBoolAttribute ("mirror", false);
         o.countInBars = jlimit (0, 2, st->getIntAttribute ("countin", 1)); o.metroMode = jlimit (0, 3, st->getIntAttribute ("metro", 2));
@@ -859,7 +899,7 @@ inline Song songFromXml (const XmlElement& x)
         o.keyMode = jlimit (0, 1, st->getIntAttribute ("keymode", 0));
         o.hhCC = jlimit (0, 127, st->getIntAttribute ("hhcc", 0));
         if (x.getIntAttribute ("version", 1) < 3) {     // older saves: patterns move up an octave to start at C-1, stop on B-2
-            o.zoneLow = 12; o.zoneHigh = 127; o.stopNote = 11; o.mirrorOctaves = false; o.startQuant = StartQuant::InTime;
+            o.zoneLow = 12; o.zoneHigh = 127; o.mirrorOctaves = false; o.startQuant = StartQuant::InTime;
             for (int k = 127; k >= 12; --k) if (s.keys[(size_t) (k - 12)].isEmpty() == false && s.keys[(size_t) k].isEmpty()) std::swap (s.keys[(size_t) k], s.keys[(size_t) (k - 12)]);
             for (auto& c : s.chains) for (auto& step : c.steps) if (step.key >= 0 && step.key < 116) step.key += 12;
             for (auto& c : s.clips) if (c.key < 116) c.key += 12;
@@ -870,6 +910,7 @@ inline Song songFromXml (const XmlElement& x)
     if (s.lanes.empty()) s.lanes = Song::makeDefault().lanes;
     for (auto& p : s.keys) s.ensureLanesForPattern (p);
     s.sortLanes();
+    if (movePatternsOffStops) { movePatternOffKey (s, s.settings.stopNote); movePatternOffKey (s, s.settings.stopNote2); }
     return s;
 }
 
@@ -884,6 +925,7 @@ inline File presetFolder() { auto d = dataFolder().getChildFile ("Presets"); d.c
 inline File lastSessionFile() { return dataFolder().getChildFile ("LastSession.xml"); }
 inline File favouritesFile() { return dataFolder().getChildFile ("Favourites.txt"); }
 // grooves you starred on a key: their file paths (and names), so the groove browser shows the star too
+inline File exportListsFile() { return dataFolder().getChildFile ("ExportLists.xml"); }
 inline File grooveStarsFile() { return dataFolder().getChildFile ("GrooveStars.txt"); }
 inline StringArray grooveStars() { auto a = StringArray::fromLines (grooveStarsFile().loadFileAsString()); a.removeEmptyStrings(); return a; }
 inline void setGrooveStar (const String& id, bool on)

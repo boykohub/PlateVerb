@@ -79,7 +79,7 @@ public:
             if (isBlackKey (k)) continue;
             auto r = keyRect (k);
             const auto& p = s.keys[(size_t) k];
-            const bool usable = isPatternKey (k) || k == s.settings.resolveStop();
+            const bool usable = isPatternKey (k) || s.settings.isStop (k);
             g.setGradientFill (ColourGradient (Colour (0xffe9eaee).withMultipliedBrightness (usable ? 1.0f : 0.55f), r.getTopLeft(),
                                                Colour (0xffb9bcc4).withMultipliedBrightness (usable ? 1.0f : 0.55f), r.getBottomLeft(), false));
             g.fillRoundedRectangle (r.reduced (0.5f, 0), 3);
@@ -123,12 +123,12 @@ public:
     int firstKey() const
     {
         const auto& o = st.song().settings;
-        const int stop = o.resolveStop();
-        int f = (stop >= 0 && stop < o.zoneLow) ? stop : o.zoneLow;
+        int f = o.zoneLow;
+        for (int stop : { o.resolveStop(), o.stopNote2 }) if (stop >= 0 && stop < f) f = stop;
         while (f > 0 && isBlackKey (f)) --f;
         return f;
     }
-    bool isPatternKey (int k) const { const auto& o = st.song().settings; return k >= o.zoneLow && k <= o.zoneHigh && k != o.resolveStop(); }
+    bool isPatternKey (int k) const { const auto& o = st.song().settings; return k >= o.zoneLow && k <= o.zoneHigh && ! o.isStop (k); }
     int visibleWhites() const { return jmax (5, (int) ((getWidth() - 2 * arrowW) / ((large ? 30.0f : 24.0f) * Theme::get().keyScale))); }
     void updateView()
     {
@@ -197,9 +197,9 @@ public:
         if (rightArrow().contains (e.position)) { scrollOctaves (1); return; }
         const int k = keyAt (e.position);
         if (k < 0) return;
-        if (! isPatternKey (k) && k != st.song().settings.resolveStop()) return;
+        if (! isPatternKey (k) && ! st.song().settings.isStop (k)) return;
         if (e.mods.isPopupMenu()) { if (onKeyMenu) onKeyMenu (k); return; }
-        if (! large && k == st.song().settings.resolveStop()) { st.proc.uiStop(); pressedStop = true; repaint(); return; }
+        if (! large && st.song().settings.isStop (k)) { st.proc.uiStop(); pressedStop = true; repaint(); return; }
         if (e.mods.isAltDown()) {                                  // Option/Alt+click: pick several keys (to colour them together)
             if (st.keySel.count (k)) st.keySel.erase (k); else st.keySel.insert (k);
             repaint(); return;
@@ -285,7 +285,7 @@ private:
 
     void drawTile (Graphics& g, Rectangle<float> r, int k, const Pattern& p, bool black)
     {
-        if (k == st.song().settings.resolveStop()) {             // the stop key
+        if (st.song().settings.isStop (k)) {                       // a STOP key
             g.setColour (th::red.withAlpha (pressedStop ? 1.0f : 0.85f)); g.fillRoundedRectangle (r, 3);
             g.setColour (th::ink); g.setFont (font ((large ? 11.0f : 9.5f) * Theme::get().keyTextScale, 3));
             g.drawFittedText ("STOP", r.reduced (1).toNearestInt(), Justification::centred, 1, 0.7f);
@@ -922,7 +922,7 @@ public:
     {
         st.applySong ("Make unique", [] (Song& s) {
             for (auto& c : s.clips) if (c.selected) {
-                int free = -1; for (int k = s.settings.zoneLow; k <= s.settings.zoneHigh; ++k) if (s.keys[(size_t) k].isEmpty() && k != s.settings.resolveStop()) { free = k; break; }
+                int free = -1; for (int k = s.settings.zoneLow; k <= s.settings.zoneHigh; ++k) if (s.keys[(size_t) k].isEmpty() && ! s.settings.isStop (k)) { free = k; break; }
                 if (free < 0) return;
                 s.keys[(size_t) free] = s.keys[(size_t) c.key];
                 s.keys[(size_t) free].name = s.keys[(size_t) c.key].name + " (unique)";
@@ -1862,7 +1862,7 @@ private:
 
 
 // ---------------------------------------------------------------- settings page
-class SettingsPage : public Page
+class SettingsPage : public Page, private Timer
 {
 public:
     SettingsPage (EditState& e) : Page ("SETTINGS"), st (e), map (e), inner (e)
@@ -1873,13 +1873,24 @@ public:
         StringArray keys; for (int n = 0; n < 128; ++n) keys.add (keyName (n) + "  (" + String (n) + ")");
         setupLabel (*this, lZone, "Pattern keys"); setupCombo (*this, zLo, keys); setupCombo (*this, zHi, keys);
         setupLabel (*this, lStart, "Start / switch on"); setupCombo (*this, start, { "Immediately", "Next beat", "Next bar", "End of pattern", "At once, in time (keeps the bar)" });
-        setupLabel (*this, lMode, "Keys"); setupCombo (*this, mode, { "Latch (press again to stop)", "Hold (release to stop)" });
-        StringArray stopKeys { "None" }; for (int n = 0; n < 12; ++n) stopKeys.add (keyName (n) + "  (" + String (n) + ")");
+        setupLabel (*this, lMode, "Keys"); setupCombo (*this, mode, { "Latch (keeps playing until STOP)", "Hold (release to stop)" });
+        StringArray stopKeys { "None" }; for (int n = 0; n < 128; ++n) stopKeys.add (keyName (n));
         StringArray chans { "Any channel" }; for (int c = 1; c <= 16; ++c) chans.add ("Channel " + String (c));
         setupLabel (*this, lTrig, "Pattern keys listen on"); setupCombo (*this, trigCh, chans, 1, "Give a second controller its own channel to use it only for patterns");
         setupLabel (*this, lPlayCh, "Drum pads / live notes on"); setupCombo (*this, playCh, chans, 1, "Notes on this channel are always played and recorded, never pattern keys");
         setupButton (*this, mirror, "Pattern keys in every octave", true, "The pattern keys repeat up the whole keyboard, so any octave works. Use separate channels for live drums then");
-        setupLabel (*this, lStop, "Stop key"); setupCombo (*this, stopKey, stopKeys);
+        setupLabel (*this, lStop, "STOP keys"); setupCombo (*this, stopKey, stopKeys, 1, "First STOP key on your keyboard");
+        setupCombo (*this, stopKey2, stopKeys, 1, "Second STOP key, for when you can't reach the first");
+        setupButton (*this, learn1, "Learn", true, "Press a key on your MIDI keyboard to make it this STOP key");
+        setupButton (*this, learn2, "Learn", true, "Press a key on your MIDI keyboard to make it this STOP key");
+        learn1.onClick = [this] { learnSlot = learn1.getToggleState() ? 1 : 0; learn2.setToggleState (false, dontSendNotification); learnSerial = st.proc.lastInSerial.load(); };
+        learn2.onClick = [this] { learnSlot = learn2.getToggleState() ? 2 : 0; learn1.setToggleState (false, dontSendNotification); learnSerial = st.proc.lastInSerial.load(); };
+        setupLabel (*this, lPcKey, "Stop on the computer");
+        setupLabel (*this, pcKey, "", 12.0f, th::text);
+        setupButton (*this, learnPc, "Learn", true, "Press a key on the computer keyboard (while Drum Player has focus) to stop with it");
+        learnPc.onClick = [this] { st.proc.uiLearnStopKey = learnPc.getToggleState(); };
+        setupButton (*this, noPc, "None", false, "No computer key stops");
+        noPc.onClick = [this] { st.proc.uiStopKey = 0; st.proc.uiLearnStopKey = false; learnPc.setToggleState (false, dontSendNotification); refresh(); };
         setupLabel (*this, lSplit, "Cutting a groove into keys");
         setupCombo (*this, split, { "Keep whole", "1 bar", "2 bars", "4 bars", "8 bars", "16 bars" }, 1, "Used when you hold Shift while dropping, or choose 'cut into keys' when pasting. A normal drop keeps the groove whole");
         setupButton (*this, hostStop, "Stop when Studio One stops", true);
@@ -1905,6 +1916,7 @@ public:
                 o.zoneLow = zLo.getSelectedItemIndex(); o.zoneHigh = jmax (o.zoneLow, zHi.getSelectedItemIndex());
                 o.startQuant = (StartQuant) start.getSelectedItemIndex(); o.latch = mode.getSelectedItemIndex() == 0;
                 { const int si = stopKey.getSelectedItemIndex(); o.stopNote = si <= 0 ? -1 : si - 1; }
+                { const int si = stopKey2.getSelectedItemIndex(); o.stopNote2 = si <= 0 ? -1 : si - 1; }
                 o.triggerChannel = trigCh.getSelectedItemIndex(); o.playChannel = playCh.getSelectedItemIndex();
                 o.mirrorOctaves = mirror.getToggleState();
                 static const int sb[] = { 0, 1, 2, 4, 8, 16 }; o.splitBars = sb[jlimit (0, 5, split.getSelectedItemIndex())];
@@ -1912,7 +1924,8 @@ public:
                 o.fillsToBlack = fills.getToggleState(); o.rememberLast = remember.getToggleState();
             });
         };
-        for (auto* c : { &out, &zLo, &zHi, &start, &mode, &stopKey, &split, &trigCh, &playCh }) c->onChange = commit;
+        for (auto* c : { &out, &zLo, &zHi, &start, &mode, &stopKey, &stopKey2, &split, &trigCh, &playCh }) c->onChange = commit;
+        startTimerHz (10);
         for (auto* b : { &hostStop, &thru, &fills, &remember, &mirror }) b->onClick = commit;
     }
     LookEditor look;
@@ -1946,7 +1959,10 @@ public:
         out.setSelectedItemIndex (o.outChannel - 1, dontSendNotification);
         zLo.setSelectedItemIndex (o.zoneLow, dontSendNotification); zHi.setSelectedItemIndex (o.zoneHigh, dontSendNotification);
         start.setSelectedItemIndex ((int) o.startQuant, dontSendNotification); mode.setSelectedItemIndex (o.latch ? 0 : 1, dontSendNotification);
-        stopKey.setSelectedItemIndex (o.stopNote >= 0 && o.stopNote < 12 ? o.stopNote + 1 : 0, dontSendNotification);
+        stopKey.setSelectedItemIndex (o.resolveStop() >= 0 ? o.resolveStop() + 1 : 0, dontSendNotification);
+        stopKey2.setSelectedItemIndex (o.stopNote2 >= 0 ? o.stopNote2 + 1 : 0, dontSendNotification);
+        pcKey.setText (st.proc.uiStopKey == 0 ? String ("none") : KeyPress (st.proc.uiStopKey).getTextDescription(), dontSendNotification);
+        learnPc.setToggleState (st.proc.uiLearnStopKey, dontSendNotification);
         trigCh.setSelectedItemIndex (o.triggerChannel, dontSendNotification); playCh.setSelectedItemIndex (o.playChannel, dontSendNotification);
         mirror.setToggleState (o.mirrorOctaves, dontSendNotification);
         const int sb = o.splitBars; split.setSelectedItemIndex (sb <= 0 ? 0 : sb == 1 ? 1 : sb == 2 ? 2 : sb <= 4 ? 3 : sb <= 8 ? 4 : 5, dontSendNotification);
@@ -1966,7 +1982,12 @@ public:
         auto z = row (a, lZone, lw); zLo.setBounds (z.removeFromLeft (110)); z.removeFromLeft (8); zHi.setBounds (z.removeFromLeft (110));
         start.setBounds (row (a, lStart, lw).removeFromLeft (170));
         mode.setBounds (row (a, lMode, lw).removeFromLeft (210));
-        stopKey.setBounds (row (a, lStop, lw).removeFromLeft (170));
+        {   auto r = row (a, lStop, lw);
+            stopKey.setBounds (r.removeFromLeft (90)); r.removeFromLeft (4); learn1.setBounds (r.removeFromLeft (learn1.getWidth()).withSizeKeepingCentre (learn1.getWidth(), btnH)); r.removeFromLeft (12);
+            stopKey2.setBounds (r.removeFromLeft (90)); r.removeFromLeft (4); learn2.setBounds (r.removeFromLeft (learn2.getWidth()).withSizeKeepingCentre (learn2.getWidth(), btnH)); }
+        {   auto r = row (a, lPcKey, lw);
+            pcKey.setBounds (r.removeFromLeft (90)); r.removeFromLeft (4); learnPc.setBounds (r.removeFromLeft (learnPc.getWidth()).withSizeKeepingCentre (learnPc.getWidth(), btnH)); r.removeFromLeft (4);
+            noPc.setBounds (r.removeFromLeft (noPc.getWidth()).withSizeKeepingCentre (noPc.getWidth(), btnH)); }
         trigCh.setBounds (row (a, lTrig, lw).removeFromLeft (130));
         playCh.setBounds (row (a, lPlayCh, lw).removeFromLeft (130));
         split.setBounds (row (a, lSplit, lw).removeFromLeft (120));
@@ -1977,8 +1998,22 @@ public:
     }
 private:
     EditState& st; bool loading = false;
-    Label lOut, lZone, lStart, lMode, lStop, lSplit, help, lTrig, lPlayCh;
-    ComboBox out, zLo, zHi, start, mode, stopKey, split, trigCh, playCh;
+    Label lOut, lZone, lStart, lMode, lStop, lSplit, help, lTrig, lPlayCh, lPcKey, pcKey;
+    ComboBox out, zLo, zHi, start, mode, stopKey, stopKey2, split, trigCh, playCh;
+    TextButton learn1, learn2, learnPc, noPc;
+    int learnSlot = 0, learnSerial = 0;
+    void timerCallback() override
+    {
+        // MIDI learn for the STOP keys: the next key you play
+        if (learnSlot != 0 && st.proc.lastInSerial.load() != learnSerial) {
+            const int n = st.proc.lastInNote.load();
+            const int slot = learnSlot; learnSlot = 0;
+            learn1.setToggleState (false, dontSendNotification); learn2.setToggleState (false, dontSendNotification);
+            if (n >= 0) st.applySong ("STOP key", [n, slot] (Song& s) { if (slot == 1) s.settings.stopNote = n; else s.settings.stopNote2 = n; movePatternOffKey (s, n); });
+            refresh();
+        }
+        if (! st.proc.uiLearnStopKey && learnPc.getToggleState()) refresh();     // learnt on the computer keyboard
+    }
     TextButton hostStop, thru, fills, remember, mirror, tabGeneral, tabLook, tabMap, tabInner;
 };
 
