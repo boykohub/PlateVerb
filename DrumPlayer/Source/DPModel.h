@@ -91,6 +91,8 @@ struct Pattern
     std::vector<Note> notes;
     std::map<int, int> laneLength;       // note → loop length in ticks (polyrhythm); absent = pattern length
     std::set<int> laneMute;
+    struct EditLoop { int from = 0, to = 0; };
+    std::vector<EditLoop> loops;         // short loops for editing (drawn on the editor's ruler); saved, never change how it plays
     bool fav = false;                    // your 1-star favourite (shown on the key and in the groove browser)
     String source;                       // the groove file it came from, if any (so the browser can show the star)
     // recorded layers (Studio One style takes): each pass is a layer; the comp says which layer plays where
@@ -170,6 +172,7 @@ struct Settings
     bool fillsToBlack = false;                     // multi-file import: names containing "fill" go to black keys
     bool rememberLast = true;
     int stopNote = 24, stopNote2 = 108;            // two STOP keys (C0 and C7), any key or -1 for none
+    bool loopJumpAtOnce = true;                    // editor loops: jump at once, or when the current loop is over
     bool followHost = true;                        // tempo: follow Studio One; off = your own tempo while Studio One is stopped
     double ownBpm = 120.0;
     int triggerChannel = 0;                        // pattern keys listen on this channel (0 = any)
@@ -669,23 +672,25 @@ inline File writeMidiFile (const std::vector<const Pattern*>& parts, const File&
 
 
 // the song lane written out as one MIDI file: every chunk's notes in place
-inline void writeSongMidi (const Song& s, const File& f, int channel)
+// the whole song lane from bar 1, or (selectedOnly) just the selected chunks, gaps kept, starting at the first of them
+inline void writeSongMidi (const Song& s, const File& f, int channel, bool selectedOnly = false)
 {
     MidiMessageSequence seq;
-    double end = 0;
+    double end = 0, shift = 0;
+    if (selectedOnly) { shift = 1e18; for (auto& c : s.clips) if (c.selected && ! c.muted) shift = jmin (shift, c.start); if (shift > 1e17) shift = 0; }
     for (auto& c : s.clips) {
-        if (c.muted) continue;
+        if (c.muted || (selectedOnly && ! c.selected)) continue;
         const auto& p = s.keys[(size_t) jlimit (0, 127, c.key)];
         const double L = p.lengthTicks() / (double) PPQ;
         if (L <= 0) continue;
-        end = jmax (end, c.start + c.length);
+        end = jmax (end, c.start + c.length - shift);
         for (auto& n : p.notes) {
             const double LL = p.laneLen (n.note) / (double) PPQ;
             if (n.tick >= p.laneLen (n.note)) continue;
             for (double base = std::floor (c.offset / LL) * LL; base < c.offset + c.length; base += LL) {
                 const double t = base + n.tick / (double) PPQ;
                 if (t < c.offset - 1e-9 || t >= c.offset + c.length - 1e-9) continue;
-                const double at = (c.start + t - c.offset) * PPQ;
+                const double at = (c.start - shift + t - c.offset) * PPQ;
                 seq.addEvent (MidiMessage::noteOn (channel, n.note, (uint8) jlimit (1, 127, n.velocity)), at);
                 seq.addEvent (MidiMessage::noteOff (channel, n.note), at + jmax (1, n.length));
             }
@@ -703,6 +708,7 @@ inline std::unique_ptr<XmlElement> patternToXml (const Pattern& p, const String&
     auto x = std::make_unique<XmlElement> (tag);
     x->setAttribute ("name", p.name); x->setAttribute ("type", (int) p.type); x->setAttribute ("group", p.group);
     x->setAttribute ("bars", p.bars); x->setAttribute ("bpb", p.beatsPerBar);
+    if (! p.loops.empty()) { String ls; for (auto& l : p.loops) ls << l.from << ',' << l.to << ';'; x->setAttribute ("loops", ls); }
     String s; s.preallocateBytes (p.notes.size() * 24);
     for (auto& n : p.notes) s << n.tick << ',' << n.length << ',' << n.note << ',' << n.velocity << ',' << n.probability << ',' << n.art << ';';
     x->setAttribute ("notes", s);
@@ -725,6 +731,10 @@ inline Pattern patternFromXml (const XmlElement& x)
     p.name = x.getStringAttribute ("name"); p.type = (PatternType) jlimit (0, 3, x.getIntAttribute ("type"));
     p.group = jlimit (-1, 63, x.getIntAttribute ("group", -1));
     p.bars = jlimit (1, maxBars, x.getIntAttribute ("bars", 1)); p.beatsPerBar = jlimit (1, 16, x.getIntAttribute ("bpb", 4));
+    for (auto& tok : StringArray::fromTokens (x.getStringAttribute ("loops"), ";", "")) {
+        auto v = StringArray::fromTokens (tok, ",", "");
+        if (v.size() == 2 && v[1].getIntValue() > v[0].getIntValue()) p.loops.push_back ({ v[0].getIntValue(), v[1].getIntValue() });
+    }
     for (auto& tok : StringArray::fromTokens (x.getStringAttribute ("notes"), ";", "")) {
         auto f = StringArray::fromTokens (tok, ",", "");
         if (f.size() < 4) continue;
@@ -797,7 +807,7 @@ inline std::unique_ptr<XmlElement> songToXml (const Song& s)
     st->setAttribute ("sq", (int) o.startQuant); st->setAttribute ("latch", o.latch); st->setAttribute ("hoststop", o.stopWithHost);
     st->setAttribute ("thru", o.passThrough); st->setAttribute ("fillsblack", o.fillsToBlack); st->setAttribute ("remember", o.rememberLast);
     st->setAttribute ("stopA", o.stopNote); st->setAttribute ("stopB", o.stopNote2);
-    st->setAttribute ("follow", o.followHost); st->setAttribute ("bpm", o.ownBpm); st->setAttribute ("recq", o.recQuantize); st->setAttribute ("split", o.splitBars);
+    st->setAttribute ("loopjump", o.loopJumpAtOnce); st->setAttribute ("follow", o.followHost); st->setAttribute ("bpm", o.ownBpm); st->setAttribute ("recq", o.recQuantize); st->setAttribute ("split", o.splitBars);
     st->setAttribute ("trigch", o.triggerChannel); st->setAttribute ("playch", o.playChannel); st->setAttribute ("mirror", o.mirrorOctaves);
     st->setAttribute ("countin", o.countInBars); st->setAttribute ("metro", o.metroMode); st->setAttribute ("metrolvl", o.metroLevel);
     st->setAttribute ("keymode", o.keyMode); st->setAttribute ("hhcc", o.hhCC);
@@ -885,7 +895,7 @@ inline Song songFromXml (const XmlElement& x)
         o.latch = st->getBoolAttribute ("latch", true); o.stopWithHost = st->getBoolAttribute ("hoststop", true);
         o.passThrough = st->getBoolAttribute ("thru", true); o.fillsToBlack = st->getBoolAttribute ("fillsblack", false);
         o.rememberLast = st->getBoolAttribute ("remember", true); 
-        o.followHost = st->getBoolAttribute ("follow", true); o.ownBpm = jlimit (20.0, 400.0, st->getDoubleAttribute ("bpm", 120.0));
+        o.loopJumpAtOnce = st->getBoolAttribute ("loopjump", true); o.followHost = st->getBoolAttribute ("follow", true); o.ownBpm = jlimit (20.0, 400.0, st->getDoubleAttribute ("bpm", 120.0));
         if (st->hasAttribute ("stopA")) { o.stopNote = jlimit (-1, 127, st->getIntAttribute ("stopA", 24)); o.stopNote2 = jlimit (-1, 127, st->getIntAttribute ("stopB", 108)); }
         else { o.stopNote = 24; o.stopNote2 = 108; movePatternsOffStops = true; }      // the STOP keys moved to C0 and C7
         o.triggerChannel = jlimit (0, 16, st->getIntAttribute ("trigch", 0)); o.playChannel = jlimit (0, 16, st->getIntAttribute ("playch", 0));

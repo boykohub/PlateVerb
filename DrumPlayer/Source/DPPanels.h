@@ -762,7 +762,7 @@ public:
         auto& clips = st.song().clips;
         const int i = clipAt (e.position);
         if (e.mods.isPopupMenu()) { rzDown = true; rzZoom = false; rzY = e.position.y; rzX = e.position.x; rzPx = pxPerBeat; rzBeat = xToBeat (e.x); rzClip = i; return; }   // menu on release, zoom on drag
-        if (e.y < rulerH || i < 0) cursorBeat = snapBeat (xToBeat (e.x), e.mods.isAltDown());
+        cursorBeat = snapBeat (xToBeat (e.x), e.mods.isAltDown());          // the cursor goes where you click, on the lane's grid
         if (e.y < rulerH && e.getNumberOfClicks() > 1) {        // double-click in the ruler: play the song from there
             if (! st.song().songMode) st.applySong ("Song mode", [] (Song& s) { s.songMode = true; });
             st.proc.uiSongPlay (true, cursorBeat); repaint(); return;
@@ -800,6 +800,21 @@ public:
             repaint(); return;
         }
         if (mode == None || anchor < 0) return;
+        if (mode == Move && ! copying) {
+            // dragged out of the Drum Player window: the selected chunks go to Studio One as MIDI (gaps kept)
+            auto* top = getTopLevelComponent();
+            if (top != nullptr && ! top->getScreenBounds().contains (e.getScreenPosition())) {
+                clips = orig; st.proc.publish(); st.proc.endEdit ("Drag out");
+                mode = None; anchor = -1; repaint();
+                auto dir = dataFolder().getChildFile ("Temp"); dir.createDirectory();
+                String name = "Drum Player chunks";
+                for (auto& c : clips) if (c.selected) { name = st.song().keys[(size_t) jlimit (0, 127, c.key)].name; break; }
+                auto f = dir.getChildFile (File::createLegalFileName (name.isNotEmpty() ? name : String ("Drum Player chunks")) + ".mid");
+                writeSongMidi (st.song(), f, st.song().settings.outChannel, true);
+                DragAndDropContainer::performExternalDragDropOfFiles ({ f.getFullPathName() }, false, this);
+                return;
+            }
+        }
         const double d = (e.position.x - downPos.x) / pxPerBeat;
         clips = orig;
         if (copying) for (auto& c : orig) if (c.selected) { auto x = c; x.selected = false; clips.push_back (x); }
@@ -833,7 +848,7 @@ public:
             rzDown = false;
             if (! rzZoom) {
                 auto& clips = st.song().clips; const int i = rzClip;
-                if (i < 0) cursorBeat = snapBeat (rzBeat, false);
+                cursorBeat = snapBeat (rzBeat, false);
                 if (i >= 0 && i < (int) clips.size() && ! clips[(size_t) i].selected) { for (auto& c : clips) c.selected = false; clips[(size_t) i].selected = true; }
                 menu (i); repaint();
             }
@@ -963,7 +978,7 @@ private:
             m.addItem (2, "Duplicate  (D)"); m.addItem (4, st.song().clips[(size_t) i].muted ? "Unmute  (M)" : "Mute  (M)");
             m.addItem (5, "Delete  (Del)"); m.addItem (6, "Copy  (Ctrl+C)");
             const auto& c = st.song().clips[(size_t) i];
-            if (cursorBeat > c.start + 1e-6 && cursorBeat < c.start + c.length - 1e-6) m.addItem (3, "Split at the cursor  (Alt+X)");
+            m.addItem (3, "Scissors: split here, at the cursor  (Alt+X)", cursorBeat > c.start + 1e-6 && cursorBeat < c.start + c.length - 1e-6);
             PopupMenu reps; for (int r : { 1, 2, 3, 4, 8 }) reps.addItem (100 + r, String (r) + (r == 1 ? " time" : " times"));
             m.addSubMenu ("Length: pattern repeated", reps);
             m.addItem (8, "Make unique (its own copy of the pattern)");
@@ -997,7 +1012,7 @@ class SongHeader : public Component
 public:
     SongHeader (EditState& e, SongLane& l) : st (e), lane (l)
     {
-        setupButton (*this, onBtn, "Song plays", true, "On: the song lane plays, with Studio One's transport or the Play button here. Off: your keys play patterns as usual");
+        setupButton (*this, onBtn, "Play song", true, "On: the song lane plays, with Studio One's transport or the Play button here. Off: your keys play patterns as usual");
         onBtn.onClick = [this] { const bool on = onBtn.getToggleState(); st.applySong ("Song mode", [on] (Song& s) { s.songMode = on; }); };
         setupButton (*this, play, "Play"); play.onClick = [this] { if (! st.song().songMode) st.applySong ("Song mode", [] (Song& s) { s.songMode = true; }); st.proc.uiSongPlay (true, lane.cursorBeat); };
         setupButton (*this, stop, "Stop"); stop.onClick = [this] { st.proc.uiSongPlay (false, 0); };
@@ -1013,8 +1028,8 @@ public:
           setupCombo (*this, snap, sn, 1, "Chunks also click onto each other's edges. Alt while dragging = free. With the scissors (3), clicking a chunk cuts it on this grid"); }
         snap.setSelectedItemIndex (0, dontSendNotification);
         snap.onChange = [this] { lane.snap = snap.getSelectedItemIndex(); };
-        dragOut.setButtonText ("Song MIDI"); dragOut.setSize (fitW ("Song MIDI"), btnH); dragOut.setComponentID ("Song MIDI"); addAndMakeVisible (dragOut);
-        dragOut.setTooltip ("Drag the whole song lane out as one MIDI file");
+        dragOut.setButtonText ("Drag lane to DAW"); dragOut.setSize (fitW ("Drag lane to DAW"), btnH); dragOut.setComponentID ("Song MIDI"); addAndMakeVisible (dragOut);
+        dragOut.setTooltip ("Drag into Studio One: the selected chunks (gaps kept, starting where you drop it), or the whole lane from bar 1 if none are selected");
     }
     void refresh() { onBtn.setToggleState (st.song().songMode, dontSendNotification); rec.setToggleState (st.proc.songRecArmed.load(), dontSendNotification); }
     void paint (Graphics& g) override
@@ -1043,8 +1058,9 @@ private:
             if (dragging || st == nullptr || e.getDistanceFromDragStart() < 5 || st->song().clips.empty()) return;
             dragging = true;
             auto dir = dataFolder().getChildFile ("Temp"); dir.createDirectory();
-            auto f = dir.getChildFile ("Drum Player Song.mid");
-            writeSongMidi (st->song(), f, st->song().settings.outChannel);
+            bool anySel = false; for (auto& c : st->song().clips) anySel |= c.selected;
+            auto f = dir.getChildFile (anySel ? "Drum Player selection.mid" : "Drum Player Song.mid");
+            writeSongMidi (st->song(), f, st->song().settings.outChannel, anySel);
             DragAndDropContainer::performExternalDragDropOfFiles ({ f.getFullPathName() }, false, this, [this] { dragging = false; });
         }
     };
@@ -1525,6 +1541,28 @@ public:
                 });
             };
         }
+        {   auto* sw = swatches.add (new Swatch ("Text"));
+            addAndMakeVisible (sw);
+            sw->onClick = [this, sw] {
+                auto& e = el(); if (! e.ownText) { e.ownText = true; changed(); }
+                auto p = std::make_unique<Picker>(); p->setCurrentColour (e.text, dontSendNotification);
+                p->onColour = [this] (Colour c) { auto& e2 = el(); e2.text = c; e2.ownText = true; changed(); };
+                auto* top = sw->getTopLevelComponent();
+                CallOutBox::launchAsynchronously (std::move (p), top->getLocalArea (sw, sw->getLocalBounds()), top);
+            };
+            sw->onDrop = [this] (Colour c) { auto& e = el(); e.text = c; e.ownText = true; changed(); };
+            sw->onMenu = [this, sw] {
+                PopupMenu m; m.addItem (1, "Copy this colour"); if (hasCopied) m.addItem (2, "Paste colour"); m.addItem (3, "Text colour as designed");
+                m.showMenuAsync (PopupMenu::Options().withTargetComponent (sw), [this, sw] (int r) {
+                    auto& e = el();
+                    if (r == 1) { copied = sw->colour; hasCopied = true; }
+                    else if (r == 2) { e.text = copied; e.ownText = true; changed(); }
+                    else if (r == 3) { e.ownText = false; changed(); }
+                });
+            };
+        }
+        setupButton (*this, boldBtn, "Bold: as designed", false, "Click: as designed, bold, plain");
+        boldBtn.onClick = [this] { auto& e = el(); e.bold = e.bold == -1 ? 1 : e.bold == 1 ? 0 : -1; changed(); };
         setupButton (*this, d3, "3D", true);
         d3.onClick = [this] { el().threeD = d3.getToggleState(); changed(); };
         setupLabel (*this, lDepth, "Depth"); setupSlider (*this, depth, th::amber); depth.setRange (0.0, 2.0, 0.05);
@@ -1591,7 +1629,7 @@ public:
         auto r = a.removeFromTop (26); d3.setBounds (r.removeFromLeft (d3.getWidth()).reduced (0, 2)); r.removeFromLeft (10);
         lDepth.setBounds (r.removeFromLeft (44)); depth.setBounds (r);
         a.removeFromTop (6);
-        r = a.removeFromTop (26); lFont.setBounds (r.removeFromLeft (62)); fontSz.setBounds (r);
+        r = a.removeFromTop (26); lFont.setBounds (r.removeFromLeft (62)); boldBtn.setBounds (r.removeFromRight (130).reduced (0, 2)); r.removeFromRight (8); fontSz.setBounds (r);
         a.removeFromTop (10);
         r = a.removeFromTop (26); resetOne.setBounds (r.removeFromLeft (resetOne.getWidth()).reduced (0, 2)); r.removeFromLeft (8); resetAll.setBounds (r.removeFromLeft (resetAll.getWidth()).reduced (0, 2));
         a.removeFromTop (6);
@@ -1642,7 +1680,7 @@ private:
     };
 
     ListBox list; Label name, lDepth, lFont, help;
-    TextButton useMine, d3, resetOne, resetAll, saveLook, loadLook;
+    TextButton useMine, d3, resetOne, resetAll, saveLook, loadLook, boldBtn;
     Label lAll, lAllB, lKeys, lKeyText; FineSlider allText, allButtons, keySize, keyText;
     OwnedArray<Swatch> swatches;
     FineSlider depth, fontSz;
@@ -1674,6 +1712,8 @@ private:
         useMine.setToggleState (e->custom, dontSendNotification);
         const Colour c[3] = { e->c0, e->c1, e->c2 };
         for (int i = 0; i < 3; ++i) { swatches[i]->colour = c[i]; swatches[i]->enabled = e->custom; swatches[i]->repaint(); }
+        swatches[3]->colour = e->ownText ? e->text : th::text; swatches[3]->enabled = e->ownText; swatches[3]->repaint();
+        boldBtn.setButtonText (e->bold == 1 ? "Bold: on" : e->bold == 0 ? "Bold: off" : "Bold: as designed");
         d3.setToggleState (e->threeD, dontSendNotification);
         keySize.setValue (Theme::get().keyScale * 100.0, dontSendNotification); keyText.setValue (Theme::get().keyTextScale * 100.0, dontSendNotification);
         allText.setValue (Theme::get().textScale * 100.0, dontSendNotification);
@@ -1706,7 +1746,8 @@ private:
     {
         if (row >= items.size()) return;
         if (sel) { g.setColour (th::blue.withAlpha (0.22f)); g.fillRoundedRectangle (2, 1, w - 4.0f, h - 2.0f, 4); }
-        const bool custom = Theme::get().findCustom (ids[row]) != nullptr || (Theme::get().find (ids[row]) && Theme::get().find (ids[row])->fontSize > 0);
+        const auto* fe = Theme::get().find (ids[row]);
+        const bool custom = Theme::get().findCustom (ids[row]) != nullptr || (fe != nullptr && (fe->fontSize > 0 || fe->bold >= 0 || fe->ownText));
         g.setFont (font (11.5f, custom ? 3 : 1)); g.setColour (custom ? th::amber : th::text);
         g.drawText (items[row], 8, 0, w - 12, h, Justification::centredLeft, true);
     }

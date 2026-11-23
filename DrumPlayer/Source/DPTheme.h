@@ -15,6 +15,8 @@ struct ThemeEl
     bool threeD = true;
     float depth = 1.0f;                   // 0 … 2
     float fontSize = 0.0f;                // 0 = as designed
+    int bold = -1;                        // -1 as designed, 0 plain, 1 bold
+    bool ownText = false; Colour text { 0xffe8eaef };   // your own text colour
 };
 
 class Theme
@@ -30,6 +32,19 @@ public:
         return designed;
     }
     ThemeEl& edit (const String& id) { return els[id]; }
+    // bold and text colour for a part (or its group), else as designed
+    bool boldFor (const String& id, const String& group, bool designed) const
+    {
+        if (auto* e = find (id); e != nullptr && e->bold >= 0) return e->bold == 1;
+        if (auto* e = find (group); e != nullptr && e->bold >= 0) return e->bold == 1;
+        return designed;
+    }
+    Colour textFor (const String& id, const String& group, Colour designed) const
+    {
+        if (auto* e = find (id); e != nullptr && e->ownText) return e->text;
+        if (auto* e = find (group); e != nullptr && e->ownText) return e->text;
+        return designed;
+    }
     void reset (const String& id) { els.erase (id); changed(); }
     void resetAll() { els.clear(); textScale = 1.0f; buttonScale = 1.0f; keyScale = 1.0f; keyTextScale = 1.0f; changed(); }
     float textScale = 1.0f;               // every text at once: 0.7 … 1.6
@@ -60,6 +75,7 @@ public:
             c->setAttribute ("id", id); c->setAttribute ("custom", e.custom);
             c->setAttribute ("c0", e.c0.toString()); c->setAttribute ("c1", e.c1.toString()); c->setAttribute ("c2", e.c2.toString());
             c->setAttribute ("d3", e.threeD); c->setAttribute ("depth", e.depth); c->setAttribute ("font", e.fontSize);
+            c->setAttribute ("bold", e.bold); c->setAttribute ("owntext", e.ownText); c->setAttribute ("text", e.text.toString());
         }
         x.writeTo (target);
     }
@@ -81,6 +97,8 @@ public:
                 e.c2 = Colour::fromString (c->getStringAttribute ("c2", e.c2.toString()));
                 e.threeD = c->getBoolAttribute ("d3", true); e.depth = (float) c->getDoubleAttribute ("depth", 1.0);
                 e.fontSize = (float) c->getDoubleAttribute ("font", 0.0);
+                e.bold = jlimit (-1, 1, c->getIntAttribute ("bold", -1)); e.ownText = c->getBoolAttribute ("owntext");
+                e.text = Colour::fromString (c->getStringAttribute ("text", e.text.toString()));
                 els[c->getStringAttribute ("id")] = e;
             }
         }
@@ -112,7 +130,7 @@ inline void fillThemed (Graphics& g, Rectangle<float> r, const ThemeEl& e, float
 inline StringArray themePanels()
 {
     return { "Window background", "Header", "Keyboard strip", "Parking tray", "Toolbars", "Ruler", "Lane names",
-             "Note grid", "Velocity lane", "Roll card", "Chain strip", "Song lane", "Menu bar", "Pages", "Messages", "Buttons", "Lit buttons", "Boxes and menus", "Labels" };
+             "Note grid", "Velocity lane", "Roll card", "Chain strip", "Song lane", "Menu bar", "Popup menus", "Menu headings", "Pages", "Messages", "Buttons", "Lit buttons", "Boxes and menus", "Labels" };
 }
 
 } // namespace dp

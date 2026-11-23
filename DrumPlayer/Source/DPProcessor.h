@@ -131,7 +131,7 @@ public:
         String pn; { const ScopedLock l (uiLock); pn = presetName; }
         ui->setAttribute ("scale", uiScale); ui->setAttribute ("preset", pn); ui->setAttribute ("grid", uiGrid);
         ui->setAttribute ("zoomX", uiZoomX); ui->setAttribute ("strip", uiStripTools); ui->setAttribute ("headW", uiHeadW);
-        ui->setAttribute ("stopkey", uiStopKey);
+        ui->setAttribute ("stopkey", uiStopKey); ui->setAttribute ("project", uiProjectPath);
         return x;
     }
     void restoreUi (const XmlElement& x)
@@ -143,6 +143,7 @@ public:
             uiZoomX = (float) jlimit (0.25, 8.0, ui->getDoubleAttribute ("zoomX", 1.0));
             uiStripTools = ui->getStringAttribute ("strip", uiStripTools); uiHeadW = jlimit (70, 360, ui->getIntAttribute ("headW", 200));
             uiStopKey = ui->getIntAttribute ("stopkey", KeyPress::spaceKey);
+            uiProjectPath = ui->getStringAttribute ("project");
         }
     }
     void saveLastSession() const
@@ -179,6 +180,8 @@ public:
     UndoManager undo { 1000, 100 };
     String presetName; CriticalSection uiLock;
     float uiScale = 1.0f, uiZoomX = 1.0f; int uiGrid = 3, uiHeadW = 200;
+    std::atomic<int> loopReqKey { -1 }, loopReqFrom { 0 }, loopReqTo { 0 };   // editor loops (set by the editor)
+    String uiProjectPath;                        // the project file Save writes to (Save As picks a new one)
     int uiStopKey = KeyPress::spaceKey;          // the computer key that stops (0 = none)
     bool uiLearnStopKey = false;                 // the next key you press becomes the stop key
     String uiStripTools = "fit,grid,tools,play,stop,rec,quantize,undo,redo";   // the Option-key strip: what you put on it
@@ -839,7 +842,35 @@ private:
         }
     }
 
-    void renderPattern (double a, double b) { if (cur.key >= 0) renderKey (cur.key, cur.start, a, b); }
+    // editor loops: the key being edited repeats a stretch of itself (loopReq*: set by the editor; -1 = whole pattern)
+    int loopKey = -1, loopFrom = 0, loopTo = 0;
+    void renderPattern (double a, double b)
+    {
+        if (cur.key < 0) return;
+        const double L = S->keys[(size_t) cur.key].lengthTicks();
+        if (L <= 0) { renderKey (cur.key, cur.start, a, b); return; }
+        auto active = [&] { return loopKey == cur.key && loopTo > loopFrom && loopTo <= L; };
+        for (int guard = 0; guard < 64 && b - a > 1e-9; ++guard) {
+            const int rk = loopReqKey.load(), rf = loopReqFrom.load(), rt = loopReqTo.load();
+            const bool pending = rk != loopKey || rf != loopFrom || rt != loopTo;
+            const double rel = (a - cur.start) * PPQ, cyc = std::floor (rel / L + 1e-9) * L, pos = rel - cyc;
+            if (pending && S->settings.loopJumpAtOnce) {                // jump at once
+                loopKey = rk; loopFrom = rf; loopTo = rt;
+                if (active() && (pos < loopFrom - 1e-6 || pos >= loopTo - 1e-6)) cur.start = a - (cyc + loopFrom) / PPQ;
+                continue;
+            }
+            const bool on = active();
+            if (on && (pos < loopFrom - 1e-6 || pos >= loopTo - 1e-6)) { cur.start = a - (cyc + loopFrom) / PPQ; continue; }
+            const double endPpq = cur.start + (on ? cyc + loopTo : cyc + L) / PPQ;
+            const double e = jmin (b, endPpq);
+            renderKey (cur.key, cur.start, a, e);
+            a = e;
+            if (e >= endPpq - 1e-9) {                                    // this loop (or the pattern) is over
+                if (pending) { loopKey = rk; loopFrom = rf; loopTo = rt; }
+                if (active()) cur.start = e - ((on ? cyc : cyc + L) + loopFrom) / PPQ;
+            }
+        }
+    }
 
     // plays one key's pattern as if it started at `start` (ppq), for the stretch a … b
     void renderKey (int key, double start, double a, double b)

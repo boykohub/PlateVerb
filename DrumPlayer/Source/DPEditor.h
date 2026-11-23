@@ -24,8 +24,9 @@ public:
     Divider() { setMouseCursor (MouseCursor::UpDownResizeCursor); setTooltip ("Drag up or down"); }
     void paint (Graphics& g) override
     {
-        g.setColour (Colours::white.withAlpha (isMouseOver() ? 0.22f : 0.08f));
-        g.fillRoundedRectangle (getLocalBounds().toFloat().withSizeKeepingCentre (60.0f, 3.0f), 1.5f);
+        // the whole line is the handle: drag it anywhere along its length
+        g.setColour (Colours::white.withAlpha (isMouseOver() || isMouseButtonDown() ? 0.30f : 0.07f));
+        g.fillRect (getLocalBounds().toFloat().withSizeKeepingCentre ((float) getWidth(), isMouseOver() ? 3.0f : 1.0f));
     }
     void mouseEnter (const MouseEvent&) override { repaint(); }
     void mouseExit (const MouseEvent&) override { repaint(); }
@@ -43,8 +44,8 @@ public:
     SideDivider() { setMouseCursor (MouseCursor::LeftRightResizeCursor); }
     void paint (Graphics& g) override
     {
-        g.setColour (Colours::white.withAlpha (isMouseOver() ? 0.25f : 0.08f));
-        g.fillRoundedRectangle (getLocalBounds().toFloat().withSizeKeepingCentre (3.0f, jmin (60.0f, (float) getHeight())), 1.5f);
+        g.setColour (Colours::white.withAlpha (isMouseOver() || isMouseButtonDown() ? 0.30f : 0.07f));
+        g.fillRect (getLocalBounds().toFloat().withSizeKeepingCentre (isMouseOver() ? 3.0f : 1.0f, (float) getHeight()));
     }
     void mouseEnter (const MouseEvent&) override { repaint(); }
     void mouseExit (const MouseEvent&) override { repaint(); }
@@ -512,7 +513,7 @@ public:
         body.addAndMakeVisible (ruler); body.addAndMakeVisible (headers); body.addAndMakeVisible (grid); body.addAndMakeVisible (vel);
         body.addAndMakeVisible (songLane); body.addAndMakeVisible (songHeader); songHeader.attach();
         body.addAndMakeVisible (songDiv); body.addAndMakeVisible (velDiv);
-        songDiv.getValue = [this] { return songH; }; songDiv.setValue = [this] (int v) { songH = jlimit (40, 260, v); layout(); };
+        songDiv.getValue = [this] { return songH; }; songDiv.setValue = [this] (int v) { songH = jlimit (40, 400, v); layout(); };
         velDiv.getValue = [this] { return velH; }; velDiv.setValue = [this] (int v) { velH = jlimit (50, 420, v); layout(); }; velDiv.invert = true;
         menuBar.setModel (this); body.addAndMakeVisible (menuBar);
         setupButton (body, pageClose, String::charToString ((juce_wchar) 0x00D7), false, "Close");
@@ -542,6 +543,8 @@ public:
         body.addAndMakeVisible (hScroll); body.addAndMakeVisible (vScroll);
         hScroll.setAutoHide (false); vScroll.setAutoHide (false);
         hScroll.addListener (&scrollRelay); vScroll.addListener (&scrollRelay);
+        ruler.loopsChanged = [this] { grid.repaint(); };
+        body.addAndMakeVisible (songScroll); songScroll.setAutoHide (false); songScroll.addListener (&scrollRelay);
         scrollRelay.owner = this;
         headers.preview = grid.preview = [this] (int n) { proc.uiPreview (n); };
         auto wheel = [this] (const MouseWheelDetails& w, bool shift, bool cmd, float mouseX) {
@@ -608,7 +611,7 @@ public:
 
         // ---------------- pages
         for (Page* pg : { (Page*) &quantPage, (Page*) &humPage, (Page*) &chainPage, (Page*) &setPage, (Page*) &presetPage, (Page*) &mapPage, (Page*) &recPage, (Page*) &groovePage, (Page*) &mixerPage, (Page*) &exportPage }) body.addChildComponent (pg);
-        exportPage.defaultTune = [this] { return projectFile.existsAsFile() ? projectFile.getFileNameWithoutExtension() : presetName.getButtonText() != "Presets" ? presetName.getButtonText() : String(); };
+        exportPage.defaultTune = [this] { return File (proc.uiProjectPath).existsAsFile() ? File (proc.uiProjectPath).getFileNameWithoutExtension() : presetName.getButtonText() != "Presets" ? presetName.getButtonText() : String(); };
         exportPage.currentBpm = [this] { return effectiveTempo(); };
         exportPage.toast = [this] (const String& t) { showToast (t); };
         {   // tempo
@@ -657,7 +660,7 @@ public:
         addAndMakeVisible (toast); toast.setInterceptsMouseClicks (false, false);
         body.addAndMakeVisible (status); status.setFont (font (11.0f, 1)); status.setColour (Label::textColourId, th::faint);
 
-        scale = proc.uiScale;
+        scale = proc.uiScale; DPLnF::menuScale = scale;
         setResizable (true, true);
         setResizeLimits (900, 560, 3200, 2000);
         setSize ((int) (1240 * scale), (int) (800 * scale));
@@ -726,6 +729,10 @@ public:
             }
         }
         const auto m = k.getModifiers();
+        if (m.isCommandDown() && (k.getKeyCode() == 'S' || k.getKeyCode() == 's')) {          // Ctrl+S save, Ctrl+Shift+S save as
+            if (! m.isShiftDown() && File (proc.uiProjectPath).existsAsFile()) saveProject (File (proc.uiProjectPath)); else saveProjectAs();
+            return true;
+        }
         const int code = k.getKeyCode();
         const juce_wchar ch = CharacterFunctions::toUpperCase (k.getTextCharacter());
         auto& p = st.pat();
@@ -804,7 +811,7 @@ public:
         switch (index) {
             case 0:
                 m.addItem (1, "New (clear everything)");
-                m.addItem (12, "Open project..."); m.addItem (13, "Save project" + (projectFile.existsAsFile() ? "  (" + projectFile.getFileNameWithoutExtension() + ")" : String())); m.addItem (14, "Save project as...");
+                m.addItem (12, "Open project..."); m.addItem (13, "Save project" + (File (proc.uiProjectPath).existsAsFile() ? "  (" + File (proc.uiProjectPath).getFileNameWithoutExtension() + ")" : String())); m.addItem (14, "Save project as...");
                 m.addSeparator();
                 m.addItem (2, "Presets..."); m.addItem (3, "Save preset");
                 m.addSeparator(); m.addItem (4, "Import MIDI files..."); m.addItem (5, "Export this pattern as MIDI..."); m.addItem (6, "Export the song lane as MIDI...");
@@ -877,7 +884,7 @@ public:
                         ModalCallbackFunction::create ([this] (int r) { if (r == 1) { auto s2 = Song::makeDefault(); s2.settings = st.song().settings; s2.playMap = st.song().playMap; proc.commit (s2, "New"); refreshAll(); } })); break;
             case 2: togglePage (presetPage, presetName); break;
             case 12: openProject(); break;
-            case 13: if (projectFile.existsAsFile()) saveProject (projectFile); else saveProjectAs(); break;
+            case 13: if (File (proc.uiProjectPath).existsAsFile()) saveProject (File (proc.uiProjectPath)); else saveProjectAs(); break;
             case 14: saveProjectAs(); break;
             case 3: quickSave(); break;
             case 4: importDialog(); break;
@@ -949,12 +956,12 @@ public:
     File projectsFolder() const { auto d = dataFolder().getChildFile ("Projects"); d.createDirectory(); return d; }
     void saveProject (const File& f)
     {
-        if (auto x = proc.stateXml(); x != nullptr && x->writeTo (f)) { projectFile = f; showToast ("Saved project " + f.getFileNameWithoutExtension()); }
+        if (auto x = proc.stateXml(); x != nullptr && x->writeTo (f)) { proc.uiProjectPath = f.getFullPathName(); showToast ("Saved project " + f.getFileNameWithoutExtension()); }
         else showToast ("Couldn't save there");
     }
     void saveProjectAs()
     {
-        chooser = std::make_unique<FileChooser> ("Save project", projectFile.existsAsFile() ? projectFile : projectsFolder().getChildFile ("My song.dpproject"), "*.dpproject");
+        chooser = std::make_unique<FileChooser> ("Save project", File (proc.uiProjectPath).existsAsFile() ? File (proc.uiProjectPath) : projectsFolder().getChildFile ("My song.dpproject"), "*.dpproject");
         chooser->launchAsync (FileBrowserComponent::saveMode | FileBrowserComponent::canSelectFiles | FileBrowserComponent::warnAboutOverwriting,
             [this] (const FileChooser& fc) { auto f = fc.getResult(); if (f != File()) saveProject (f.withFileExtension ("dpproject")); });
     }
@@ -967,7 +974,7 @@ public:
             auto x = XmlDocument::parse (f);
             if (x == nullptr || ! x->hasTagName ("DrumPlayerState")) { showToast ("That isn't a Drum Player project"); return; }
             proc.applyState (*x);
-            projectFile = f; refreshAll(); showToast ("Opened " + f.getFileNameWithoutExtension());
+            proc.uiProjectPath = f.getFullPathName(); refreshAll(); showToast ("Opened " + f.getFileNameWithoutExtension());
         });
     }
 
@@ -1137,13 +1144,21 @@ private:
             altDownAt = 0; altClean = false;
         }
     }
-    ScrollBar hScroll { false }, vScroll { true };
+    ScrollBar hScroll { false }, vScroll { true }, songScroll { false };
+    void syncSongScroll()
+    {
+        double endB = 16; for (auto& c : st.song().clips) endB = jmax (endB, c.start + c.length);
+        const double total = (endB + 32) * songLane.pxPerBeat, vis = jmax (1, songLane.getWidth());
+        songScroll.setRangeLimits (0, jmax (total, vis + songLane.scrollX), dontSendNotification);
+        songScroll.setCurrentRange (songLane.scrollX, vis, dontSendNotification);
+    }
     struct ScrollRelay : public ScrollBar::Listener
     {
         DrumPlayerEditor* owner = nullptr;
         void scrollBarMoved (ScrollBar* sb, double v) override
         {
             if (owner == nullptr) return;
+            if (sb == &owner->songScroll) { owner->songLane.scrollX = (int) v; owner->songLane.repaint(); return; }
             if (sb == &owner->hScroll) owner->st.scrollX = (int) v; else owner->st.scrollY = (int) v;
             owner->repaintRoll();
         }
@@ -1201,7 +1216,7 @@ private:
     void layout()
     {
         auto a = body.getLocalBounds().reduced (10, 6);
-        menuBar.setBounds (a.removeFromTop (20)); a.removeFromTop (4);
+        menuBar.setBounds (a.removeFromTop (jmax (22, (int) std::ceil (Theme::get().fontFor ("txt:Menu bar", "Menu bar", 14.0f) + 9)))); a.removeFromTop (4);
         // header
         auto h = a.removeFromTop (jmax (30, (int) btnH + 8));
         headerArea = h;
@@ -1219,6 +1234,14 @@ private:
         ks.removeFromRight (8);
         strip.setBounds (ks);
         a.removeFromTop (5);
+        // the pattern player (song lane) right under the keys, with its own scroll bar
+        {   songH = jlimit (40, jmax (40, a.getHeight() - 260), songH);
+            auto songRow = a.removeFromTop (songH);
+            songHeader.setBounds (songRow.removeFromLeft (200));
+            songRow.removeFromRight (10);
+            songScroll.setBounds (songRow.removeFromBottom (10));
+            songLane.setBounds (songRow);
+            songDiv.setBounds (a.removeFromTop (10)); }
         chainStrip.setBounds (a.removeFromTop (jmax (32, (int) btnH + 10)));
         a.removeFromTop (7);
         // toolbar 1
@@ -1239,7 +1262,7 @@ private:
         r2.place (lSwing, 40); r2.place (swingPreset, 104); r2.place (swingSlider, 190); r2.place (swingValue, 66); r2.skip (10);
         r2.place (quantBtn); r2.place (humBtn); r2.place (funcBtn); r2.skip (10);
         r2.place (lVel, 24); r2.place (velBox, 56); r2.skip (10);
-        r2.place (recBtn); r2.place (recOptBtn); r2.place (playBtn); r2.place (stopBtn); r2.place (dragBtn);
+        r2.place (recBtn); r2.place (recOptBtn); r2.place (playBtn); r2.place (stopBtn); dragBtn.setVisible (false);
         a.removeFromTop (8);
         // status line
         status.setBounds (a.removeFromBottom (18));
@@ -1278,18 +1301,12 @@ private:
         // the Option-key strip, as tall as the song lane, above it
         toolStrip.setVisible (stripOn);
         if (stripOn) { toolStrip.setBounds (a.removeFromTop (jmax ((int) btnH + 12, songH))); a.removeFromTop (4); }
-        // song lane
-        auto songRow = a.removeFromTop (songH);
-        songHeader.setBounds (songRow.removeFromLeft (200));
-        songRow.removeFromRight (10);
-        songLane.setBounds (songRow);
-        songDiv.setBounds (a.removeFromTop (8));
         // roll
         rollArea = a;
         const int rulerH = 22, sb = 10;
         velH = jlimit (50, jmax (50, a.getHeight() - 120), velH);
         auto velRow = a.removeFromBottom (velH);
-        velDiv.setBounds (a.removeFromBottom (8));
+        velDiv.setBounds (a.removeFromBottom (10));
         auto top = a.removeFromTop (rulerH);
         {   auto z = top.withWidth (jmax (headW, 200)).reduced (4, 0);
             for (auto* b : { &zH1, &zH2, &zV1, &zV2, &zFit }) { b->setVisible (headW >= 200); b->setBounds (z.removeFromLeft (b->getWidth()).withSizeKeepingCentre (b->getWidth(), 18)); z.removeFromLeft (3); } }
@@ -1316,7 +1333,7 @@ private:
     // the parts that make up the editor area (they move to their own window when detached)
     std::vector<Component*> rollParts()
     {
-        return { &toolStrip, &songHeader, &songLane, &songDiv, &ruler, &headers, &headDiv, &grid, &vel, &velDiv, &hScroll, &vScroll,
+        return { &toolStrip, &ruler, &headers, &headDiv, &grid, &vel, &velDiv, &hScroll, &vScroll,
                  &zH1, &zH2, &zV1, &zV2, &zFit, &fitBars, &velShow, &chanceShow, &randBtn, &velMode, &guideBox };
     }
     void paintRollCards (Graphics& g)
@@ -1407,6 +1424,8 @@ private:
         if (pt != lastPlayTicks) { lastPlayTicks = pt; grid.playTicks = pt; grid.repaint(); }
         if (proc.queuedKey.load() != -2) { strip.repaint(); bigStrip.repaint(); }
         showTempo();
+        if (! songScroll.isMouseButtonDown()) syncSongScroll();
+        if (st.activeLoop >= 0 && st.loopForKey != st.song().editKey) { st.setActiveLoop (-1, false); ruler.repaint(); grid.repaint(); }   // another key: loops start over
         {   // Rec lamp: steady while recording, blinking during the count-in
             const int rs = proc.recStateUi.load();
             const bool lit = rs == 2 || ((rs == 1 || rs == 3) && (Time::getMillisecondCounter() / 200) % 2 == 0);
@@ -1471,7 +1490,6 @@ private:
     std::array<uint32, 128> lastIn {};
     double lastSongBeat = -1;
     uint32 stopFlashUntil = 0;
-    File projectFile;
     uint32 lastNotesSent = 0, lastStatusMs = 0;
     int learnFrom = -1, learnSerial = 0;
 
@@ -1531,7 +1549,7 @@ private:
     {
         const float old = scale;
         scale = jlimit (0.6f, 2.0f, std::round (s * 10.0f) / 10.0f);
-        proc.uiScale = scale;
+        proc.uiScale = scale; DPLnF::menuScale = scale;
         setSize ((int) std::round (getWidth() / old * scale), (int) std::round (getHeight() / old * scale));
         resized(); refreshControls();
     }
@@ -1869,7 +1887,7 @@ private:
         const auto& p = s.keys[(size_t) k];
         PopupMenu m;
         m.addSectionHeader (keyName (k) + (p.isEmpty() ? "  (empty)" : "  " + p.name));
-        if (! p.isEmpty()) m.addItem (-1, String (p.bars) + (p.bars == 1 ? " bar" : " bars") + "   (" + typeName (p.type) + ", " + String (p.beatsPerBar) + "/4)", false);
+        if (! p.isEmpty()) m.addSectionHeader (String (p.bars) + (p.bars == 1 ? " BAR" : " BARS") + "   " + String (typeName (p.type)).toUpperCase() + "   " + String (p.beatsPerBar) + "/4");
         std::set<int> targets = st.keySel; targets.insert (k);
         if (targets.size() > 1) m.addSectionHeader (String ((int) targets.size()) + " keys picked (Alt+click, Shift+click for a range): type, group and star go to all of them");
         m.addItem (1, "Edit");

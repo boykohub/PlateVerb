@@ -69,6 +69,17 @@ struct EditState
         bool end() { const bool z = zooming; down = zooming = false; return z; }
     };
 
+    // editor loops: which one plays (-1 = the whole pattern)
+    int activeLoop = -1, loopForKey = -1;
+    void setActiveLoop (int i, bool startIfStopped)
+    {
+        auto& p = pat();
+        if (i < 0 || i >= (int) p.loops.size()) { activeLoop = -1; proc.loopReqKey = -1; return; }
+        activeLoop = i; loopForKey = song().editKey;
+        const auto l = p.loops[(size_t) i];
+        proc.loopReqFrom = l.from; proc.loopReqTo = l.to; proc.loopReqKey = song().editKey;
+        if (startIfStopped && proc.playingKey.load() != song().editKey) proc.uiPlayFrom (song().editKey, l.from);
+    }
     Song& song() { return proc.edit; }
     Pattern& pat() { return proc.edit.keys[(size_t) jlimit (0, 127, proc.edit.editKey)]; }
     int gridTicks() const { return grid < 0 ? 1 : noteValues[grid].ticks; }
@@ -119,7 +130,31 @@ struct EditState
 class Ruler : public Component, public SettableTooltipClient
 {
 public:
-    explicit Ruler (EditState& e) : st (e) { setTooltip ("Drag the amber end marker to set the pattern length. Double-click: play from there. Right-click + drag up/down: zoom"); }
+    explicit Ruler (EditState& e) : st (e) { setTooltip ("Drag across the numbers: make a loop. Click a loop: play it; double-click: remove it; drag its edges. Click elsewhere: the whole pattern. Drag the amber marker: pattern length. Double-click: play from there. Right-click: loop options; right-drag up/down: zoom"); }
+    std::function<void()> loopsChanged;
+    static Colour loopColour (int i) { static const uint32 c[] = { 0xff5aa9ff, 0xffb8f28b, 0xffffc15e, 0xffc9a7ff, 0xff6ee7d8, 0xffff8fa3 }; return Colour (c[i % 6]); }
+    Rectangle<float> loopRect (const Pattern::EditLoop& l) const
+    {
+        const float x0 = st.tickToX (l.from), x1 = st.tickToX (l.to);
+        return { x0, (float) getHeight() - 9.0f, jmax (2.0f, x1 - x0), 7.0f };
+    }
+    int loopAt (float x) const
+    {
+        const auto& ls = st.proc.edit.keys[(size_t) jlimit (0, 127, st.proc.edit.editKey)].loops;
+        for (int i = (int) ls.size() - 1; i >= 0; --i) if (x >= st.tickToX (ls[(size_t) i].from) && x <= st.tickToX (ls[(size_t) i].to)) return i;
+        return -1;
+    }
+    int loopEdgeAt (float x, bool& right) const
+    {
+        const auto& ls = st.proc.edit.keys[(size_t) jlimit (0, 127, st.proc.edit.editKey)].loops;
+        for (int i = (int) ls.size() - 1; i >= 0; --i) {
+            if (std::abs (x - st.tickToX (ls[(size_t) i].to)) < 5) { right = true; return i; }
+            if (std::abs (x - st.tickToX (ls[(size_t) i].from)) < 5) { right = false; return i; }
+        }
+        return -1;
+    }
+    int loopGrid() const { return st.gridTicks() > 1 ? st.gridTicks() : PPQ / 4; }
+    int snapL (double t) const { const int g = loopGrid(); return jmax (0, (int) std::round (t / g) * g); }
     void paint (Graphics& g) override
     {
         fillArea (g, getLocalBounds(), "Ruler", th::panel);
@@ -136,6 +171,19 @@ public:
             if (bar) { g.setColour (th::text); g.drawText (String (b / bpb + 1), (int) x + 4, 1, 40, 14, Justification::centredLeft); }
             else if (st.pxPerBeat > 40) { g.setColour (th::faint); g.drawText (String (b / bpb + 1) + "." + String (b % bpb + 1), (int) x + 3, 8, 40, 14, Justification::centredLeft); }
         }
+        // editor loops
+        for (int i = 0; i < (int) p.loops.size(); ++i) {
+            auto r = loopRect (p.loops[(size_t) i]);
+            const bool act = i == st.activeLoop;
+            g.setColour (loopColour (i).withAlpha (act ? 0.95f : 0.45f)); g.fillRoundedRectangle (r, 3.0f);
+            if (act) { g.setColour (Colours::white.withAlpha (0.8f)); g.drawRoundedRectangle (r.expanded (0.5f), 3.0f, 1.0f); }
+            g.setFont (font (9.5f, 3)); g.setColour (Colours::black.withAlpha (0.85f));
+            if (r.getWidth() > 12) g.drawText (String::charToString ((juce_wchar) ('A' + i % 26)), r.toNearestInt(), Justification::centred);
+        }
+        if (newLoop.getLength() > 0) {
+            g.setColour (Colours::white.withAlpha (0.35f));
+            g.fillRoundedRectangle (Rectangle<float> (st.tickToX (newLoop.getStart()), (float) getHeight() - 9.0f, st.tickToX (newLoop.getEnd()) - st.tickToX (newLoop.getStart()), 7.0f), 3.0f);
+        }
         // end marker
         const float ex = st.tickToX (p.lengthTicks());
         Path tri; tri.addTriangle (ex - 6, 2, ex + 6, 2, ex, 12);
@@ -144,24 +192,92 @@ public:
     }
     void mouseDown (const MouseEvent& e) override
     {
-        if (e.mods.isPopupMenu()) { rz.begin (e, st.pxPerBeat, st.xToTick (e.position.x)); return; }
-        if (e.getNumberOfClicks() > 1) { if (st.playFrom) st.playFrom (st.snapFloor (st.xToTick (e.position.x))); return; }
+        rightDown = e.mods.isPopupMenu();
+        if (rightDown) { rz.begin (e, st.pxPerBeat, st.xToTick (e.position.x)); return; }
+        const int li = loopAt (e.position.x);
+        if (e.getNumberOfClicks() > 1) {
+            if (li >= 0) {                                              // double-click a loop: it goes away
+                st.applySong ("Remove loop", [li] (Song& s) { auto& ls = s.keys[(size_t) s.editKey].loops; if (li < (int) ls.size()) ls.erase (ls.begin() + li); });
+                st.setActiveLoop (-1, false); repaint(); if (loopsChanged) loopsChanged(); return;
+            }
+            if (st.playFrom) st.playFrom (st.snapFloor (st.xToTick (e.position.x))); return;
+        }
         dragging = std::abs (e.x - st.tickToX (st.pat().lengthTicks())) < 10;
-        if (dragging) st.proc.beginEdit();
+        if (dragging) { st.proc.beginEdit(); return; }
+        bool right = false; edgeLoop = loopEdgeAt (e.position.x, right); edgeRight = right;
+        if (edgeLoop >= 0) { st.proc.beginEdit(); return; }
+        clickLoop = li; downTick = snapL (st.xToTick (e.position.x)); moved = false;
     }
     void mouseDrag (const MouseEvent& e) override
     {
         if (rz.drag (e, st.pxPerBeat, st.scrollX, 12.0f, 900.0f, PPQ)) { if (st.zoomed) st.zoomed(); return; }
-        if (! dragging) return;
+        if (rightDown) return;
+        if (edgeLoop >= 0) {                                            // stretch a loop
+            auto& ls = st.pat().loops;
+            if (edgeLoop < (int) ls.size()) {
+                auto& l = ls[(size_t) edgeLoop]; const int t = snapL (st.xToTick (e.position.x));
+                if (edgeRight) l.to = jmax (l.from + loopGrid(), t); else l.from = jlimit (0, l.to - loopGrid(), t);
+                st.publish(); if (edgeLoop == st.activeLoop) st.setActiveLoop (edgeLoop, false);
+                repaint(); if (loopsChanged) loopsChanged();
+            }
+            return;
+        }
+        if (! dragging) {
+            if (e.getDistanceFromDragStart() < 4 && ! moved) return;
+            moved = true;                                               // drag across the numbers: a new loop
+            const int t = snapL (st.xToTick (e.position.x));
+            newLoop = Range<int> (jmin (downTick, t), jmax (downTick, t));
+            repaint(); return;
+        }
         auto& p = st.pat();
         const int bar = p.beatsPerBar * PPQ;
         p.bars = jlimit (1, maxBars, (int) std::round (st.xToTick ((float) e.x) / bar));
         st.publish();
     }
-    void mouseUp (const MouseEvent&) override { rz.end(); if (dragging) st.proc.endEdit ("Pattern length"); dragging = false; }
-    void mouseMove (const MouseEvent& e) override { setMouseCursor (std::abs (e.x - st.tickToX (st.pat().lengthTicks())) < 10 ? MouseCursor::LeftRightResizeCursor : MouseCursor::NormalCursor); }
+    void mouseUp (const MouseEvent& e) override
+    {
+        const bool zoomedNow = rz.end();
+        if (rightDown) { rightDown = false; if (! zoomedNow) menu(); return; }
+        if (dragging) { st.proc.endEdit ("Pattern length"); dragging = false; return; }
+        if (edgeLoop >= 0) { st.proc.endEdit ("Loop length"); edgeLoop = -1; return; }
+        if (moved) {
+            moved = false;
+            const auto nl = newLoop; newLoop = {};
+            if (nl.getLength() >= loopGrid()) {
+                st.applySong ("Add loop", [nl] (Song& s) { s.keys[(size_t) s.editKey].loops.push_back ({ nl.getStart(), nl.getEnd() }); });
+                if (loopsChanged) loopsChanged();
+            }
+            repaint(); return;
+        }
+        if (e.getNumberOfClicks() > 1) return;
+        st.setActiveLoop (clickLoop, clickLoop >= 0);                  // click a loop: play it; click elsewhere: the whole pattern
+        repaint(); if (loopsChanged) loopsChanged();
+    }
+    void menu()
+    {
+        PopupMenu m; auto& o = st.song().settings;
+        m.addSectionHeader ("LOOPS (drag across the numbers to make one)");
+        m.addItem (1, "Jump to a loop at once", true, o.loopJumpAtOnce);
+        m.addItem (2, "Jump when the current loop is over", true, ! o.loopJumpAtOnce);
+        m.addSeparator();
+        m.addItem (3, "Play the whole pattern", st.activeLoop >= 0);
+        m.addItem (4, "Remove all loops", ! st.pat().loops.empty());
+        m.showMenuAsync (PopupMenu::Options().withMousePosition(), [this] (int r) {
+            if (r == 1 || r == 2) { const bool now = r == 1; st.applySong ("Loop jump", [now] (Song& s) { s.settings.loopJumpAtOnce = now; }); }
+            else if (r == 3) st.setActiveLoop (-1, false);
+            else if (r == 4) { st.applySong ("Remove loops", [] (Song& s) { s.keys[(size_t) s.editKey].loops.clear(); }); st.setActiveLoop (-1, false); }
+            repaint(); if (loopsChanged) loopsChanged();
+        });
+    }
+    void mouseMove (const MouseEvent& e) override
+    {
+        bool r = false;
+        setMouseCursor (std::abs (e.x - st.tickToX (st.pat().lengthTicks())) < 10 || loopEdgeAt (e.position.x, r) >= 0 ? MouseCursor::LeftRightResizeCursor : MouseCursor::NormalCursor);
+    }
 private:
     EditState& st; bool dragging = false; EditState::RightZoom rz;
+    bool rightDown = false, moved = false, edgeRight = false; int edgeLoop = -1, clickLoop = -1, downTick = 0;
+    Range<int> newLoop;
 };
 
 // ---------------------------------------------------------------- lane headers
@@ -411,6 +527,12 @@ public:
             if (y < -st.laneH || y > getHeight()) continue;
             g.setColour (lanes[(size_t) i] == st.focusLane ? th::blue.withAlpha (0.07f) : themed ("Note grid") ? Colours::white.withAlpha (i % 2 ? 0.0f : 0.035f) : (i % 2 ? th::bg : th::panel.withAlpha (0.7f)));
             g.fillRect (0, y, getWidth(), st.laneH);
+        }
+        // editor loops: their stretch a little darker
+        for (int i = 0; i < (int) p.loops.size(); ++i) {
+            const float x0 = st.tickToX (p.loops[(size_t) i].from), x1 = st.tickToX (p.loops[(size_t) i].to);
+            g.setColour (Colours::black.withAlpha (i == st.activeLoop ? 0.30f : 0.18f));
+            g.fillRect (x0, 0.0f, x1 - x0, (float) getHeight());
         }
         // base grid
         const int t0 = jmax (0, (int) st.xToTick (0)), t1 = (int) st.xToTick (w) + 1;
@@ -876,6 +998,7 @@ private:
             // on a note: only what can be done to notes
             m.addItem (1, "Delete"); m.addItem (2, "Duplicate  (D)"); m.addItem (3, "Copy"); m.addItem (6, hitNote->probability == 0 ? "Unmute" : "Mute  (M)");
             if (st.lastAction) m.addItem (950, "Repeat \"" + st.lastName + "\"  (Ctrl+R)");
+            { PopupMenu sp; sp.addItem (60, "Split in 2"); sp.addItem (61, "Split in 3 (triplet)"); sp.addItem (62, "Split in 4"); m.addSubMenu ("Split the note", sp); }
             PopupMenu vel; for (int v : { 127, 112, 100, 90, 80, 64, 48, 32 }) vel.addItem (300 + v, String (v), true, clickedVel == v);
             vel.addSeparator();
             vel.addItem (17, String ("Alternate the lane from this note (") + (clickedVel < 64 ? "low-high" : "high-low") + ")");
@@ -936,6 +1059,20 @@ private:
                 case 3: { st.clipboard.clear(); int lo = INT_MAX; for (auto& n : st.pat().notes) if (n.selected) { st.clipboard.push_back (n); lo = jmin (lo, n.tick); } for (auto& n : st.clipboard) { n.tick -= lo; n.selected = false; } break; }
                 case 4: { const int at = st.cursorTick; auto clip = st.clipboard; st.apply ("Paste", [at, clip] (Pattern& q) { selectAll (q, false); for (auto n : clip) { n.tick += at; n.selected = true; q.notes.push_back (n); } q.sort(); }); break; }
                 case 5: if (st.splitAt) st.splitAt (splitTick); break;
+                case 60: case 61: case 62: {
+                    const int parts = r == 60 ? 2 : r == 61 ? 3 : 4, cell = g;
+                    act ("Split in " + String (parts), [parts, cell] (Pattern& q) {
+                        std::vector<Note> add;
+                        for (auto& n : q.notes) if (n.selected) {
+                            const int span = jmax (n.length, cell), part = jmax (1, span / parts);
+                            n.length = part;
+                            for (int i = 1; i < parts; ++i) { auto x = n; x.tick = n.tick + (int) std::round ((double) span * i / parts); add.push_back (x); }
+                        }
+                        for (auto& x : add) q.notes.push_back (x);
+                        q.sort();
+                    });
+                    break;
+                }
                 case 6: act ("Mute / unmute", [] (Pattern& q) { for (auto& n : q.notes) if (n.selected) n.probability = n.probability == 0 ? 100 : 0; }); break;
                 case 10: act ("Louder +10", [] (Pattern& q) { velocityAdd (q, 10); }); break;
                 case 11: act ("Softer -10", [] (Pattern& q) { velocityAdd (q, -10); }); break;

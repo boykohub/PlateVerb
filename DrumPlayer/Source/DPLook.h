@@ -138,8 +138,9 @@ public:
     Font getTextButtonFont (TextButton&, int) override { return font (12.0f, 2); }
     void drawButtonText (Graphics& g, TextButton& b, bool, bool) override
     {
-        g.setFont (font (Theme::get().fontFor ("btn:" + b.getComponentID(), "Buttons", 12.0f), 2));
-        g.setColour (b.getToggleState() ? th::ink : (b.isEnabled() ? th::text : th::faint));
+        const String id = "btn:" + b.getComponentID();
+        g.setFont (font (Theme::get().fontFor (id, "Buttons", 12.0f), Theme::get().boldFor (id, "Buttons", true) ? 2 : 1));
+        g.setColour (b.getToggleState() ? th::ink : (b.isEnabled() ? Theme::get().textFor (id, "Buttons", th::text) : th::faint));
         g.drawFittedText (b.getButtonText(), b.getLocalBounds().reduced (4, 0), Justification::centred, 1);
     }
     void drawComboBox (Graphics& g, int w, int h, bool, int, int, int, int, ComboBox& box) override
@@ -160,7 +161,7 @@ public:
         p.startNewSubPath (ax - 3.5f, ay - 1.8f); p.lineTo (ax, ay + 1.8f); p.lineTo (ax + 3.5f, ay - 1.8f);
         g.setColour (box.isEnabled() ? th::dim : th::faint); g.strokePath (p, PathStrokeType (1.5f, PathStrokeType::curved, PathStrokeType::rounded));
     }
-    Font getComboBoxFont (ComboBox&) override { return font (Theme::get().fontFor ("", "Boxes and menus", 12.0f), 1); }
+    Font getComboBoxFont (ComboBox&) override { return font (Theme::get().fontFor ("", "Boxes and menus", 12.0f), Theme::get().boldFor ("Boxes and menus", "", true) ? 2 : 1); }
     Font getLabelFont (Label& l) override
     {
         auto f = l.getFont();
@@ -173,7 +174,25 @@ public:
         l.setBounds (6, 0, b.getWidth() - 20, b.getHeight());
         l.setFont (getComboBoxFont (b)); l.setJustificationType (Justification::centredLeft);
     }
-    Font getPopupMenuFont() override { return font (Theme::get().fontFor ("", "Boxes and menus", 12.0f) + 1.0f, 1); }
+    // menus open outside the scaled window, so they get the window's zoom here; as big as the buttons' text (or your size)
+    static inline float menuScale = 1.0f;
+    float menuSize() const { return Theme::get().fontFor ("Popup menus", "", 14.0f) * menuScale * Theme::get().textScale; }
+    Font getPopupMenuFont() override { return font (menuSize(), Theme::get().boldFor ("Popup menus", "", false) ? 2 : 1); }
+    void drawPopupMenuItem (Graphics& g, const Rectangle<int>& area, bool isSeparator, bool isActive, bool isHighlighted, bool isTicked, bool hasSubMenu,
+                            const String& text, const String& shortcutKeyText, const Drawable* icon, const Colour* textColour) override
+    {
+        Colour own = Theme::get().textFor ("Popup menus", "", Colour());
+        LookAndFeel_V4::drawPopupMenuItem (g, area, isSeparator, isActive, isHighlighted, isTicked, hasSubMenu, text, shortcutKeyText, icon,
+                                           textColour != nullptr ? textColour : (own != Colour() ? &own : nullptr));
+    }
+    // headings in menus (the key's name, its bars and type): big, bold, easy to see
+    void drawPopupMenuSectionHeader (Graphics& g, const Rectangle<int>& area, const String& text) override
+    {
+        const float sz = Theme::get().fontFor ("Menu headings", "", 15.0f) * menuScale * Theme::get().textScale;
+        g.setFont (font (sz, Theme::get().boldFor ("Menu headings", "", true) ? 3 : 1));
+        g.setColour (Theme::get().textFor ("Menu headings", "", th::amber));
+        g.drawFittedText (text, area.getX() + 12, area.getY(), area.getWidth() - 16, area.getHeight(), Justification::centredLeft, 1, 0.8f);
+    }
     void drawPopupMenuBackground (Graphics& g, int w, int h) override
     {
         g.fillAll (th::panel);
@@ -216,11 +235,12 @@ public:
     void drawMenuBarItem (Graphics& g, int w, int h, int, const String& text, bool over, bool open, bool, MenuBarComponent&) override
     {
         if (over || open) { g.setColour (th::blue.withAlpha (0.22f)); g.fillRoundedRectangle (Rectangle<float> (1, 2, (float) w - 2, (float) h - 4), 3); }
-        g.setFont (font (Theme::get().fontFor ("txt:Menu bar", "", 12.5f), 2)); g.setColour (open ? th::amber : th::text);
+        g.setFont (menuBarFont()); g.setColour (open ? th::amber : Theme::get().textFor ("Menu bar", "", th::text));
         g.drawFittedText (text, 0, 0, w, h, Justification::centred, 1);
     }
-    Font getMenuBarFont (MenuBarComponent&, int, const String&) override { return font (Theme::get().fontFor ("txt:Menu bar", "", 12.5f), 2); }
-    int getMenuBarItemWidth (MenuBarComponent&, int, const String& t) override { return (int) textWidth (font (12.5f, 2), t) + 22; }
+    Font menuBarFont() const { return font (Theme::get().fontFor ("txt:Menu bar", "Menu bar", 14.0f), Theme::get().boldFor ("Menu bar", "", true) ? 2 : 1); }
+    Font getMenuBarFont (MenuBarComponent&, int, const String&) override { return menuBarFont(); }
+    int getMenuBarItemWidth (MenuBarComponent&, int, const String& t) override { return (int) textWidth (menuBarFont(), t) + 24; }
     void fillTextEditorBackground (Graphics& g, int w, int h, TextEditor&) override
     {
         g.setColour (Colours::black.withAlpha (0.25f)); g.fillRoundedRectangle (Rectangle<float> (0, 0, (float) w, (float) h), 5);
