@@ -819,7 +819,7 @@ private:
             { "zoom", "Zoom", "Wider, narrower, taller, lower, fit", [this] (Component* t) { buttonsMenu ({ &zH2, &zH1, &zV2, &zV1, &zFit }, t); } },
             { "vel", "Velocity", "Velocity for new notes", [this] (Component* t) { comboMenu (velBox, t); } },
             { "swing", "Swing", "Swing preset", [this] (Component* t) { comboMenu (swingPreset, t); } },
-            { "detach", "Window", "Detach the editor into its own window, or bring it back", [this] (Component*) { MessageManager::callAsync ([sp = Component::SafePointer<DrumPlayerEditor> (this)] { if (sp) sp->toggleDetach(); }); } },
+            { "detach", "Window", "Detach the editor into its own window, or bring it back", [sp = Component::SafePointer<DrumPlayerEditor> (this)] (Component*) { MessageManager::callAsync ([sp] { if (sp) sp->toggleDetach(); }); } },
         };
         toolStrip.on = StringArray::fromTokens (proc.uiStripTools, ",", "");
         toolStrip.on.removeEmptyStrings();
@@ -843,7 +843,7 @@ private:
         detached->content.scale = scale;
         detached->content.onKey = [this] (const KeyPress& k) { return keyPressed (k); };
         detached->content.onMods = [this] (const ModifierKeys& m) { modifierKeysChanged (m); };
-        detached->onClose = [this] { MessageManager::callAsync ([sp = Component::SafePointer<DrumPlayerEditor> (this)] { if (sp) sp->reattach(); }); };
+        detached->onClose = [sp = Component::SafePointer<DrumPlayerEditor> (this)] { MessageManager::callAsync ([sp] { if (sp) sp->reattach(); }); };
         const auto* d = Desktop::getInstance().getDisplays().getDisplayForRect (getScreenBounds());
         detached->setBounds (d != nullptr ? d->userArea : Rectangle<int> (0, 0, 1400, 800));
         detached->setVisible (true);
