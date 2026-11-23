@@ -175,6 +175,10 @@ public:
         const bool hwInOn = p.hw.on && p.hw.inAnalog, hwOutOn = p.hw.on && p.hw.outAnalog;
         float pkIn = 0, pkOut = 0;
         pv::ScopedLineQuant mem (p.hw.on ? 18 : 0);        // the 480L's 18-bit audio memory, set once per block
+        // the dry signal stays out of the tone EQ, ANALOG and channel strip: those work on the reverb only
+        // (cascade and "feeds" modes still pass the whole signal on, as the second machine needs it)
+        const bool splitDry = p.addOn == 1 || (p.addOn == 0 && p.config != kCascade);
+        mach[0].split = mach[1].split = splitDry;
         for (int i = 0; i < n; ++i) {
             const float xL = L[i], xR = R[i];
             pkIn = std::max (pkIn, std::max (std::fabs (xL), std::fabs (xR)));
@@ -187,6 +191,7 @@ public:
                 if (p.addOn == 2) { mach[1].process (bL, bR, c); aL = bL; aR = bR; mach[0].process (aL, aR, c); yL = aL + bL; yR = aR + bR; }   // B feeds A
                 else if (p.addOn == 3) { mach[0].process (aL, aR, c); bL = aL; bR = aR; mach[1].process (bL, bR, c); yL = bL; yR = bR; }      // A feeds B
                 else { mach[0].process (aL, aR, c); mach[1].process (bL, bR, c); yL = aL + bL; yR = aR + bR; }                                 // side by side
+                if (splitDry) { dryB[0][i] = mach[0].dryL + mach[1].dryL; dryB[1][i] = mach[0].dryR + mach[1].dryR; }
                 if (hwOutOn) hwA.output (yL, yR, p.hw);
             } else
             {
@@ -202,6 +207,7 @@ public:
                     float aL = hL, aR = hR, bL = hL, bR = hR;
                     mach[0].process (aL, aR, c); mach[1].process (bL, bR, c);
                     yL = 0.5f * (aL + bL); yR = 0.5f * (aR + bR);
+                    dryB[0][i] = 0.5f * (mach[0].dryL + mach[1].dryL); dryB[1][i] = 0.5f * (mach[0].dryR + mach[1].dryR);
                     if (hwOutOn) hwA.output (yL, yR, p.hw);
                     break;
                 }
@@ -209,17 +215,20 @@ public:
                     float aL = hL, aR = hL, bL = hR, bR = hR;
                     mach[0].process (aL, aR, c); mach[1].process (bL, bR, c);
                     yL = 0.5f * (aL + aR); yR = 0.5f * (bL + bR);
+                    dryB[0][i] = 0.5f * (mach[0].dryL + mach[0].dryR); dryB[1][i] = 0.5f * (mach[1].dryL + mach[1].dryR);
                     if (hwOutOn) hwA.output (yL, yR, p.hw);
                     break;
                 }
                 default: {
                     float aL = hL, aR = hR; mach[0].process (aL, aR, c);
+                    dryB[0][i] = mach[0].dryL; dryB[1][i] = mach[0].dryR;
                     if (hwOutOn) hwA.output (aL, aR, p.hw);
                     yL = aL; yR = aR; break;
                 }
             }
             }
             wL[i] = yL; wR[i] = yR;
+            if (! splitDry) dryB[0][i] = dryB[1][i] = 0.0f;
         }
         // ---- ANALOG on the reverb, the EQ (with ANALOG on the EQ) and the compressor, at fs * os
         const bool anyPost = anV || anE || p.eqOn || p.comp.on;
@@ -235,9 +244,15 @@ public:
             }
         }
         // ---- delay, transformer, mute and output at the base rate
+        const int lat = latency();
         for (int i = 0; i < n; ++i) {
             const float xL = L[i], xR = R[i];
             float yL = wL[i], yR = wR[i];
+            {   // the untouched dry part back in, delayed as much as the oversampled chain delays the reverb
+                dryRing[0][dryPos] = dryB[0][i]; dryRing[1][dryPos] = dryB[1][i];
+                const int rp = (dryPos - lat + kDryRing) % kDryRing; dryPos = (dryPos + 1) % kDryRing;
+                yL += dryRing[0][rp]; yR += dryRing[1][rp];
+            }
             sOut += smA * (tgtOut - sOut); sDl += smA * (tgtDl - sDl); sMute += smA * (tgtMute - sMute);
             if (p.dlOn || sDl > 1e-4f) {
                 float dL, dR; delay.process (xL, xR, tL, tR, p.dlFb, p.dlPing, smA * 0.2f, dL, dR);
@@ -273,6 +288,8 @@ private:
     cs::EqBank eqBank; int eqStep = 0; Gate gate;
     int os = 1; float fsOs = 48000; Upsampler up[4]; Downsampler dn[2]; BiquadD eqD[2][4];
     float wL[512] = {}, wR[512] = {};
+    float dryB[2][512] = {};                                        // the dry part of this block (split off in the machines)
+    static constexpr int kDryRing = 2048; float dryRing[2][kDryRing] = {}; int dryPos = 0;
     float fs = 48000, sOut = 1, sDl = 0, sMute = 0, mIn = 0, mOut = 0; bool firstBlock = true;
     Machine mach[2];
     cs::Preamp anVerb, anEq; int anM = -1, anC = -1; float anD = -1, anO = -99;

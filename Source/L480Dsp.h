@@ -52,6 +52,14 @@ struct AlgoBase {
     virtual void reset() {}
     virtual void set (const float* v, int bank) { (void) v; (void) bank; }   // called once per block with the LARC values
     virtual void process (float& L, float& R, const Ctx& c) = 0;
+    // split: the algorithm gives back only the reverb in L/R and its dry part in dryOutL/R, so everything after it
+    // (tone EQ, ANALOG, channel strip) works on the reverb only and the dry signal passes untouched
+    bool split = false; float dryOutL = 0, dryOutR = 0;
+    inline void mixOut (float& L, float& R, float xL, float xR, float wL, float wR, float md, float mw)
+    {
+        if (split) { dryOutL = xL * md; dryOutR = xR * md; L = wL * mw; R = wR * mw; }
+        else { L = xL * md + wL * mw; R = xR * md + wR * mw; }
+    }
     virtual void key (int slot) { (void) slot; }                             // a slider-display key that is a trigger (PLAY, REC ...)
     virtual std::string status() const { return {}; }                        // shown in the LARC's main display
     // early-reflection taps you edit on the screen: time offset (ms) and level change (dB) per tap; -80 dB = off
@@ -264,7 +272,7 @@ struct ReverbAlgo : AlgoBase {       // aRev6 / aRev2 / aRHall
         float wL = oL * wetG + eL, wR = oR * wetG + eR;
         if (shelfOn) { wL = shelf[0].process (wL); wR = shelf[1].process (wR); }
         wL = hfc[0].lp (wL); wR = hfc[1].lp (wR);                      // HF CUTOFF: preechoes and reverb
-        L = xL * mixD + wL * mixW; R = xR * mixD + wR * mixW;
+        { const float xL_ = xL, xR_ = xR, wL_ = wL, wR_ = wR; mixOut (L, R, xL_, xR_, wL_, wR_, mixD, mixW); }
     }
 };
 
@@ -310,7 +318,7 @@ struct AmbienceAlgo : AlgoBase {
         float tL, tR; tank.process (a, b, 0.4f, 0.3f, tL, tR);
         float wL = 0.9f * a + late * tL * trim, wR = 0.9f * b + late * tR * trim;
         wL = rol[0].lp (wL); wR = rol[1].lp (wR);
-        L = dL * mixD + wL * mixW; R = dR * mixD + wR * mixW;
+        { const float xL_ = dL, xR_ = dR, wL_ = wL, wR_ = wR; mixOut (L, R, xL_, xR_, wL_, wR_, mixD, mixW); }
     }
 };
 
@@ -341,7 +349,7 @@ struct ClassicAlgo : AlgoBase {
         float oL, oR;
         if (isPlate) plate.process (pl, pr, dampA, mod, early, oL, oR); else tank.process (pl, pr, mod, early, oL, oR);
         oL = hfc[0].lp (oL * wetG); oR = hfc[1].lp (oR * wetG);
-        L = L * mixD + oL * mixW; R = R * mixD + oR * mixW;
+        { const float xL_ = L, xR_ = R, wL_ = oL, wR_ = oR; mixOut (L, R, xL_, xR_, wL_, wR_, mixD, mixW); }
     }
 };
 
@@ -397,7 +405,7 @@ struct EffectsAlgo : AlgoBase {
             tremPh += tremRate / fs; if (tremPh >= 1) tremPh -= 1;
             const float a = 0.5f + 0.5f * std::sin (2.0f * kPi * tremPh);
             const float wL = m * std::sqrt (a) * 1.4f, wR = m * std::sqrt (1 - a) * 1.4f;
-            L = dL * mixD + wL * mixW; R = dR * mixD + wR * mixW; return;
+            { const float xL_ = dL, xR_ = dR, wL_ = wL, wR_ = wR; mixOut (L, R, xL_, xR_, wL_, wR_, mixD, mixW); } return;
         }
         iL += fbG * fbLine[0].read (fbS); iR += fbG * fbLine[1].read (fbS);
         for (int i = 0; i < 4; ++i) { iL = pv::allpass (df[0][i], kDf[i] * 0.001f * fs, gDif, iL); iR = pv::allpass (df[1][i], kDf[i] * 1.13f * 0.001f * fs, gDif, iR); }
@@ -409,7 +417,7 @@ struct EffectsAlgo : AlgoBase {
         }
         if (num == 1) wR = wL;
         fbLine[0].push (wL); fbLine[1].push (wR);
-        L = dL * mixD + wL * mixW; R = dR * mixD + wR * mixW;
+        { const float xL_ = dL, xR_ = dR, wL_ = wL, wR_ = wR; mixOut (L, R, xL_, xR_, wL_, wR_, mixD, mixW); }
     }
 };
 
@@ -582,7 +590,7 @@ struct PitchAlgo : AlgoBase {
             y[c] = a * std::sin (kPi * ph[c]) + b * std::sin (kPi * p2);
             last[c] = y[c];
         }
-        L = x[0] * mixD + y[0] * mixW; R = x[1] * mixD + y[1] * mixW;
+        { const float xL_ = x[0], xR_ = x[1], wL_ = y[0], wR_ = y[1]; mixOut (L, R, xL_, xR_, wL_, wR_, mixD, mixW); }
     }
 };
 
@@ -747,7 +755,7 @@ struct PanoramaAlgo : AlgoBase {
         float oL = yL, oR = yR;
         if (lfbG > 0.0f) { const float s = 0.5f * (oL - oR), b = lfbG * lfb.process (s); oL += b; oR -= b; }
         oL = clampf (oL, -4, 4); oR = clampf (oR, -4, 4);
-        L = L * mixD + oL * mixW; R = R * mixD + oR * mixW;
+        { const float xL_ = L, xR_ = R, wL_ = oL, wR_ = oR; mixOut (L, R, xL_, xR_, wL_, wR_, mixD, mixW); }
     }
 };
 
@@ -812,7 +820,7 @@ struct PrimeAlgo : AlgoBase {
         }
         const float a = trb[0].lp (out[0]), b = trb[1].lp (out[1]);
         const float wL = a * pan[0][0] + b * pan[1][0], wR = a * pan[0][1] + b * pan[1][1];
-        L = ind[0].read (indS[0]) * mixD + wL * mixW; R = ind[1].read (indS[1]) * mixD + wR * mixW;
+        { const float xL_ = ind[0].read (indS[0]), xR_ = ind[1].read (indS[1]), wL_ = wL, wR_ = wR; mixOut (L, R, xL_, xR_, wL_, wR_, mixD, mixW); }
     }
 };
 
@@ -970,7 +978,7 @@ struct ChorusAlgo : AlgoBase {
         }
         last[0] = std::tanh (w[0]); last[1] = std::tanh (w[1]);
         const float oL = hfc[0].lp (w[0]), oR = hfc[1].lp (w[1]);
-        L = L * mixD + oL * mixW; R = R * mixD + oR * mixW;
+        { const float xL_ = L, xR_ = R, wL_ = oL, wR_ = oR; mixOut (L, R, xL_, xR_, wL_, wR_, mixD, mixW); }
     }
 };
 struct MBandAlgo : AlgoBase {
@@ -1008,7 +1016,7 @@ struct MBandAlgo : AlgoBase {
         }
         last = std::tanh (sum * 0.5f);
         const float oL = hfc[0].lp (w[0]), oR = hfc[1].lp (w[1]);
-        L = L * mixD + oL * mixW; R = R * mixD + oR * mixW;
+        { const float xL_ = L, xR_ = R, wL_ = oL, wR_ = oR; mixOut (L, R, xL_, xR_, wL_, wR_, mixD, mixW); }
     }
 };
 
@@ -1288,7 +1296,9 @@ struct Machine {
     inline void process (float& L, float& R, const Ctx& c) {
         if (cur < 0) return;
         const float iL = L, iR = R;
+        auto* al = algos[cur].get(); al->split = split; al->dryOutL = al->dryOutR = 0.0f;
         algos[cur]->process (L, R, c);
+        float dL = al->dryOutL, dR = al->dryOutR;
         if (fadeState != 1) loop.process (L, R);
         trimS += (trimG - trimS) * 0.0005f; L *= trimS; R *= trimS;
         if (shapeOn) for (int b = 0; b < 4; ++b) { L = shapeEq[0][b].process (L); R = shapeEq[1][b].process (R); }
@@ -1300,9 +1310,16 @@ struct Machine {
             L *= fadeG; R *= fadeG;
         }
         // an engine without its own Wet/Dry Mix (the Classic engine): the always-visible REVERB MIX blends here
-        if (extMix >= 0.0f) { extS += (extMix - extS) * 0.002f; L = iL + (L - iL) * extS; R = iR + (R - iR) * extS; }
+        if (extMix >= 0.0f)
+        {
+            extS += (extMix - extS) * 0.002f;
+            if (split) { dL += iL * (1.0f - extS); dR += iR * (1.0f - extS); L *= extS; R *= extS; }
+            else { L = iL + (L - iL) * extS; R = iR + (R - iR) * extS; }
+        }
+        dryL = dL; dryR = dR;
     }
     float extMix = -1.0f, extS = 1.0f;
+    bool split = false; float dryL = 0, dryR = 0;            // split: L/R = reverb only, dryL/R = the untouched dry part
 };
 
 } // namespace l480

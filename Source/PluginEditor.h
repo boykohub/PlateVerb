@@ -147,7 +147,8 @@ public:
     const String& getText() const { return text; }
     String textId() const { return "button:" + text; }
     float textPt() const { return th.tpt (textId(), th.keyPt); }
-    float preferredWidth() const { return textW (ui (textPt(), W::Bold, 0.06f), text) + textPt() * 1.6f + 8.0f + th.keyPad; }
+    bool slim = false;                                   // channel strip keys: little room around the text
+    float preferredWidth() const { return textW (ui (textPt(), W::Bold, 0.06f), text) + (slim ? textPt() * 0.7f + 4.0f : textPt() * 1.6f + 8.0f + th.keyPad); }
     std::function<void()> onRightClick, onPress, onRelease;
     void paint (Graphics& g) override
     {
@@ -481,6 +482,11 @@ class DualKnob : public Component
 public:
     DualKnob (const Theme& t, AudioProcessorValueTreeState& s, const String& freqId, const String& gainId, const String& title, std::vector<ScaleMark> fMarks)
         : th (t), fP (s.getParameter (freqId)), gP (s.getParameter (gainId)), name (title), fm (std::move (fMarks)), watch (s, { freqId, gainId }, *this) {}
+    // any two controls nested (the compressor's Threshold + Ratio, Attack + Release): outer and inner marks, their names
+    DualKnob (const Theme& t, AudioProcessorValueTreeState& s, const String& outerId, const String& innerId, const String& title,
+              std::vector<ScaleMark> outerMarks, std::vector<ScaleMark> innerMarks, const String& outerName, const String& innerName, Colour Theme::* outerCol)
+        : DualKnob (t, s, outerId, innerId, title, std::move (outerMarks))
+    { eq = false; im = std::move (innerMarks); oName = outerName; iName = innerName; oCol = outerCol; }
     std::function<void (const String&, const String&)> onShow;
     // channel strip sizes: the name, the frequency numbers (they grow with the knob) and the red gain numbers inside them
     float namePt() const { return th.tpt ("knob:" + name, th.stripPt); }
@@ -489,17 +495,21 @@ public:
         auto r = getLocalBounds().toFloat();
         auto lab = r.removeFromBottom (namePt() + 5);
         geometry (r);
-        static const std::vector<ScaleMark> gm = numberScale (-12, 12, 4, 2, true);
+        static const std::vector<ScaleMark> gmEq = numberScale (-12, 12, 4, 2, true);
+        const auto& gm = eq ? gmEq : im;
         const Colour red (0xffff6a4a);
         g.setColour (red.withAlpha (0.6f));
-        for (float db = -14; db <= 14; db += 2)
-        {
-            const float a = knobAngle (gP->convertTo0to1 (db));
-            g.drawLine (Line<float> (c.getPointOnCircumference (rOuter + 1.5f, a), c.getPointOnCircumference (rOuter + (std::fmod (db, 4.0f) == 0 ? 4.5f : 3.2f), a)), 1.0f);
-        }
+        if (eq)
+            for (float db = -14; db <= 14; db += 2)
+            {
+                const float a = knobAngle (gP->convertTo0to1 (db));
+                g.drawLine (Line<float> (c.getPointOnCircumference (rOuter + 1.5f, a), c.getPointOnCircumference (rOuter + (std::fmod (db, 4.0f) == 0 ? 4.5f : 3.2f), a)), 1.0f);
+            }
+        else
+            for (auto& m : im) { const float a = knobAngle (gP->convertTo0to1 (m.value)); g.drawLine (Line<float> (c.getPointOnCircumference (rOuter + 1.5f, a), c.getPointOnCircumference (rOuter + 4.5f, a)), 1.0f); }
         drawScale (g, gP, c, rOuter + 5.0f + gn * 0.6f, gm, red, gn);
         drawScale (g, fP, c, rOuter + rNum, fm, th.tcol ("knob numbers:" + name, th.panelText.withAlpha (0.9f)), np);
-        drawKnobBody (g, th, Rectangle<float> (rOuter * 2, rOuter * 2).withCentre (c), knobAngle (fP->getValue()), &Theme::eqKnob, th.panelText, true);
+        drawKnobBody (g, th, Rectangle<float> (rOuter * 2, rOuter * 2).withCentre (c), knobAngle (fP->getValue()), oCol, th.panelText, true);
         drawKnobBody (g, th, Rectangle<float> (rInner * 2, rInner * 2).withCentre (c), knobAngle (gP->getValue()), &Theme::eqInner, Colours::white, false);
         drawLegend (g, name, lab, ui (namePt(), W::Bold, 0.06f), th.tcol ("knob:" + name, th.panelText));
     }
@@ -519,14 +529,14 @@ public:
     {
         if (active == nullptr) return;
         const float fine = e.mods.isShiftDown() || e.mods.isAltDown() ? 0.1f : 1.0f;
-        active->setValueNotifyingHost (snapped (active, jlimit (0.0f, 1.0f, start - (float) e.getDistanceFromDragStartY() * 0.005f * fine), active == gP ? 2.0f : 0.0f)); show();
+        active->setValueNotifyingHost (snapped (active, jlimit (0.0f, 1.0f, start - (float) e.getDistanceFromDragStartY() * 0.005f * fine), (eq && active == gP) ? 2.0f : 0.0f)); show();
     }
     void mouseUp (const MouseEvent&) override { if (active) active->endChangeGesture(); }
     void mouseDoubleClick (const MouseEvent& e) override { geometry (bodyArea()); auto* p = pick (e); p->beginChangeGesture(); p->setValueNotifyingHost (p->getDefaultValue()); p->endChangeGesture(); active = p; show(); }
     void mouseWheelMove (const MouseEvent& e, const MouseWheelDetails& w) override
     {
         geometry (bodyArea()); auto* p = pick (e); p->beginChangeGesture();
-        if (p == gP) { const float v = jlimit (-15.0f, 15.0f, p->convertFrom0to1 (p->getValue()) + (w.deltaY > 0 ? 2.0f : -2.0f)); p->setValueNotifyingHost (snapped (p, p->convertTo0to1 (v), 2.0f)); }
+        if (eq && p == gP) { const float v = jlimit (-15.0f, 15.0f, p->convertFrom0to1 (p->getValue()) + (w.deltaY > 0 ? 2.0f : -2.0f)); p->setValueNotifyingHost (snapped (p, p->convertTo0to1 (v), 2.0f)); }
         else p->setValueNotifyingHost (jlimit (0.0f, 1.0f, p->getValue() + w.deltaY * 0.03f));
         p->endChangeGesture(); active = p; show();
     }
@@ -542,15 +552,16 @@ private:
             const float g2 = n * 0.7f, off = 5.0f + g2 * 1.2f + n * 0.95f;       // red gain ring, then the frequency numbers
             return jmin (r.getWidth() * 0.5f - off - n * 0.9f - 1.0f, (r.getHeight() - 2.0f - n - 1.71f * off) / 1.71f);
         };
-        np = base; float ro = jmin (30.0f, fit (np));
-        for (int it = 0; it < 4; ++it) { np = base * jlimit (0.7f, 1.6f, ro * 2.0f / 56.0f); ro = jmin (30.0f, fit (np)); }
+        np = base; float ro = jmin (52.0f, fit (np));
+        for (int it = 0; it < 4; ++it) { np = base * jlimit (0.7f, 1.6f, ro * 2.0f / 56.0f); ro = jmin (52.0f, fit (np)); }
         rOuter = jmax (10.0f, ro * jlimit (0.5f, 2.0f, th.stripKnob)); np = base * jlimit (0.7f, 1.6f, rOuter * 2.0f / 56.0f);
-        gn = np * 0.7f; rNum = 5.0f + gn * 1.2f + np * 0.95f; rInner = rOuter * 0.58f;
+        gn = np * 0.7f; rNum = 5.0f + gn * 1.2f + np * 0.95f; rInner = rOuter * 0.62f;
         const float top = rOuter + rNum + np * 0.5f, bot = jmax (rOuter, (rOuter + rNum) * 0.71f + np * 0.5f);
         c = { r.getCentreX(), r.getY() + jmax (0.0f, (r.getHeight() - top - bot) * 0.5f) + top };
     }
-    void show() { if (onShow && active) onShow (name + (active == gP ? " gain" : " frequency"), active->getCurrentValueAsText()); }
+    void show() { if (onShow && active) onShow (eq ? name + (active == gP ? " gain" : " frequency") : (active == gP ? iName : oName), active->getCurrentValueAsText()); }
     const Theme& th; RangedAudioParameter *fP, *gP, *active = nullptr; String name; std::vector<ScaleMark> fm;
+    bool eq = true; std::vector<ScaleMark> im; String oName, iName; Colour Theme::* oCol = &Theme::eqKnob;
     Point<float> c; float rOuter = 20, rInner = 11, start = 0, np = 10, gn = 7, rNum = 20;
     ParamWatcher watch;
 };
@@ -583,7 +594,10 @@ public:
         rtMain = jmax (0.05f, proc.mainRt (m));
         yLo = jmax (0.02f, rtMain / 10.0f); yHi = rtMain * 6.0f;
         g.setFont (ui (th.sz (8.5f), W::Medium));
-        for (float f : { 50.0f, 100.0f, 200.0f, 500.0f, 1000.0f, 2000.0f, 5000.0f, 10000.0f })
+        // fine grid: a faint line at every 1..9 of each decade, labels where they have room
+        for (float dec : { 10.0f, 100.0f, 1000.0f, 10000.0f })
+            for (int k = 1; k <= 9; ++k) { const float f = dec * (float) k; if (f < 20.0f || f > 20000.0f) continue; g.setColour (col.withAlpha (0.05f)); g.drawVerticalLine ((int) xOf (f), plot.getY(), plot.getBottom()); }
+        for (float f : { 50.0f, 100.0f, 200.0f, 500.0f, 1000.0f, 2000.0f, 3000.0f, 4000.0f, 5000.0f, 7000.0f, 10000.0f, 15000.0f })
         {
             const float x = xOf (f); g.setColour (col.withAlpha (0.10f)); g.drawVerticalLine ((int) x, plot.getY(), plot.getBottom());
             g.setColour (col.withAlpha (0.55f)); g.drawText (f >= 1000 ? String (f / 1000, 0) + "k" : String ((int) f), Rectangle<float> (x - th.sz (18.0f), plot.getBottom() + 1, th.sz (36.0f), th.sz (12.0f)), Justification::centred, false);
@@ -618,6 +632,21 @@ public:
                 g.drawLine (x0, pt.y + 10, x1, pt.y + 10, 1.5f); g.drawLine (x0, pt.y + 7, x0, pt.y + 13, 1.0f); g.drawLine (x1, pt.y + 7, x1, pt.y + 13, 1.0f);
                 g.setColour (Colours::black); g.fillEllipse (Rectangle<float> (11, 11).withCentre (pt));
                 g.setColour ((int) i == drag || (int) i == hover ? Colours::white : col); g.drawEllipse (Rectangle<float> (9, 9).withCentre (pt), 2.0f);
+                if ((int) i == drag || (int) i == hover)
+                {   // the exact place of this point: its frequency, the decay time there, and its width
+                    const float f = pts[i].f, t = rtMain * proc.totalDecayMul (m, f);
+                    const String txt = (f >= 1000.0f ? String (f / 1000.0f, f < 10000.0f ? 2 : 1) + " kHz" : String (roundToInt (f)) + " Hz")
+                                       + "   " + String (t, t < 10.0f ? 2 : 1) + " s   Q " + String (pts[i].q, pts[i].q < 1.0f ? 2 : 1);
+                    const auto fnt = ui (th.sz (11.0f), W::Bold); const float tw = textW (fnt, txt) + 12.0f, tht = th.sz (11.0f) + 8.0f;
+                    auto box = Rectangle<float> (tw, tht).withCentre ({ pt.x, pt.y - 14.0f - tht * 0.5f });
+                    box = box.withX (jlimit (plot.getX(), plot.getRight() - tw, box.getX())).withY (jmax (plot.getY(), box.getY()));
+                    if (box.expanded (6.0f).contains (pt))      // no room above: beside the point instead
+                        box = box.withY (jlimit (plot.getY(), plot.getBottom() - tht, pt.y - tht * 0.5f))
+                                 .withX (pt.x + 14.0f + tw < plot.getRight() ? pt.x + 14.0f : pt.x - 14.0f - tw);
+                    g.setColour (Colours::black.withAlpha (0.85f)); g.fillRoundedRectangle (box, 3.0f);
+                    g.setColour (col.withAlpha (0.8f)); g.drawRoundedRectangle (box, 3.0f, 1.0f);
+                    g.setColour (Colours::white); g.setFont (fnt); g.drawText (txt, box, Justification::centred, false);
+                }
             }
         }
         {   // the big point: lengthens or shortens everything together
@@ -635,6 +664,7 @@ public:
     }
     void mouseMove (const MouseEvent& e) override { const int h = hit (e.position); const bool mh = e.position.getDistanceFrom (master) < 12.0f; if (h != hover || mh != masterHover) { hover = h; masterHover = mh; repaint(); } }
     void mouseExit (const MouseEvent&) override { hover = -1; repaint(); }
+    void testHover (int i) { hover = i; repaint(); }       // for screenshots
     void mouseDown (const MouseEvent& e) override
     {
         const int m = mach();
@@ -2061,6 +2091,8 @@ public:
         auto ck = [this] (const String& id, const String& t) { auto k = std::make_unique<CycleKey> (theme, proc.apvts, id, t); k->kc = &Theme::keyPanel; drawer.addAndMakeVisible (*k); return k; };
         // ENGINE: single (machine A) or dual (machines A and B side by side)
         drawer.addAndMakeVisible (engineBox); engineBox.addItemList ({ "Single", "Dual" }, 1);
+        drawer.addAndMakeVisible (anOsBox); anOsBox.addItemList ({ "Oversampling Off", "Oversampling 2x", "Oversampling 4x", "Oversampling 6x", "Oversampling 8x" }, 1);
+        anOsAtt = std::make_unique<AudioProcessorValueTreeState::ComboBoxAttachment> (proc.apvts, "os", anOsBox);
         engineBox.onChange = [this] { auto* c = proc.apvts.getParameter ("config"); const int v = engineBox.getSelectedItemIndex() == 0 ? 0 : 2;
                                       if ((config() != 0) != (v != 0)) { c->beginChangeGesture(); c->setValueNotifyingHost (c->convertTo0to1 ((float) v)); c->endChangeGesture(); } };
         drawer.addAndMakeVisible (drawerX); drawerX.onClick = [this] { if (drawerOpen) togglePanel (drawerOpen, kDrawer); proc.setUiProperty ("uiDrawer", false); };
@@ -2108,6 +2140,14 @@ public:
         for (auto* k : { anKnob[0].get(), anKnob[1].get(), sysKnob[0].get() }) k->step = 2.0f;
         cpKnob[6] = knob ("cpMix", "MIX", { { 0, "0" }, { 0.2f, "20" }, { 0.4f, "40" }, { 0.6f, "60" }, { 0.8f, "80" }, { 1, "100" } }, &Theme::compKnob);
         for (auto* k : { gtKnob[0].get(), gtKnob[1].get(), gtKnob[2].get(), eqKnob2[0].get(), eqKnob2[1].get(), cpKnob[0].get(), cpKnob[1].get(), cpKnob[2].get(), cpKnob[3].get(), cpKnob[4].get(), cpKnob[5].get(), cpKnob[6].get() }) k->strip = true;
+        cpDual[0] = std::make_unique<DualKnob> (theme, proc.apvts, "cpThr", "cpRatio", "THRESHOLD / RATIO", numberScale (-60, 0, 10, 2),
+                        std::vector<ScaleMark> { { 1, "1" }, { 2, "2" }, { 4, "4" }, { 10, "10" }, { 20, "20" } }, "Comp threshold", "Comp ratio", &Theme::compKnob);
+        cpDual[1] = std::make_unique<DualKnob> (theme, proc.apvts, "cpAtk", "cpRel", "ATTACK / RELEASE",
+                        std::vector<ScaleMark> { { 0.05f, ".05" }, { 0.2f, ".2" }, { 1, "1" }, { 3, "3" }, { 10, "10" }, { 30, "30" }, { 100, "100" }, { 300, "300" } },
+                        std::vector<ScaleMark> { { 20, "20" }, { 100, "100" }, { 500, "500" }, { 2000, "2k" }, { 5000, "5k" } }, "Comp attack", "Comp release", &Theme::compKnob);
+        for (auto& d : cpDual) { d->onShow = shower; drawer.addAndMakeVisible (*d); }
+        for (int i = 1; i <= 4; ++i) cpKnob[i]->setVisible (false);   // now inside the two nested knobs
+        for (LarcKey* k : std::initializer_list<LarcKey*> { gtOnKey.get(), gtKeyKey.get(), eqOnKey.get(), cpOnKey.get(), satKey.get(), duckKey.get(), orderKey.get() }) k->slim = true;
 
         cpKnob[1]->step = 2.0f; cpKnob[5]->step = 2.0f;
         content.addAndMakeVisible (setupView); setupView.setViewedComponent (&setup, false); setupView.setScrollBarsShown (true, false);
@@ -2595,10 +2635,11 @@ private:
         //   COMPRESSOR  that fader line       -> faders bottom
         sections.clear();
         const int fx = 6, fw = kDrawer - 12, pad = 6, x0 = fx + pad, wAll = fw - 2 * pad, gap = 5, kh = keyH(), kTxt = roundToInt (theme.knobPt) + 5;
-        const int A = presetName.getY(), D = screen.getBottom();
+        const int A = presetName.getY();
         const int sysHead = 6 + 2 * (keyH() + 5), anHead = 8 + jmax (keyH(), roundToInt (theme.knobPt) + 10);
-        const int S = A + sysHead + ((D - A) - sysHead - anHead - 8) / 2 + 4;
-        const int E = screen.getBottom() + 10;
+        const int knobRow = jmax (100, roundToInt (theme.knobPt * 6.4f));    // one row of SYSTEM / ANALOG knobs, no empty space
+        const int S = A + sysHead + knobRow + 6, D = S + 8 + anHead + knobRow;
+        const int E = D + 8;
         const int fTop = faderArea.getY() + 12, fBot = faderArea.getBottom() - 12, H = mainH - 10;
         int T = fBot; { int best = 1 << 30; for (int k = 0; k <= 10; ++k) { const int t = fBot - (fBot - fTop) * k / 10; if (std::abs (t - (E + 215)) < best) { best = std::abs (t - (E + 215)); T = t; } } }
         auto frame = [&] (const String& t, int top, int bot) { sections.push_back ({ t, { fx, top, fw, bot - top } }); };
@@ -2622,6 +2663,7 @@ private:
         {
             const int y = S + 4 + 4;
             anOnKey->setBounds (x0 + wAll - (int) anOnKey->preferredWidth(), y, (int) anOnKey->preferredWidth(), kh);
+            { const int bw = jmin (175, anOnKey->getX() - 8 - (x0 + 100)); anOsBox.setBounds (anOnKey->getX() - 8 - bw, y, bw, kh); }
             const int ky = y + titleH, kb = D - 4 - ky, w5 = wAll / 5;
             const int order[5] = { 0, 1, 4, 2, 3 };
             for (int i = 0; i < 5; ++i) anKnob[order[i]]->setBounds (x0 + i * w5, ky, w5, jmax (40, kb));
@@ -2631,25 +2673,31 @@ private:
         {
             int y = E + 4 + titleH;
             orderKey->setText (stripOrder() == 1 ? "COMP > EQ" : "EQ > COMP");
-            y = flowKeys ({ gtOnKey.get(), gtKeyKey.get(), eqOnKey.get(), cpOnKey.get(), satKey.get(), duckKey.get(), orderKey.get() }, x0, wAll, y, kh, gap) + 2;
-            // five rows, every knob as big as its cell allows:
-            //   gate:  THRESHOLD  RANGE  RELEASE  meter          (four cells)
-            //   EQ:    LOW  LOW MID  EQ MODEL                    (three wider cells: the bands carry two rings of numbers)
-            //          HIGH MID  HIGH  EQ COLOUR
-            //   comp:  THRESHOLD  RATIO  ATTACK  RELEASE         (four cells)
-            //          TYPE  MAKEUP  MIX  VU
+            // the order key sits in the title row (like the ANALOG key), the others in one row below
+            { const int ow = (int) orderKey->preferredWidth(); orderKey->setBounds (x0 + wAll - ow, E + 4, ow, kh); }
+            y = flowKeys ({ gtOnKey.get(), gtKeyKey.get(), eqOnKey.get(), cpOnKey.get(), satKey.get(), duckKey.get() }, x0, wAll, y, kh, 4) + 2;
+            // gate:  THRESHOLD  RANGE  RELEASE  meter                       (four cells)
+            // EQ:    LOW  |  LOW MID        HIGH MID  |  HIGH                  (nested, two per row, big)
+            //        EQ MODEL  EQ COLOUR  VU meter (two cells)
+            // comp:  THRESHOLD / RATIO  |  ATTACK / RELEASE                     (nested)
+            //        TYPE  MAKEUP  MIX
             const bool compFirst = stripOrder() == 1;
-            const int eqRow = compFirst ? 3 : 1, cpRow = compFirst ? 1 : 3;
-            float wt[5]; for (int k = 0; k < 5; ++k) wt[k] = (k == eqRow || k == eqRow + 1) ? 1.16f : 0.893f;
-            int ry[6]; { float tot = 0; for (float w : wt) tot += w; float acc = 0; for (int k = 0; k <= 5; ++k) { ry[k] = y + roundToInt ((float) (H - 6 - y) * acc / tot); if (k < 5) acc += wt[k]; } }
-            auto cell = [&] (Component& c, int row, int col, int cols) { const int w = wAll / cols; c.setBounds (x0 + col * w, ry[row], w, ry[row + 1] - ry[row]); };
-            cell (*gtKnob[0], 0, 0, 4); cell (*gtKnob[1], 0, 1, 4); cell (*gtKnob[2], 0, 2, 4);
-            { const int w = wAll / 4; gateMeter.setBounds (x0 + 3 * w + w / 6, ry[0] + 2, w * 2 / 3, ry[1] - ry[0] - 4); }
-            cell (*eqKnob[0], eqRow, 0, 3); cell (*eqKnob[1], eqRow, 1, 3); cell (*eqKnob2[0], eqRow, 2, 3);
-            cell (*eqKnob[2], eqRow + 1, 0, 3); cell (*eqKnob[3], eqRow + 1, 1, 3); cell (*eqKnob2[1], eqRow + 1, 2, 3);
-            cell (*cpKnob[1], cpRow, 0, 4); cell (*cpKnob[2], cpRow, 1, 4); cell (*cpKnob[3], cpRow, 2, 4); cell (*cpKnob[4], cpRow, 3, 4);
-            cell (*cpKnob[0], cpRow + 1, 0, 4); cell (*cpKnob[5], cpRow + 1, 1, 4); cell (*cpKnob[6], cpRow + 1, 2, 4);
-            { const int w = wAll / 4, h = ry[cpRow + 2] - ry[cpRow + 1]; vu.setBounds (x0 + 3 * w, ry[cpRow + 1] + 4, w, h - 8); }
+            // rows in running order: 0 gate, then the EQ block (3 rows) and the comp block (2 rows), swapped for COMP > EQ
+            enum { rGate, rEq1, rEq2, rEq3, rCp1, rCp2 };
+            const int order[6] = { rGate, compFirst ? rCp1 : rEq1, compFirst ? rCp2 : rEq2, compFirst ? rEq1 : rEq3, compFirst ? rEq2 : rCp1, compFirst ? rEq3 : rCp2 };
+            float wtOf[6] = { 0.9f, 1.28f, 1.28f, 0.95f, 1.32f, 0.9f };
+            int top[6], bot[6]; { float tot = 0; for (float w : wtOf) tot += w; float acc = 0;
+                for (int k = 0; k < 6; ++k) { const int r = order[k]; top[r] = y + roundToInt ((float) (H - 6 - y) * acc / tot); acc += wtOf[r]; bot[r] = y + roundToInt ((float) (H - 6 - y) * acc / tot); } }
+            auto cell = [&] (Component& c, int row, float col, float span, int cols) { const float w = (float) wAll / (float) cols;
+                c.setBounds (x0 + roundToInt (col * w), top[row], roundToInt (span * w), bot[row] - top[row]); };
+            cell (*gtKnob[0], rGate, 0, 1, 4); cell (*gtKnob[1], rGate, 1, 1, 4); cell (*gtKnob[2], rGate, 2, 1, 4);
+            { const int w = wAll / 4; gateMeter.setBounds (x0 + 3 * w + 4, top[rGate] + 2, w - 8, bot[rGate] - top[rGate] - 4); }
+            cell (*eqKnob[0], rEq1, 0, 1, 2); cell (*eqKnob[1], rEq1, 1, 1, 2);
+            cell (*eqKnob[2], rEq2, 0, 1, 2); cell (*eqKnob[3], rEq2, 1, 1, 2);
+            cell (*eqKnob2[0], rEq3, 0, 1, 4); cell (*eqKnob2[1], rEq3, 1, 1, 4);
+            { const int w = wAll / 4, h = bot[rEq3] - top[rEq3]; vu.setBounds (x0 + 2 * w + 2, top[rEq3] + 3, 2 * w - 4, h - 6); }
+            cell (*cpDual[0], rCp1, 0, 1, 2); cell (*cpDual[1], rCp1, 1, 1, 2);
+            cell (*cpKnob[0], rCp2, 0.5f, 1, 4); cell (*cpKnob[5], rCp2, 1.5f, 1, 4); cell (*cpKnob[6], rCp2, 2.5f, 1, 4);
         }
         drawer.setSize (kDrawer, mainH);
     }
@@ -3173,6 +3221,7 @@ private:
         mixFader->enabled = true;
     }
     Viewport drawerView; Drawer drawer;
+    ComboBox anOsBox; std::unique_ptr<AudioProcessorValueTreeState::ComboBoxAttachment> anOsAtt;   // ANALOG: oversampling (same setting as in SETUP)
     ComboBox engineBox; int engineLabelY = 0, engineLabelX = 18; Rectangle<int> engineLabelR; std::vector<std::pair<String, Rectangle<int>>> titleR;
     VuMeter vu { theme };
     Viewport setupView;
@@ -3180,7 +3229,7 @@ private:
     std::unique_ptr<LarcKey> orderKey; std::unique_ptr<ScaleKnob> gtKnob[3]; GateMeter gateMeter { theme };
     int stripOrder() const { return (int) proc.apvts.getRawParameterValue ("stripOrder")->load(); }
     std::unique_ptr<ScaleKnob> depthKnob, sysKnob[4], anKnob[5], eqKnob2[2], cpKnob[7];
-    std::unique_ptr<DualKnob> eqKnob[4];
+    std::unique_ptr<DualKnob> eqKnob[4], cpDual[2];     // the compressor's Threshold + Ratio and Attack + Release, nested
     PresetBrowser browser; SetupPanel setup;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Flexiverb480Editor)
