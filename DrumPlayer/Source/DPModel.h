@@ -91,6 +91,37 @@ struct Pattern
     std::vector<Note> notes;
     std::map<int, int> laneLength;       // note → loop length in ticks (polyrhythm); absent = pattern length
     std::set<int> laneMute;
+    bool fav = false;                    // your 1-star favourite (shown on the key and in the groove browser)
+    String source;                       // the groove file it came from, if any (so the browser can show the star)
+    // recorded layers (Studio One style takes): each pass is a layer; the comp says which layer plays where
+    struct CompSeg { int from = 0, to = 0, layer = 0; };
+    std::vector<std::vector<Note>> layers;
+    std::vector<CompSeg> comp;
+    // the notes = the chosen parts of the layers
+    void applyComp()
+    {
+        if (layers.empty()) return;
+        notes.clear();
+        for (auto& c : comp)
+            if (c.layer >= 0 && c.layer < (int) layers.size())
+                for (auto n : layers[(size_t) c.layer]) if (n.tick >= c.from && n.tick < c.to) { n.selected = false; notes.push_back (n); }
+        sort();
+    }
+    // this stretch of time comes from layer l (the rest stays as it was)
+    void setComp (int from, int to, int l)
+    {
+        if (to <= from) return;
+        std::vector<CompSeg> out;
+        for (auto c : comp) {
+            if (c.to <= from || c.from >= to) { out.push_back (c); continue; }
+            if (c.from < from) out.push_back ({ c.from, from, c.layer });
+            if (c.to > to) out.push_back ({ to, c.to, c.layer });
+        }
+        out.push_back ({ from, to, l });
+        std::sort (out.begin(), out.end(), [] (const CompSeg& a, const CompSeg& b) { return a.from < b.from; });
+        comp = out; applyComp();
+    }
+    int layerAt (int tick) const { for (auto& c : comp) if (tick >= c.from && tick < c.to) return c.layer; return -1; }
 
     bool isEmpty() const { return notes.empty() && name.isEmpty(); }
     int lengthTicks() const { return bars * beatsPerBar * PPQ; }
@@ -171,6 +202,9 @@ struct Settings
         return (k >= zoneLow && k <= zoneHigh) ? k : -1;
     }
     int recQuantize = 0;                           // 0 off, else note value index + 1
+    bool recWaitForKey = false;                    // recording starts with the first note you play (no count-in)
+    bool recLayers = false;                        // every pass becomes a layer (Studio One takes) in the same pattern
+    int recTarget = 0;                             // 0 Drum Player and the DAW (notes pass through), 1 Drum Player only, 2 the DAW only
     int splitBars = 4;                             // when you choose to cut a groove into keys: every N bars
 };
 
@@ -668,6 +702,13 @@ inline std::unique_ptr<XmlElement> patternToXml (const Pattern& p, const String&
     x->setAttribute ("lanelen", ll);
     String lm; for (int k : p.laneMute) lm << k << ';';
     x->setAttribute ("lanemute", lm);
+    if (p.fav) x->setAttribute ("fav", true);
+    if (p.source.isNotEmpty()) x->setAttribute ("src", p.source);
+    for (auto& l : p.layers) {
+        String t; for (auto& n : l) t << n.tick << ',' << n.length << ',' << n.note << ',' << n.velocity << ',' << n.probability << ',' << n.art << ';';
+        x->createNewChildElement ("Layer")->setAttribute ("notes", t);
+    }
+    if (! p.comp.empty()) { String c; for (auto& seg : p.comp) c << seg.from << ':' << seg.to << ':' << seg.layer << ';'; x->setAttribute ("comp", c); }
     return x;
 }
 inline Pattern patternFromXml (const XmlElement& x)
@@ -688,6 +729,21 @@ inline Pattern patternFromXml (const XmlElement& x)
         auto f = StringArray::fromTokens (tok, ":", ""); if (f.size() == 2) p.laneLength[f[0].getIntValue()] = f[1].getIntValue();
     }
     for (auto& tok : StringArray::fromTokens (x.getStringAttribute ("lanemute"), ";", "")) if (tok.isNotEmpty()) p.laneMute.insert (tok.getIntValue());
+    p.fav = x.getBoolAttribute ("fav", false); p.source = x.getStringAttribute ("src");
+    for (auto* l : x.getChildWithTagNameIterator ("Layer")) {
+        std::vector<Note> v;
+        for (auto& tok : StringArray::fromTokens (l->getStringAttribute ("notes"), ";", "")) {
+            auto f = StringArray::fromTokens (tok, ",", ""); if (f.size() < 4) continue;
+            Note n; n.tick = f[0].getIntValue(); n.length = f[1].getIntValue(); n.note = jlimit (0, 127, f[2].getIntValue());
+            n.velocity = jlimit (1, 127, f[3].getIntValue()); n.probability = f.size() > 4 ? jlimit (0, 100, f[4].getIntValue()) : 100;
+            n.art = f.size() > 5 ? jlimit ((int) aNone, (int) aCount - 1, f[5].getIntValue()) : -1;
+            v.push_back (n);
+        }
+        p.layers.push_back (v);
+    }
+    for (auto& tok : StringArray::fromTokens (x.getStringAttribute ("comp"), ";", "")) {
+        auto f = StringArray::fromTokens (tok, ":", ""); if (f.size() == 3) p.comp.push_back ({ f[0].getIntValue(), f[1].getIntValue(), f[2].getIntValue() });
+    }
     p.sort();
     return p;
 }
@@ -734,6 +790,7 @@ inline std::unique_ptr<XmlElement> songToXml (const Song& s)
     st->setAttribute ("countin", o.countInBars); st->setAttribute ("metro", o.metroMode); st->setAttribute ("metrolvl", o.metroLevel);
     st->setAttribute ("keymode", o.keyMode); st->setAttribute ("hhcc", o.hhCC);
     st->setAttribute ("recmode", o.recMode); st->setAttribute ("recstop", o.recStopAfter); st->setAttribute ("recvel", o.recFixedVel);
+    st->setAttribute ("recwait", o.recWaitForKey); st->setAttribute ("reclayers", o.recLayers); st->setAttribute ("rectarget", o.recTarget);
     return x;
 }
 
@@ -797,6 +854,8 @@ inline Song songFromXml (const XmlElement& x)
         o.metroLevel = (float) jlimit (0.0, 1.0, st->getDoubleAttribute ("metrolvl", 0.5));
         o.recMode = jlimit (0, 1, st->getIntAttribute ("recmode", 0)); o.recStopAfter = jlimit (0, 64, st->getIntAttribute ("recstop", 0));
         o.recFixedVel = jlimit (0, 127, st->getIntAttribute ("recvel", 0));
+        o.recWaitForKey = st->getBoolAttribute ("recwait", false); o.recLayers = st->getBoolAttribute ("reclayers", false);
+        o.recTarget = jlimit (0, 2, st->getIntAttribute ("rectarget", 0));
         o.keyMode = jlimit (0, 1, st->getIntAttribute ("keymode", 0));
         o.hhCC = jlimit (0, 127, st->getIntAttribute ("hhcc", 0));
         if (x.getIntAttribute ("version", 1) < 3) {     // older saves: patterns move up an octave to start at C-1, stop on B-2
@@ -824,6 +883,15 @@ inline File dataFolder()
 inline File presetFolder() { auto d = dataFolder().getChildFile ("Presets"); d.createDirectory(); return d; }
 inline File lastSessionFile() { return dataFolder().getChildFile ("LastSession.xml"); }
 inline File favouritesFile() { return dataFolder().getChildFile ("Favourites.txt"); }
+// grooves you starred on a key: their file paths (and names), so the groove browser shows the star too
+inline File grooveStarsFile() { return dataFolder().getChildFile ("GrooveStars.txt"); }
+inline StringArray grooveStars() { auto a = StringArray::fromLines (grooveStarsFile().loadFileAsString()); a.removeEmptyStrings(); return a; }
+inline void setGrooveStar (const String& id, bool on)
+{
+    if (id.isEmpty()) return;
+    auto a = grooveStars(); if (on) a.addIfNotAlreadyThere (id); else a.removeString (id);
+    grooveStarsFile().replaceWithText (a.joinIntoString ("\n"));
+}
 constexpr const char* presetExt = ".drumplayer";
 
 } // namespace dp

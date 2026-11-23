@@ -35,6 +35,8 @@ struct EditState
     int currentChain = 0;            // the chain shown on the chain strip and page
     int defaultVel = 100;
     std::vector<Note> clipboard;
+    std::set<int> keySel;            // keys picked with Option/Alt+click (coloured together)
+    bool layersOpen = false;         // the recorded layers dropped down over the grid
     int laneH = 22;                  // lane height: zoom up and down
 
     std::function<void()> changed;                    // repaint + refresh controls
@@ -46,6 +48,26 @@ struct EditState
     void repeatLast() { if (lastAction) apply (lastName, lastAction); }
     std::function<void (const String&)> toast;
     std::function<void (int)> splitAt;
+    std::function<void()> zoomed;                     // after a zoom: keep the scroll in range, repaint the roll
+    std::function<void (int tick)> playFrom;          // double-click in the ruler
+    // right-click + drag up/down zooms left/right around the mouse (Studio One style); a plain right-click still opens the menu
+    struct RightZoom
+    {
+        bool down = false, zooming = false; float y0 = 0, x0 = 0, px0 = 80; double tick0 = 0;
+        void begin (const MouseEvent& e, float px, double tickAtMouse) { down = true; zooming = false; y0 = e.position.y; x0 = e.position.x; px0 = px; tick0 = tickAtMouse; }
+        // returns true while it zooms
+        bool drag (const MouseEvent& e, float& px, int& scroll, float lo, float hi, double unit)
+        {
+            if (! down) return false;
+            const float dy = e.position.y - y0;
+            if (! zooming && std::abs (dy) < 4.0f) return false;
+            zooming = true;
+            px = jlimit (lo, hi, px0 * std::exp (-dy * 0.012f));
+            scroll = jmax (0, (int) (tick0 / unit * px - x0));
+            return true;
+        }
+        bool end() { const bool z = zooming; down = zooming = false; return z; }
+    };
 
     Song& song() { return proc.edit; }
     Pattern& pat() { return proc.edit.keys[(size_t) jlimit (0, 127, proc.edit.editKey)]; }
@@ -53,6 +75,7 @@ struct EditState
     int snapRound (double t) const { const int g = gridTicks(); return jmax (0, (int) std::round (t / g) * g); }
     int snapFloor (double t) const { const int g = gridTicks(); return jmax (0, (int) std::floor (t / g) * g); }
     float tickToX (double t) const { return (float) (t / PPQ * pxPerBeat) - (float) scrollX; }
+    int defaultLength() const { return gridTicks() > 1 ? gridTicks() : 240; }
     double xToTick (float x) const { return (x + scrollX) / pxPerBeat * PPQ; }
 
     std::vector<int> lanes()
@@ -96,7 +119,7 @@ struct EditState
 class Ruler : public Component, public SettableTooltipClient
 {
 public:
-    explicit Ruler (EditState& e) : st (e) { setTooltip ("Drag the amber end marker to set the pattern length in bars"); }
+    explicit Ruler (EditState& e) : st (e) { setTooltip ("Drag the amber end marker to set the pattern length. Double-click: play from there. Right-click + drag up/down: zoom"); }
     void paint (Graphics& g) override
     {
         fillArea (g, getLocalBounds(), "Ruler", th::panel);
@@ -121,21 +144,24 @@ public:
     }
     void mouseDown (const MouseEvent& e) override
     {
+        if (e.mods.isPopupMenu()) { rz.begin (e, st.pxPerBeat, st.xToTick (e.position.x)); return; }
+        if (e.getNumberOfClicks() > 1) { if (st.playFrom) st.playFrom (st.snapFloor (st.xToTick (e.position.x))); return; }
         dragging = std::abs (e.x - st.tickToX (st.pat().lengthTicks())) < 10;
         if (dragging) st.proc.beginEdit();
     }
     void mouseDrag (const MouseEvent& e) override
     {
+        if (rz.drag (e, st.pxPerBeat, st.scrollX, 12.0f, 900.0f, PPQ)) { if (st.zoomed) st.zoomed(); return; }
         if (! dragging) return;
         auto& p = st.pat();
         const int bar = p.beatsPerBar * PPQ;
         p.bars = jlimit (1, maxBars, (int) std::round (st.xToTick ((float) e.x) / bar));
         st.publish();
     }
-    void mouseUp (const MouseEvent&) override { if (dragging) st.proc.endEdit ("Pattern length"); dragging = false; }
+    void mouseUp (const MouseEvent&) override { rz.end(); if (dragging) st.proc.endEdit ("Pattern length"); dragging = false; }
     void mouseMove (const MouseEvent& e) override { setMouseCursor (std::abs (e.x - st.tickToX (st.pat().lengthTicks())) < 10 ? MouseCursor::LeftRightResizeCursor : MouseCursor::NormalCursor); }
 private:
-    EditState& st; bool dragging = false;
+    EditState& st; bool dragging = false; EditState::RightZoom rz;
 };
 
 // ---------------------------------------------------------------- lane headers
@@ -167,6 +193,11 @@ public:
             // name + note number
             g.setFont (font (12.0f, focus ? 2 : 1));
             g.setColour (muted ? th::faint : th::text);
+            if (compact()) {       // dragged narrow: just the key and the name, more room for the notes
+                g.drawText (lane != nullptr ? lane->name : gmDrumName (note), pianoW + 14, y, getWidth() - pianoW - 16, st.laneH, Justification::centredLeft, true);
+                g.setColour (th::line); g.drawHorizontalLine (y + st.laneH - 1, 0, (float) getWidth());
+                continue;
+            }
             g.drawText (lane != nullptr ? lane->name : gmDrumName (note), pianoW + 14, y, getWidth() - 120 - pianoW, st.laneH, Justification::centredLeft, true);
             g.setFont (font (10.0f, 1)); g.setColour (th::faint);
             g.drawText (keyName (note), getWidth() - 116, y, 30, st.laneH, Justification::centredRight);
@@ -203,15 +234,15 @@ public:
         const int note = lanes[(size_t) idx];
         const int y = idx * st.laneH - st.scrollY;
         if (e.mods.isPopupMenu()) { laneMenu (note); return; }
-        if (mRect (y).contains (e.getPosition())) {
+        if (! compact() && mRect (y).contains (e.getPosition())) {
             st.apply ("Lane mute", [note] (Pattern& p) { if (p.laneMute.count (note)) p.laneMute.erase (note); else p.laneMute.insert (note); });
             return;
         }
-        if (sRect (y).contains (e.getPosition())) {
+        if (! compact() && sRect (y).contains (e.getPosition())) {
             st.applySong ("Lane solo", [note] (Song& s) { if (auto* l = s.lane (note)) l->solo = ! l->solo; });
             return;
         }
-        if (levelRect (y).expanded (2, 4).contains (e.getPosition())) { levelNote = note; levelX0 = levelRect (y).getX(); st.proc.beginEdit(); setLevel (e.x); return; }
+        if (! compact() && levelRect (y).expanded (2, 4).contains (e.getPosition())) { levelNote = note; levelX0 = levelRect (y).getX(); st.proc.beginEdit(); setLevel (e.x); return; }
         if (e.x < pianoW + 12) { if (preview) preview (note); return; }
         st.focusLane = st.focusLane == note ? -1 : note;
         if (preview && e.getNumberOfClicks() > 1) preview (note);
@@ -222,6 +253,7 @@ public:
     void mouseWheelMove (const MouseEvent&, const MouseWheelDetails& w) override { if (onWheel) onWheel (w); }
     std::function<void (const MouseWheelDetails&)> onWheel;
     static constexpr int pianoW = 34;
+    bool compact() const { return getWidth() < 160; }
 
     // lights a lane's piano key when its note plays or comes in; returns true if a repaint is due
     bool pollHits()
@@ -350,10 +382,13 @@ private:
 // ---------------------------------------------------------------- the note grid
 inline int anySelectedCount (const Pattern& p) { int c = 0; for (auto& n : p.notes) c += n.selected ? 1 : 0; return c; }
 
-class NoteGrid : public Component
+class NoteGrid : public Component, public DragAndDropTarget
 {
 public:
     explicit NoteGrid (EditState& e) : st (e) { setWantsKeyboardFocus (true); }
+    std::function<void (const String&)> onDropPattern;
+    bool isInterestedInDragSource (const SourceDetails& d) override { const auto s = d.description.toString(); return s.startsWith ("key:") || s.startsWith ("park:") || s.startsWith ("groove:"); }
+    void itemDropped (const SourceDetails& d) override { if (onDropPattern) onDropPattern (d.description.toString()); }
     std::function<void (const MouseWheelDetails&, const MouseEvent&)> onWheel;
     std::function<void (int note)> preview;
     double playTicks = -1.0;      // continuous ticks since the pattern started (for polyrhythm playheads), -1 = not playing this one
@@ -473,6 +508,60 @@ public:
             float dash[] = { 4, 3 }; g.setColour (th::red);
             g.drawDashedLine ({ x, 0, x, (float) getHeight() }, dash, 2, 1.5f);
         }
+        paintLayers (g);
+    }
+
+    // ------------------------------------------------------------ recorded layers (Studio One style takes)
+    static constexpr int layerH = 26;
+    Rectangle<float> layerToggle() const { return { 4.0f, (float) getHeight() - 20.0f, 16.0f, 16.0f }; }
+    Rectangle<int> layersArea() const
+    {
+        const int n = (int) st.pat().layers.size();
+        const int h = jmin (getHeight() - 30, n * layerH + 4);
+        return { 0, getHeight() - 24 - h, getWidth(), h };
+    }
+    Rectangle<int> layerRow (int i) const { auto a = layersArea(); return { a.getX(), a.getY() + 2 + i * layerH, a.getWidth(), layerH - 2 }; }
+    int layerAtY (int y) const { for (int i = 0; i < (int) st.pat().layers.size(); ++i) if (layerRow (i).contains (4, y)) return i; return -1; }
+    void paintLayers (Graphics& g)
+    {
+        auto& p = st.pat();
+        if (p.layers.empty()) return;
+        // the little triangle in the lower-left corner: open / close the layers
+        auto t = layerToggle();
+        Path tri;
+        if (st.layersOpen) tri.addTriangle (t.getX() + 2, t.getY() + 4, t.getRight() - 2, t.getY() + 4, t.getCentreX(), t.getBottom() - 3);
+        else tri.addTriangle (t.getX() + 4, t.getY() + 2, t.getX() + 4, t.getBottom() - 2, t.getRight() - 3, t.getCentreY());
+        g.setColour (Colours::black.withAlpha (0.6f)); g.fillRoundedRectangle (t.expanded (2), 3);
+        g.setColour (th::amber); g.fillPath (tri);
+        g.setFont (font (10.0f, 2)); g.drawText (String ((int) p.layers.size()) + " layers", (int) t.getRight() + 6, (int) t.getY(), 80, (int) t.getHeight(), Justification::centredLeft);
+        if (! st.layersOpen) return;
+        auto a = layersArea();
+        g.setColour (th::bg.withAlpha (0.94f)); g.fillRect (a);
+        g.setColour (th::amber.withAlpha (0.6f)); g.drawHorizontalLine (a.getY(), 0, (float) getWidth());
+        const auto lanes = st.lanes(); const int nl = jmax (1, (int) lanes.size());
+        for (int i = 0; i < (int) p.layers.size(); ++i) {
+            auto r = layerRow (i);
+            g.setColour (Colours::white.withAlpha (i % 2 ? 0.03f : 0.06f)); g.fillRect (r);
+            // the stretches where this layer plays
+            for (auto& c : p.comp) if (c.layer == i) {
+                const float x0 = jmax (0.0f, st.tickToX (c.from)), x1 = jmin ((float) getWidth(), st.tickToX (jmin (c.to, p.lengthTicks())));
+                if (x1 > x0) { g.setColour (th::amber.withAlpha (0.28f)); g.fillRect (x0, (float) r.getY(), x1 - x0, (float) r.getHeight()); }
+            }
+            // its notes, small: one row per drum
+            for (auto& n : p.layers[(size_t) i]) {
+                const int row = indexOf (lanes, n.note); if (row < 0) continue;
+                const float x = st.tickToX (n.tick); if (x < -2 || x > getWidth()) continue;
+                const float y = r.getY() + 2 + (r.getHeight() - 5) * (float) row / nl;
+                g.setColour (st.laneColour (n.note).withAlpha (0.9f)); g.fillRect (x, y, jmax (2.0f, 30 * st.pxPerBeat / PPQ), 2.5f);
+            }
+            g.setColour (th::text.withAlpha (0.8f)); g.setFont (font (10.0f, 2));
+            g.drawText ("Layer " + String (i + 1), r.getX() + 24, r.getY(), 70, r.getHeight(), Justification::centredLeft);
+        }
+        if (layerSel >= 0 && layerB != layerA) {
+            auto r = layerRow (layerSel);
+            const float x0 = st.tickToX (jmin (layerA, layerB)), x1 = st.tickToX (jmax (layerA, layerB));
+            g.setColour (th::amber.withAlpha (0.5f)); g.fillRect (x0, (float) r.getY(), x1 - x0, (float) r.getHeight());
+        }
     }
 
     // ------------------------------------------------------------ mouse
@@ -502,7 +591,14 @@ public:
         st.cursorTick = st.snapFloor (tick);
         downPos = e.position;
 
-        if (e.mods.isPopupMenu()) { contextMenu (e); return; }
+        if (! p.layers.empty() && layerToggle().expanded (3).contains (e.position)) { st.layersOpen = ! st.layersOpen; repaint(); return; }
+        if (! p.layers.empty() && st.layersOpen && layersArea().contains (e.getPosition())) {
+            const int li = layerAtY (e.y);
+            if (li < 0) return;
+            if (e.mods.isPopupMenu()) { layerMenu (li); return; }
+            layerSel = li; layerA = layerB = st.snapFloor (tick); mode = Mode::Layer; repaint(); return;
+        }
+        if (e.mods.isPopupMenu()) { rz.begin (e, st.pxPerBeat, tick); return; }     // menu on release, zoom if you drag
 
         if (st.stamping && st.lastAction) {                     // stamp the remembered action on the clicked note
             if (auto* n = hit (e.position)) {
@@ -576,9 +672,11 @@ public:
 
     void mouseDrag (const MouseEvent& e) override
     {
+        if (rz.down) { if (rz.drag (e, st.pxPerBeat, st.scrollX, 12.0f, 900.0f, PPQ) && st.zoomed) st.zoomed(); return; }
         auto& p = st.pat();
         hoverX = e.x;
         switch (mode) {
+            case Mode::Layer: layerB = st.snapRound (st.xToTick ((float) e.x)); repaint(); break;
             case Mode::Erase: eraseAt (e.position); break;
             case Mode::Draw: {
                 const int t = st.snapFloor (st.xToTick ((float) e.x));
@@ -635,10 +733,19 @@ public:
         if (mode != Mode::None) autoscroll (e);
     }
 
-    void mouseUp (const MouseEvent&) override
+    void mouseUp (const MouseEvent& e) override
     {
+        if (rz.down) { if (! rz.end()) contextMenu (e); return; }
         auto& p = st.pat();
         switch (mode) {
+            case Mode::Layer: {
+                // a drag: that stretch comes from this layer; a click: the whole bar under the mouse
+                int a = jmin (layerA, layerB), b = jmax (layerA, layerB);
+                if (b - a < 10) { const int bar = p.beatsPerBar * PPQ; a = layerA / bar * bar; b = a + bar; }
+                const int l = layerSel;
+                st.apply ("Use layer " + String (l + 1), [a, b, l] (Pattern& q) { q.setComp (a, b, l); });
+                layerSel = -1; break;
+            }
             case Mode::Erase: st.proc.endEdit ("Erase"); break;
             case Mode::Draw: st.proc.endEdit ("Draw notes"); break;
             case Mode::Paint: st.proc.endEdit ("Paint notes"); break;
@@ -653,7 +760,26 @@ public:
     void mouseWheelMove (const MouseEvent& e, const MouseWheelDetails& w) override { if (onWheel) onWheel (w, e); }
 
 private:
-    enum class Mode { None, Move, Resize, Band, Draw, Paint, Erase, LaneLen };
+    enum class Mode { None, Move, Resize, Band, Draw, Paint, Erase, LaneLen, Layer };
+    int layerSel = -1, layerA = 0, layerB = 0;
+    void layerMenu (int li)
+    {
+        PopupMenu m;
+        m.addSectionHeader ("LAYER " + String (li + 1));
+        m.addItem (1, "Use this whole layer");
+        m.addItem (2, "Delete this layer");
+        m.addItem (3, "Flatten: keep what plays now, remove the layers");
+        m.showMenuAsync (PopupMenu::Options().withMousePosition(), [this, li] (int r) {
+            if (r == 1) st.apply ("Use layer", [li] (Pattern& q) { q.comp = { { 0, q.lengthTicks() * 4, li } }; q.applyComp(); });
+            else if (r == 2) st.apply ("Delete layer", [li] (Pattern& q) {
+                if (li >= (int) q.layers.size()) return;
+                q.layers.erase (q.layers.begin() + li);
+                for (auto& c : q.comp) { if (c.layer == li) c.layer = (int) q.layers.size() - 1; else if (c.layer > li) c.layer--; }
+                if (q.layers.empty()) q.comp.clear(); else q.applyComp();
+            });
+            else if (r == 3) { st.apply ("Flatten layers", [] (Pattern& q) { q.layers.clear(); q.comp.clear(); }); st.layersOpen = false; }
+        });
+    }
     EditState& st;
     Mode mode = Mode::None;
     Point<float> downPos;
@@ -661,6 +787,7 @@ private:
     int anchorTick = 0, anchorEnd = 0, anchorRow = 0, drawLane = -1, paintStart = 0, hoverX = -1;
     bool copyDrag = false;
     Rectangle<float> band;
+    EditState::RightZoom rz;
 
     static int indexOf (const std::vector<int>& v, int x) { for (int i = 0; i < (int) v.size(); ++i) if (v[(size_t) i] == x) return i; return -1; }
     int indexOfNote (const Note& n) { auto& p = st.pat(); return (int) (&n - p.notes.data()); }
@@ -668,8 +795,9 @@ private:
     Rectangle<float> noteRect (const Note& n, int row) const
     {
         const float x = st.tickToX (n.tick);
-        const float wpx = jmax (7.0f, n.length * st.pxPerBeat / PPQ - 1.0f);
-        return { x, (float) (row * st.laneH - st.scrollY) + 3.0f, wpx, st.laneH - 6.0f };
+        const int cell = st.gridTicks() > 1 ? st.gridTicks() : 0;
+        const float wpx = jmax (7.0f, jmax (n.length, cell) * st.pxPerBeat / PPQ - 1.0f);
+        return { x, (float) (row * st.laneH - st.scrollY) + 1.0f, wpx, st.laneH - 2.0f };
     }
     Note* hit (Point<float> pt)
     {
@@ -701,7 +829,7 @@ private:
     {
         auto& p = st.pat();
         Note n; n.tick = tick; n.note = note; n.velocity = st.defaultVel;
-        n.length = jmax (30, jmin (st.gridTicks() > 1 ? st.gridTicks() : 120, 240));
+        n.length = jmax (20, st.defaultLength());          // a note fills its grid step
         p.notes.push_back (n); p.sort();
         st.publish();
     }
@@ -723,7 +851,7 @@ private:
         const int a = jmin (paintStart, end), b = jmax (paintStart, end);
         p.notes.erase (std::remove_if (p.notes.begin(), p.notes.end(), [&] (const Note& n) { return n.note == drawLane && n.tick >= a && n.tick <= b; }), p.notes.end());
         for (int t = a; t <= b; t += g) {
-            Note n; n.tick = t; n.note = drawLane; n.length = jmin (g, 240);
+            Note n; n.tick = t; n.note = drawLane; n.length = g;
             n.velocity = t % PPQ == 0 ? st.defaultVel : jlimit (1, 127, (int) (st.defaultVel * (t % (PPQ / 2) == 0 ? 0.82f : 0.66f)));
             p.notes.push_back (n);
         }
@@ -909,16 +1037,17 @@ public:
             const float v = value (n) / (st.probMode ? 100.0f : 127.0f);
             const auto c = st.probMode ? th::amber : st.laneColour (n.note);
             const bool dimmed = anySel && ! n.selected;
+            const float bw = barW();
             g.setColour (c.withAlpha (dimmed ? 0.25f : 0.9f));
-            g.fillRect (x, 4 + h * (1.0f - v), 4.0f, h * v);
-            g.fillEllipse (x - 1.5f, 4 + h * (1.0f - v) - 3.5f, 7, 7);
+            g.fillRoundedRectangle (x, 4 + h * (1.0f - v), bw, h * v, 1.5f);
+            g.fillRoundedRectangle (x - 1.0f, 4 + h * (1.0f - v) - 2.5f, bw + 2.0f, 5.0f, 2.0f);
         }
         if (lineMode && dragging) { g.setColour (th::text); g.drawLine (Line<float> (lineA, lineB), 1.5f); }
         g.setColour (th::line); g.drawHorizontalLine (0, 0, (float) getWidth());
     }
     void mouseDown (const MouseEvent& e) override
     {
-        if (e.mods.isPopupMenu()) { menu(); return; }
+        if (e.mods.isPopupMenu()) { rz.begin (e, st.pxPerBeat, st.xToTick (e.position.x)); return; }
         lineMode = st.tool == Tool::Line || e.mods.isShiftDown();
         dragging = true;
         st.proc.beginEdit();
@@ -927,11 +1056,11 @@ public:
         if (! lineMode) {
             // grab the bar under the mouse (and the rest of the selection with it)
             auto& p = st.pat();
-            int best = -1; float bestD = 7.0f;
+            int best = -1; float bestD = barW() * 0.5f + 5.0f;
             for (int i = 0; i < (int) p.notes.size(); ++i) {
                 const auto& n = p.notes[(size_t) i];
                 if (! shown (n)) continue;
-                const float d = std::abs (st.tickToX (n.tick) + 2.0f - e.position.x);
+                const float d = std::abs (st.tickToX (n.tick) + barW() * 0.5f - e.position.x);
                 if (d < bestD) { bestD = d; best = i; }
             }
             if (best >= 0) {
@@ -947,12 +1076,14 @@ public:
     }
     void mouseDrag (const MouseEvent& e) override
     {
+        if (rz.down) { if (rz.drag (e, st.pxPerBeat, st.scrollX, 12.0f, 900.0f, PPQ) && st.zoomed) st.zoomed(); return; }
         if (lineMode) { lineB = e.position; repaint(); return; }
         if (! grabbed.empty()) { dragGrab (e); return; }
         setRange (last, e.position, e.mods.isAltDown()); last = e.position;
     }
     void mouseUp (const MouseEvent&) override
     {
+        if (rz.down) { if (! rz.end()) menu(); return; }
         if (lineMode) setRange (lineA, lineB, true);
         grabbed.clear();
         dragging = false;
@@ -964,6 +1095,7 @@ private:
     bool dragging = false, lineMode = false;
     Point<float> lineA, lineB, last;
     std::vector<std::pair<int, int>> grabbed;     // note index, value at grab
+    EditState::RightZoom rz;
     int grabbedIdx = -1, grabStartVal = 0;
 
     // the grabbed bar follows the mouse height (snapping to guides); others in the selection move by the same amount
@@ -983,6 +1115,8 @@ private:
     }
 
     bool shown (const Note& n) const { return st.focusLane < 0 || n.note == st.focusLane; }
+    // bars as thick as a step of the grid allows (like Studio One), at least 6 px
+    float barW() const { const float cell = (st.gridTicks() > 1 ? st.gridTicks() : 240) * st.pxPerBeat / PPQ; return jlimit (6.0f, 16.0f, cell * 0.55f); }
     int value (const Note& n) const { return st.probMode ? n.probability : n.velocity; }
     int fromY (float y) const
     {
@@ -999,7 +1133,7 @@ private:
         bool changed = false;
         for (auto& n : p.notes) {
             if (! shown (n) || (anySel && ! n.selected)) continue;
-            const float x = st.tickToX (n.tick) + 2.0f;
+            const float x = st.tickToX (n.tick) + barW() * 0.5f;
             if (x < a.x - 3 || x > b.x + 3) continue;
             const float t = b.x - a.x > 1 ? jlimit (0.0f, 1.0f, (x - a.x) / (b.x - a.x)) : 0.0f;
             const int v = st.snapGuide (fromY (a.y + (b.y - a.y) * t), st.probMode, free);

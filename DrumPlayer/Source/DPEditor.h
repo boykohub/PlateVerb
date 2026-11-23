@@ -35,13 +35,124 @@ private:
     int start = 0;
 };
 
+// a bar you drag left or right (the width of the drum list)
+class SideDivider : public Component
+{
+public:
+    std::function<int()> getValue; std::function<void (int)> setValue;
+    SideDivider() { setMouseCursor (MouseCursor::LeftRightResizeCursor); }
+    void paint (Graphics& g) override
+    {
+        g.setColour (Colours::white.withAlpha (isMouseOver() ? 0.25f : 0.08f));
+        g.fillRoundedRectangle (getLocalBounds().toFloat().withSizeKeepingCentre (3.0f, jmin (60.0f, (float) getHeight())), 1.5f);
+    }
+    void mouseEnter (const MouseEvent&) override { repaint(); }
+    void mouseExit (const MouseEvent&) override { repaint(); }
+    void mouseDown (const MouseEvent&) override { start = getValue ? getValue() : 0; }
+    void mouseDrag (const MouseEvent& e) override { if (setValue) setValue (start + e.getDistanceFromDragStartX()); }
+private:
+    int start = 0;
+};
+
+// the Option-key strip: a long bar of the tools you pick (right-click it to choose)
+class ToolStrip : public Component
+{
+public:
+    struct Feature { String id, label, tip; std::function<void (Component*)> run; };
+    std::vector<Feature> all; StringArray on;
+    std::function<void()> onChanged;
+    void rebuild()
+    {
+        btns.clear();
+        for (auto& id : on)
+            for (auto& f : all)
+                if (f.id == id) {
+                    auto* b = btns.add (new StripButton());
+                    setupButton (*this, *b, f.label, false, f.tip + " (right-click: choose the tools on this strip)");
+                    auto run = f.run; auto* bp = b;
+                    b->onClick = [run, bp] { if (run) run (bp); };
+                    b->onRight = [this] { chooseMenu(); };
+                }
+        resized(); repaint();
+    }
+    void resized() override
+    {
+        int x = 8;
+        for (auto* b : btns) { b->setTopLeftPosition (x, (getHeight() - b->getHeight()) / 2); x += b->getWidth() + 5; }
+    }
+    void paint (Graphics& g) override
+    {
+        if (btns.isEmpty()) {
+            g.setFont (font (12.0f, 1)); g.setColour (th::faint);
+            g.drawText ("Right-click here to choose the tools for this strip (Option / Alt shows and hides it)", getLocalBounds().reduced (10, 0), Justification::centredLeft);
+        }
+    }
+    void mouseDown (const MouseEvent& e) override { if (e.mods.isPopupMenu()) chooseMenu(); }
+    void chooseMenu()
+    {
+        PopupMenu m; m.addSectionHeader ("Tools on the strip");
+        for (int i = 0; i < (int) all.size(); ++i) m.addItem (i + 1, all[(size_t) i].label, true, on.contains (all[(size_t) i].id));
+        m.addSeparator(); m.addItem (1000, "All"); m.addItem (1001, "None");
+        m.showMenuAsync (PopupMenu::Options().withTargetComponent (this).withMousePosition(), [sp = Component::SafePointer<ToolStrip> (this)] (int r) {
+            if (sp == nullptr || r <= 0) return;
+            if (r == 1000) { sp->on.clear(); for (auto& f : sp->all) sp->on.add (f.id); }
+            else if (r == 1001) sp->on.clear();
+            else {
+                StringArray next;                                  // keep the order of the list
+                const auto& id = sp->all[(size_t) r - 1].id;
+                const bool add = ! sp->on.contains (id);
+                for (auto& f : sp->all) if ((f.id == id && add) || (f.id != id && sp->on.contains (f.id))) next.add (f.id);
+                sp->on = next;
+            }
+            sp->rebuild(); if (sp->onChanged) sp->onChanged();
+            sp->chooseMenu();                                     // stay open for the next pick
+        });
+    }
+private:
+    struct StripButton : public TextButton
+    {
+        std::function<void()> onRight;
+        void mouseDown (const MouseEvent& e) override { if (e.mods.isPopupMenu()) { if (onRight) onRight(); return; } TextButton::mouseDown (e); }
+        void mouseUp (const MouseEvent& e) override { if (e.mods.isPopupMenu()) return; TextButton::mouseUp (e); }
+    };
+    OwnedArray<StripButton> btns;
+};
+
+// the pattern player, note editor and velocities in their own window
+class DetachWindow : public DocumentWindow
+{
+public:
+    struct Content : public Component
+    {
+        Body inner; float scale = 1.0f;
+        std::function<bool (const KeyPress&)> onKey; std::function<void (const ModifierKeys&)> onMods;
+        Content() { addAndMakeVisible (inner); setWantsKeyboardFocus (true); }
+        void resized() override
+        {
+            inner.setTransform (AffineTransform::scale (scale));
+            inner.setBounds (0, 0, (int) std::round (getWidth() / scale), (int) std::round (getHeight() / scale));
+        }
+        bool keyPressed (const KeyPress& k) override { return onKey && onKey (k); }
+        void modifierKeysChanged (const ModifierKeys& m) override { if (onMods) onMods (m); }
+    } content;
+    std::function<void()> onClose;
+    DetachWindow() : DocumentWindow ("Drum Player - editor", th::bg, DocumentWindow::closeButton | DocumentWindow::maximiseButton | DocumentWindow::minimiseButton)
+    {
+        setUsingNativeTitleBar (true);
+        setContentNonOwned (&content, false);
+        setResizable (true, false);
+        setResizeLimits (600, 360, 10000, 10000);
+    }
+    void closeButtonPressed() override { if (onClose) onClose(); }
+};
+
 class DrumPlayerEditor : public AudioProcessorEditor, public DragAndDropContainer, public FileDragAndDropTarget, private Timer, public MenuBarModel
 {
 public:
     explicit DrumPlayerEditor (DrumPlayerProcessor& p)
         : AudioProcessorEditor (p), proc (p), st (p),
           strip (st, false), bigStrip (st, true), tray (st), bigTray (st), chainStrip (st), ruler (st), headers (st), grid (st), vel (st), songLane (st), songHeader (st, songLane),
-          quantPage (st), humPage (st), chainPage (st), setPage (st), presetPage (st), mapPage (st), recPage (st), groovePage (st)
+          quantPage (st), humPage (st), chainPage (st), setPage (st), presetPage (st), mapPage (st), recPage (st), groovePage (st), mixerPage (st)
     {
         setLookAndFeel (&lnf);
         LookAndFeel::setDefaultLookAndFeel (&lnf);
@@ -55,6 +166,10 @@ public:
         st.splitAt = [this] (int t) { splitMenu (t); };
         st.chooseTool = [this] (Tool t) { setTool (t); };
         st.openCurve = [this] { openCurve(); };
+        st.zoomed = [this] { proc.uiZoomX = st.pxPerBeat / 80.0f; clampScroll(); repaintRoll(); };
+        st.playFrom = [this] (int t) { proc.uiPlayFrom (st.song().editKey, t); };
+        grid.onDropPattern = [this] (const String& d) { dropOnEditor (d); };
+        songLane.onDropPattern = [this] (const String& d, double at) { dropParkOnSong (d, at); };
 
         // ---------------- header
         setupButton (body, prevPreset, "<", false, "Previous preset");
@@ -71,6 +186,8 @@ public:
         keyInfo.setComponentID ("Pressed key"); keyInfo.setText ("Press a key...", dontSendNotification); keyInfo.setJustificationType (Justification::centredLeft);
         setupButton (body, chainsBtn, "Chains", true);
         setupButton (body, groovesBtn, "Grooves", true, "Browse your MIDI grooves by style and type, listen, and drag them onto keys");
+        setupButton (body, mixerBtn, "Mixer", true, "Pan and meters per drum (View > Mixer)");
+        mixerBtn.onClick = [this] { togglePage (mixerPage, mixerBtn); };
         groovesBtn.onClick = [this] { togglePage (groovePage, groovesBtn); };
         setupButton (body, mapBtn, "Drum Map", true, "Which drum plugin you're playing, and where dropped MIDI comes from");
         mapBtn.onClick = [this] { togglePage (mapPage, mapBtn); };
@@ -189,6 +306,21 @@ public:
         zH1.onClick = [this] { zoomX (1.0f / 1.25f); }; zH2.onClick = [this] { zoomX (1.25f); };
         zV1.onClick = [this] { zoomY (-3); }; zV2.onClick = [this] { zoomY (3); };
         zFit.onClick = [this] { zoomToFit(); };
+        {   // fit a number of bars on the screen
+            StringArray fb { "Fit bars" }; for (int b = 1; b <= 16; ++b) fb.add (String (b) + (b == 1 ? " bar" : " bars"));
+            setupCombo (body, fitBars, fb, 1, "Show this many bars across the editor");
+            fitBars.setSelectedItemIndex (0, dontSendNotification);
+            fitBars.onChange = [this] { const int b = fitBars.getSelectedItemIndex(); if (b > 0) fitToBars (b); };
+        }
+        body.addAndMakeVisible (headDiv);
+        headW = jlimit (70, 360, proc.uiHeadW);
+        headDiv.getValue = [this] { return headW; }; headDiv.setValue = [this] (int v) { headW = proc.uiHeadW = jlimit (70, 360, v); layout(); };
+        body.addChildComponent (toolStrip);
+        setupButton (body, backBtn, "Bring the editor back", false, "Close the editor window and put it back here");
+        backBtn.onClick = [this] { reattach(); }; backBtn.setVisible (false);
+        body.addChildComponent (detachedNote); detachedNote.setFont (font (13.0f, 2)); detachedNote.setJustificationType (Justification::centred);
+        detachedNote.setColour (Label::textColourId, th::dim);
+        detachedNote.setText ("The pattern player, note editor and velocities are in their own window", dontSendNotification);
         body.addAndMakeVisible (hScroll); body.addAndMakeVisible (vScroll);
         hScroll.setAutoHide (false); vScroll.setAutoHide (false);
         hScroll.addListener (&scrollRelay); vScroll.addListener (&scrollRelay);
@@ -209,11 +341,41 @@ public:
         grid.onWheel = [wheel] (const MouseWheelDetails& w, const MouseEvent& e) { wheel (w, e.mods.isShiftDown(), e.mods.isCommandDown(), e.position.x); };
         headers.onWheel = [wheel] (const MouseWheelDetails& w) { wheel (w, false, false, 0); };
 
-        body.addAndMakeVisible (velMode); setupButton (body, velMode, "Velocity", false, "What the lower lane shows, and velocity actions");
+        // what the lower lane shows: velocity or the chance that a note plays (random occurrence)
+        setupButton (body, velShow, "Velocity", true, "The lane shows velocities"); setupButton (body, chanceShow, "Chance", true, "The lane shows each note's chance to play (100% always, 50% every other time at random)");
+        velShow.setRadioGroupId (81); chanceShow.setRadioGroupId (81); velShow.setToggleState (true, dontSendNotification);
+        velShow.onClick = [this] { st.probMode = false; vel.repaint(); };
+        chanceShow.onClick = [this] { st.probMode = true; vel.repaint(); };
+        setupButton (body, randBtn, "Randomize", false, "Randomize the velocities or the chances of the selected notes (or the lane shown)");
+        randBtn.onClick = [this] {
+            PopupMenu m;
+            m.addSectionHeader (st.probMode ? "CHANCE TO PLAY" : "VELOCITY");
+            if (! st.probMode) {
+                for (int d : { 5, 10, 20, 30 }) m.addItem (d, "Vary by +/- " + String (d));
+                m.addItem (100, "Random between 60 and 120"); m.addItem (101, "Random between 30 and 127");
+            } else {
+                m.addItem (200, "Random between 30% and 100%"); m.addItem (201, "Random between 60% and 100%"); m.addItem (202, "Some notes at 50%");
+            }
+            m.showMenuAsync (PopupMenu::Options().withTargetComponent (&randBtn), [this] (int r) {
+                if (r <= 0) return;
+                const int focus = st.focusLane;
+                st.apply ("Randomize", [r, focus] (Pattern& p) {
+                    std::mt19937 rng ((uint32) Time::getMillisecondCounter());
+                    const bool anySel = anySelected (p);
+                    if (! anySel) for (auto& n : p.notes) n.selected = focus < 0 || n.note == focus;
+                    if (r < 100) { std::uniform_int_distribution<int> d (-r, r); for (auto& n : p.notes) if (n.selected) n.velocity = jlimit (1, 127, n.velocity + d (rng)); }
+                    else if (r == 100) randomizeVelocity (p, 60, 120, rng);
+                    else if (r == 101) randomizeVelocity (p, 30, 127, rng);
+                    else if (r == 200) randomizeProbability (p, 30, 100, rng);
+                    else if (r == 201) randomizeProbability (p, 60, 100, rng);
+                    else if (r == 202) { std::uniform_int_distribution<int> d (0, 2); for (auto& n : p.notes) if (n.selected && d (rng) == 0) n.probability = 50; }
+                    if (! anySel) selectAll (p, false);
+                });
+            });
+        };
+        body.addAndMakeVisible (velMode); setupButton (body, velMode, "Shapes...", false, "Velocity / chance shapes and actions");
         velMode.onClick = [this] {
             PopupMenu m;
-            m.addItem (1, "Show velocity", true, ! st.probMode); m.addItem (2, "Show chance to play", true, st.probMode);
-            m.addSeparator();
             m.addItem (3, "Curve (sine, triangle, ramps)...");
             m.addItem (10020, "Ramp up"); m.addItem (10021, "Ramp down"); m.addItem (10022, "Accent the beats");
             m.addItem (10023, "Louder +10"); m.addItem (10024, "Softer -10"); m.addItem (10025, "Compress 50%"); m.addItem (10026, "Expand 150%");
@@ -221,14 +383,13 @@ public:
             PopupMenu fx; for (int x : { 127, 110, 100, 90, 80, 64, 48, 32 }) fx.addItem (10200 + x, String (x));
             m.addSubMenu ("All to", fx);
             m.showMenuAsync (PopupMenu::Options().withTargetComponent (&velMode), [this] (int r) {
-                if (r == 1 || r == 2) { st.probMode = r == 2; velMode.setButtonText (st.probMode ? "Chance" : "Velocity"); vel.repaint(); }
-                else if (r == 3) openCurve();
+                if (r == 3) openCurve();
                 else if (r >= 10000) runFunction (r - 10000);
             });
         };
 
         // ---------------- pages
-        for (Page* pg : { (Page*) &quantPage, (Page*) &humPage, (Page*) &chainPage, (Page*) &setPage, (Page*) &presetPage, (Page*) &mapPage, (Page*) &recPage, (Page*) &groovePage }) body.addChildComponent (pg);
+        for (Page* pg : { (Page*) &quantPage, (Page*) &humPage, (Page*) &chainPage, (Page*) &setPage, (Page*) &presetPage, (Page*) &mapPage, (Page*) &recPage, (Page*) &groovePage, (Page*) &mixerPage }) body.addChildComponent (pg);
         groovePage.onLoad = [this] (const File& f, int k) { importFiles ({ f.getFullPathName() }, k); };
         presetPage.onLoaded = [this] { refreshAll(); };
         setPage.look.collectIds = [this] {
@@ -260,12 +421,14 @@ public:
         setResizable (true, true);
         setResizeLimits (900, 560, 3200, 2000);
         setSize ((int) (1240 * scale), (int) (800 * scale));
+        setupToolStrip();
         refreshAll();
         startTimerHz (30);
     }
     ~DrumPlayerEditor() override
     {
         stopTimer();
+        detached.reset();
         hScroll.removeListener (&scrollRelay); vScroll.removeListener (&scrollRelay);
         LookAndFeel::setDefaultLookAndFeel (nullptr);
         setLookAndFeel (nullptr);
@@ -301,6 +464,7 @@ public:
     // Alt+X split at cursor, Q quantize, Ctrl+Y / Ctrl+Z, Alt+Left/Right nudge, Shift+Up/Down move to the next drum
     bool keyPressed (const KeyPress& k) override
     {
+        altClean = false;
         const auto m = k.getModifiers();
         const int code = k.getKeyCode();
         const juce_wchar ch = CharacterFunctions::toUpperCase (k.getTextCharacter());
@@ -431,7 +595,8 @@ public:
                 m.addItem (605, "Fit the pattern  (Ctrl+Shift+F)");
                 m.addItem (606, "Bigger velocity area"); m.addItem (607, "Smaller velocity area"); m.addItem (608, "Bigger song lane"); m.addItem (609, "Smaller song lane");
                 m.addItem (610, "Show only used lanes", true, st.usedOnly);
-                m.addSeparator(); m.addItem (611, "Exchange keys"); m.addItem (612, "Chains page"); m.addItem (613, "Recording options");
+                m.addSeparator(); m.addItem (614, "Mixer", true, openPage == &mixerPage);
+                m.addItem (615, "Tool strip (Option / Alt)", true, stripOn); m.addItem (616, detached != nullptr ? "Bring the editor back" : "Editor in its own window (full screen)"); m.addItem (611, "Exchange keys"); m.addItem (612, "Chains page"); m.addItem (613, "Recording options");
                 break;
             case 6: {
                 static const char* tn[] = { "Select (arrow)  1", "Draw (pencil)  5", "Erase  4", "Split (scissors)  3", "Paint brush  7", "Mute  6", "Line (velocity ramps)  2" };
@@ -506,6 +671,9 @@ public:
             case 611: toggleExchange(); break;
             case 612: togglePage (chainPage, chainsBtn); break;
             case 613: togglePage (recPage, recOptBtn); break;
+            case 614: togglePage (mixerPage, mixerBtn); break;
+            case 615: toggleStrip(); break;
+            case 616: MessageManager::callAsync ([sp = Component::SafePointer<DrumPlayerEditor> (this)] { if (sp) sp->toggleDetach(); }); break;
             default:
                 if (id >= 400 && id < 420) { const int b = id - 400; st.apply ("Pattern length", [b] (Pattern& q) { q.bars = b; }); }
                 else if (id >= 420 && id < 424) { const int t2 = id - 420; st.apply ("Pattern type", [t2] (Pattern& q) { q.type = (PatternType) t2; }); }
@@ -541,6 +709,39 @@ public:
         });
     }
 
+    void fitToBars (int bars)
+    {
+        const auto& p = st.pat();
+        st.pxPerBeat = jlimit (12.0f, 900.0f, (float) grid.getWidth() / jmax (1.0f, (float) (bars * p.beatsPerBar)));
+        proc.uiZoomX = st.pxPerBeat / 80.0f; st.scrollX = 0; clampScroll(); repaintRoll();
+    }
+    // something dropped on the note editor: a key opens it, a parked pattern or a groove comes in
+    void dropOnEditor (const String& d)
+    {
+        if (d.startsWith ("key:")) { st.song().editKey = jlimit (0, 127, d.fromFirstOccurrenceOf ("key:", false, false).getIntValue()); refreshAll(); return; }
+        if (d.startsWith ("groove:")) { importFiles ({ d.fromFirstOccurrenceOf ("groove:", false, false) }, st.song().editKey); return; }
+        if (d.startsWith ("park:")) {
+            const int slot = jlimit (0, 7, d.fromFirstOccurrenceOf ("park:", false, false).getIntValue());
+            int dest = st.song().editKey;
+            if (! st.song().keys[(size_t) dest].isEmpty()) dest = nextFreeKey (dest, false, true);
+            if (dest < 0) { showToast ("No free key left"); return; }
+            st.applySong ("Unpark pattern", [slot, dest] (Song& x) { x.keys[(size_t) dest] = x.park[(size_t) slot]; x.ensureLanesForPattern (x.keys[(size_t) dest]); x.editKey = dest; });
+            showToast ("Parked pattern on " + keyName (dest));
+        }
+    }
+    // a parked pattern dropped on the song lane: it gets a free key and a chunk there
+    void dropParkOnSong (const String& d, double at)
+    {
+        const int slot = jlimit (0, 7, d.fromFirstOccurrenceOf ("park:", false, false).getIntValue());
+        const int dest = nextFreeKey (st.song().settings.zoneLow - 1, false, true);
+        if (dest < 0) { showToast ("No free key left"); return; }
+        st.applySong ("Parked pattern to the song", [slot, dest, at] (Song& x) {
+            x.keys[(size_t) dest] = x.park[(size_t) slot]; x.ensureLanesForPattern (x.keys[(size_t) dest]);
+            for (auto& c : x.clips) c.selected = false;
+            Clip c; c.start = at; c.length = jmax (1.0, x.keys[(size_t) dest].lengthTicks() / (double) PPQ); c.key = dest; c.selected = true; x.clips.push_back (c);
+        });
+        showToast ("On " + keyName (dest) + " and in the song");
+    }
     void zoomToFit()
     {
         st.pxPerBeat = jlimit (12.0f, 900.0f, (float) grid.getWidth() / jmax (1.0f, (float) st.pat().lengthTicks() / PPQ));
@@ -563,7 +764,7 @@ private:
     TextEditor nameEd, barsEd;
     ComboBox typeBox, bpbBox, gridBox, swingPreset, swingValue, velBox;
     Label lLen, lGrid, lSwing, lVel, exchangeHelp, status;
-    TextButton lenMenuBtn, undoBtn, redoBtn, quantBtn, humBtn, funcBtn, recBtn, recOptBtn, playBtn, stopBtn, velMode;
+    TextButton lenMenuBtn, undoBtn, redoBtn, quantBtn, humBtn, funcBtn, recBtn, recOptBtn, playBtn, stopBtn, velMode, velShow, chanceShow, randBtn;
     ComboBox guideBox;
     OwnedArray<TextButton> toolBtns;
     FineSlider swingSlider;
@@ -575,7 +776,105 @@ private:
     Divider songDiv, velDiv;
     MenuBarComponent menuBar;
     TextButton zH1, zH2, zV1, zV2, zFit;
-    int songH = 64, velH = 104;
+    int songH = 64, velH = 124, headW = 200;
+    ComboBox fitBars; SideDivider headDiv;
+    ToolStrip toolStrip; bool stripOn = false;
+    std::unique_ptr<DetachWindow> detached;
+    std::vector<int> partZ;
+    TextButton backBtn; Label detachedNote;
+    uint32 altDownAt = 0; bool altClean = false;
+    void comboMenu (ComboBox& c, Component* t)
+    {
+        PopupMenu m;
+        for (int i = 0; i < c.getNumItems(); ++i) m.addItem (c.getItemId (i), c.getItemText (i), true, c.getSelectedId() == c.getItemId (i));
+        m.showMenuAsync (PopupMenu::Options().withTargetComponent (t), [sp = Component::SafePointer<ComboBox> (&c)] (int r) {
+            if (sp == nullptr || r <= 0) return;
+            if (r == sp->getSelectedId()) { if (sp->onChange) sp->onChange(); } else sp->setSelectedId (r);
+        });
+    }
+    void buttonsMenu (std::vector<Button*> bs, Component* t)
+    {
+        PopupMenu m;
+        for (int i = 0; i < (int) bs.size(); ++i) m.addItem (i + 1, bs[(size_t) i]->getButtonText() + (bs[(size_t) i]->getTooltip().isNotEmpty() ? "  -  " + bs[(size_t) i]->getTooltip().upToFirstOccurrenceOf ("(", false, false).trim() : String()),
+                                                          true, bs[(size_t) i]->getToggleState());
+        std::vector<Component::SafePointer<Button>> sp; for (auto* b : bs) sp.push_back (b);
+        m.showMenuAsync (PopupMenu::Options().withTargetComponent (t), [sp] (int r) { if (r > 0 && sp[(size_t) r - 1] != nullptr) sp[(size_t) r - 1]->triggerClick(); });
+    }
+    void setupToolStrip()
+    {
+        auto click = [] (Button& b) { auto* p = &b; return [p] (Component*) { p->triggerClick(); }; };
+        toolStrip.all = {
+            { "fit", "Bars", "Show this many bars across the editor", [this] (Component* t) { comboMenu (fitBars, t); } },
+            { "grid", "Grid", "Snap grid", [this] (Component* t) { comboMenu (gridBox, t); } },
+            { "tools", "Tools", "Arrow, draw, erase, scissors, paint, mute, line", [this] (Component* t) { std::vector<Button*> v; for (auto* b : toolBtns) v.push_back (b); buttonsMenu (v, t); } },
+            { "play", "Play", "Play the pattern", click (playBtn) },
+            { "stop", "Stop", "Stop", click (stopBtn) },
+            { "rec", "Rec", "Record", click (recBtn) },
+            { "quantize", "Quantize", "Quantize page", click (quantBtn) },
+            { "humanize", "Humanize", "Humanize page", click (humBtn) },
+            { "undo", "Undo", "Undo", click (undoBtn) },
+            { "redo", "Redo", "Redo", click (redoBtn) },
+            { "functions", "Functions", "Functions menu", click (funcBtn) },
+            { "mixer", "Mixer", "Pan and meters", click (mixerBtn) },
+            { "zoom", "Zoom", "Wider, narrower, taller, lower, fit", [this] (Component* t) { buttonsMenu ({ &zH2, &zH1, &zV2, &zV1, &zFit }, t); } },
+            { "vel", "Velocity", "Velocity for new notes", [this] (Component* t) { comboMenu (velBox, t); } },
+            { "swing", "Swing", "Swing preset", [this] (Component* t) { comboMenu (swingPreset, t); } },
+            { "detach", "Window", "Detach the editor into its own window, or bring it back", [this] (Component*) { MessageManager::callAsync ([sp = Component::SafePointer<DrumPlayerEditor> (this)] { if (sp) sp->toggleDetach(); }); } },
+        };
+        toolStrip.on = StringArray::fromTokens (proc.uiStripTools, ",", "");
+        toolStrip.on.removeEmptyStrings();
+        toolStrip.onChanged = [this] { proc.uiStripTools = toolStrip.on.joinIntoString (","); };
+        toolStrip.rebuild();
+    }
+    void toggleStrip() { stripOn = ! stripOn; if (detached != nullptr) detached->content.inner.resized(); else layout(); }
+    void toggleDetach() { if (detached != nullptr) reattach(); else detach(); }
+    void detach()
+    {
+        if (detached != nullptr) return;
+        closePages();
+        detached = std::make_unique<DetachWindow>();
+        auto& in = detached->content.inner;
+        auto parts = rollParts();
+        partZ.clear();
+        for (auto* c : parts) partZ.push_back (body.getIndexOfChildComponent (c));
+        for (auto* c : parts) in.addChildComponent (c);
+        in.onPaint = [this] (Graphics& g) { paintRollCards (g); };
+        in.onResized = [this] { if (detached != nullptr) layoutRoll (detached->content.inner.getLocalBounds().reduced (10, 6)); };
+        detached->content.scale = scale;
+        detached->content.onKey = [this] (const KeyPress& k) { return keyPressed (k); };
+        detached->content.onMods = [this] (const ModifierKeys& m) { modifierKeysChanged (m); };
+        detached->onClose = [this] { MessageManager::callAsync ([sp = Component::SafePointer<DrumPlayerEditor> (this)] { if (sp) sp->reattach(); }); };
+        const auto* d = Desktop::getInstance().getDisplays().getDisplayForRect (getScreenBounds());
+        detached->setBounds (d != nullptr ? d->userArea : Rectangle<int> (0, 0, 1400, 800));
+        detached->setVisible (true);
+        detached->toFront (true);
+        layout();
+        detached->content.inner.resized();
+        detached->content.grabKeyboardFocus();
+    }
+    void reattach()
+    {
+        if (detached == nullptr) return;
+        auto parts = rollParts();
+        std::vector<std::pair<int, Component*>> order;
+        for (size_t i = 0; i < parts.size(); ++i) order.push_back ({ i < partZ.size() ? partZ[i] : -1, parts[i] });
+        std::sort (order.begin(), order.end(), [] (auto& a, auto& b) { return a.first < b.first; });
+        for (auto& o : order) body.addChildComponent (o.second, o.first);
+        detached.reset();
+        layout();
+    }
+    void modifierKeysChanged (const ModifierKeys& m) override
+    {
+        // a lone Option / Alt press (no key, no click in between) shows or hides the tool strip
+        const auto now = Time::getMillisecondCounter();
+        if (m.isAltDown() && ! m.isCommandDown() && ! m.isCtrlDown() && ! m.isShiftDown()) {
+            if (altDownAt == 0) { altDownAt = now; altClean = true; }
+        } else if (altDownAt != 0) {
+            const bool clicked = Desktop::getInstance().getMainMouseSource().getLastMouseDownTime().toMilliseconds() > Time::currentTimeMillis() - (int64) (now - altDownAt);
+            if (altClean && ! clicked && ! m.isAnyModifierKeyDown() && now - altDownAt < 600) toggleStrip();
+            altDownAt = 0; altClean = false;
+        }
+    }
     ScrollBar hScroll { false }, vScroll { true };
     struct ScrollRelay : public ScrollBar::Listener
     {
@@ -587,7 +886,8 @@ private:
             owner->repaintRoll();
         }
     } scrollRelay;
-    QuantizePage quantPage; HumanizePage humPage; ChainPage chainPage; SettingsPage setPage; PresetPage presetPage; MapPage mapPage; RecordPage recPage; GroovePage groovePage;
+    QuantizePage quantPage; HumanizePage humPage; ChainPage chainPage; SettingsPage setPage; PresetPage presetPage; MapPage mapPage; RecordPage recPage; GroovePage groovePage; MixerPage mixerPage;
+    TextButton mixerBtn;
     Component exchange;
     Page* openPage = nullptr; TextButton* openPageBtn = nullptr;
     TextButton pageClose;                    // the X in the corner of an open page
@@ -616,9 +916,9 @@ private:
         headerTitle = h.removeFromLeft (170);
         RowPlacer hp (h, 5);
         hp.place (prevPreset, 24); hp.place (presetName, 200); hp.place (nextPreset, 24); hp.skip (4); hp.place (saveBtn); hp.skip (12);
-        hp.place (keysBtn); hp.place (playModeBtn); hp.skip (6); hp.place (keyInfo, jmax (60, h.getRight() - 525 - hp.x));
-        RowPlacer hr (h.withTrimmedLeft (h.getWidth() - 520), 5);
-        hr.place (groovesBtn); hr.place (exchangeBtn); hr.place (chainsBtn); hr.place (mapBtn); hr.place (settingsBtn); hr.skip (8);
+        hp.place (keysBtn); hp.place (playModeBtn); hp.skip (6); hp.place (keyInfo, jmax (0, h.getRight() - 545 - mixerBtn.getWidth() - hp.x));
+        RowPlacer hr (h.withTrimmedLeft (h.getWidth() - 520 - mixerBtn.getWidth() - 5), 5);
+        hr.place (mixerBtn); hr.place (groovesBtn); hr.place (exchangeBtn); hr.place (chainsBtn); hr.place (mapBtn); hr.place (settingsBtn); hr.skip (8);
         hr.place (zoomOut, 24); hr.place (zoomPct, 48); hr.place (zoomIn, 24);
         a.removeFromTop (6);
         // keyboard + tray
@@ -648,40 +948,26 @@ private:
         r2.place (lVel, 24); r2.place (velBox, 56); r2.skip (10);
         r2.place (recBtn); r2.place (recOptBtn); r2.place (playBtn); r2.place (stopBtn); r2.place (dragBtn);
         a.removeFromTop (8);
-        // song lane
-        auto songRow = a.removeFromTop (songH);
-        songHeader.setBounds (songRow.removeFromLeft (200));
-        songRow.removeFromRight (10);
-        songLane.setBounds (songRow);
-        songDiv.setBounds (a.removeFromTop (8));
         // status line
         status.setBounds (a.removeFromBottom (18));
         a.removeFromBottom (2);
-        // roll
-        rollArea = a;
-        const int headW = 200, rulerH = 22, sb = 10;
-        velH = jlimit (50, jmax (50, a.getHeight() - 120), velH);
-        auto velRow = a.removeFromBottom (velH);
-        velDiv.setBounds (a.removeFromBottom (8));
-        auto top = a.removeFromTop (rulerH);
-        {   auto z = top.withWidth (headW).reduced (4, 0);
-            for (auto* b : { &zH1, &zH2, &zV1, &zV2, &zFit }) { b->setBounds (z.removeFromLeft (b->getWidth()).withSizeKeepingCentre (b->getWidth(), 18)); z.removeFromLeft (3); } }
-        vScroll.setBounds (a.removeFromRight (sb)); top.removeFromRight (sb);
-        hScroll.setBounds (a.removeFromBottom (sb).withTrimmedLeft (headW));
-        headers.setBounds (a.removeFromLeft (headW)); top.removeFromLeft (headW);
-        grid.setBounds (a); ruler.setBounds (top);
-        velMode.setBounds (velRow.getX() + 8, velRow.getY() + 8, fitW ("Velocity"), btnH);
-        guideBox.setBounds (velRow.getX() + 8, velRow.getY() + 8 + btnH + 6, 130, btnH);
-        velLabelArea = velRow.removeFromLeft (headW);
-        velRow.removeFromRight (sb);
-        vel.setBounds (velRow);
-        // pages float over the roll's right side
-        auto pageArea = rollArea.withTrimmedLeft (jmax (0, rollArea.getWidth() - 520)).withTrimmedBottom (velH / 2);
+        bodyRest = a;
+        if (detached == nullptr) { backBtn.setVisible (false); detachedNote.setVisible (false); layoutRoll (a); }
+        else {
+            rollArea = velLabelArea = {};
+            detachedNote.setBounds (a.withSizeKeepingCentre (jmin (a.getWidth(), 520), 40).translated (0, -24)); detachedNote.setVisible (true);
+            backBtn.setBounds (a.withSizeKeepingCentre (backBtn.getWidth(), btnH).translated (0, 16)); backBtn.setVisible (true);
+            detached->content.inner.resized(); detached->content.inner.repaint();
+        }
+        // pages float over the roll's right side (over the main window's lower part)
+        const auto ra = bodyRest;
+        auto pageArea = ra.withTrimmedLeft (jmax (0, ra.getWidth() - 520)).withTrimmedBottom (velH / 2);
         for (Page* pg : { (Page*) &quantPage, (Page*) &humPage, (Page*) &chainPage, (Page*) &setPage, (Page*) &recPage }) pg->setBounds (pageArea);
-        mapPage.setBounds (rollArea.withTrimmedLeft (jmax (0, rollArea.getWidth() - 520)));
-        presetPage.setBounds (rollArea.withTrimmedLeft (jmax (0, rollArea.getWidth() - 600)));
-        groovePage.setBounds (rollArea.withTrimmedLeft (jmax (0, rollArea.getWidth() - 900)));
-        exchange.setBounds (rollArea.withTrimmedTop (-90));
+        mapPage.setBounds (ra.withTrimmedLeft (jmax (0, ra.getWidth() - 520)));
+        presetPage.setBounds (ra.withTrimmedLeft (jmax (0, ra.getWidth() - 600)));
+        groovePage.setBounds (ra.withTrimmedLeft (jmax (0, ra.getWidth() - 900)));
+        mixerPage.setBounds (ra);
+        exchange.setBounds (ra.withTrimmedTop (-90));
         auto ex = exchange.getLocalBounds().reduced (12);
         exchangeHelp.setBounds (ex.removeFromTop (24));
         bigTray.setBounds (ex.removeFromBottom (120).removeFromLeft (420));
@@ -691,7 +977,62 @@ private:
         if (openPage != nullptr) placeClose (openPage->getBounds()); else if (exchange.isVisible()) placeClose (exchange.getBounds());
         body.repaint();
     }
-    Rectangle<int> headerTitle, rollArea, velLabelArea, headerArea, toolArea;
+    Rectangle<int> headerTitle, rollArea, velLabelArea, headerArea, toolArea, bodyRest;
+    void layoutRoll (Rectangle<int> a)
+    {
+        // the Option-key strip, as tall as the song lane, above it
+        toolStrip.setVisible (stripOn);
+        if (stripOn) { toolStrip.setBounds (a.removeFromTop (jmax ((int) btnH + 12, songH))); a.removeFromTop (4); }
+        // song lane
+        auto songRow = a.removeFromTop (songH);
+        songHeader.setBounds (songRow.removeFromLeft (200));
+        songRow.removeFromRight (10);
+        songLane.setBounds (songRow);
+        songDiv.setBounds (a.removeFromTop (8));
+        // roll
+        rollArea = a;
+        const int rulerH = 22, sb = 10;
+        velH = jlimit (50, jmax (50, a.getHeight() - 120), velH);
+        auto velRow = a.removeFromBottom (velH);
+        velDiv.setBounds (a.removeFromBottom (8));
+        auto top = a.removeFromTop (rulerH);
+        {   auto z = top.withWidth (jmax (headW, 200)).reduced (4, 0);
+            for (auto* b : { &zH1, &zH2, &zV1, &zV2, &zFit }) { b->setVisible (headW >= 200); b->setBounds (z.removeFromLeft (b->getWidth()).withSizeKeepingCentre (b->getWidth(), 18)); z.removeFromLeft (3); } }
+        // the fit-bars menu sits in the ruler's corner, always reachable
+        fitBars.setBounds (top.getRight() - 96 - sb, top.getY() + 1, 92, rulerH - 2); fitBars.toFront (false);
+        vScroll.setBounds (a.removeFromRight (sb)); top.removeFromRight (sb);
+        hScroll.setBounds (a.removeFromBottom (sb).withTrimmedLeft (headW));
+        headers.setBounds (a.removeFromLeft (headW)); top.removeFromLeft (headW);
+        headDiv.setBounds (headers.getRight() - 3, headers.getY(), 6, headers.getHeight()); headDiv.toFront (false);
+        grid.setBounds (a); ruler.setBounds (top);
+        {   // the velocity area's buttons, stacked in the space under the drum list
+            const int bx = velRow.getX() + 8, bw = jmax (40, headW - 16), gap = 4;
+            int by = velRow.getY() + 6;
+            const int half = (bw - gap) / 2;
+            velShow.setBounds (bx, by, half, btnH); chanceShow.setBounds (bx + half + gap, by, half, btnH); by += btnH + gap;
+            randBtn.setBounds (bx, by, half, btnH); velMode.setBounds (bx + half + gap, by, half, btnH); by += btnH + gap;
+            guideBox.setBounds (bx, by, jmin (bw, 130), btnH);
+        }
+        velLabelArea = velRow.removeFromLeft (headW);
+        velRow.removeFromRight (sb);
+        vel.setBounds (velRow);
+        clampScroll();
+    }
+    // the parts that make up the editor area (they move to their own window when detached)
+    std::vector<Component*> rollParts()
+    {
+        return { &toolStrip, &songHeader, &songLane, &songDiv, &ruler, &headers, &headDiv, &grid, &vel, &velDiv, &hScroll, &vScroll,
+                 &zH1, &zH2, &zV1, &zV2, &zFit, &fitBars, &velShow, &chanceShow, &randBtn, &velMode, &guideBox };
+    }
+    void paintRollCards (Graphics& g)
+    {
+        drawCard (g, rollArea.toFloat().expanded (2), th::panel, 10, "Roll card");
+        drawCard (g, velLabelArea.toFloat(), th::panel, 6, "Roll card");
+        if (stripOn) drawCard (g, toolStrip.getBounds().toFloat().expanded (2), th::panel, 8, "Toolbars");
+        g.setFont (font (10.5f, 1)); g.setColour (th::faint);
+        const auto focus = st.focusLane >= 0 && st.song().lane (st.focusLane) ? st.song().lane (st.focusLane)->name : String ("all lanes");
+        g.drawFittedText ("Showing: " + focus, velLabelArea.reduced (10, 6).withTrimmedTop (3 * (btnH + 4) + 4), Justification::topLeft, 2);
+    }
 
     void paintBody (Graphics& g)
     {
@@ -703,11 +1044,7 @@ private:
         // cards behind the roll and the keyboard
         if (themed ("Header")) drawCard (g, headerArea.toFloat().expanded (4, 3), th::panel, 8, "Header");
         if (themed ("Toolbars")) drawCard (g, toolArea.toFloat().expanded (4, 3), th::panel, 8, "Toolbars");
-        drawCard (g, rollArea.toFloat().expanded (2), th::panel, 10, "Roll card");
-        drawCard (g, velLabelArea.toFloat(), th::panel, 6, "Roll card");
-        g.setFont (font (10.5f, 1)); g.setColour (th::faint);
-        const auto focus = st.focusLane >= 0 && st.song().lane (st.focusLane) ? st.song().lane (st.focusLane)->name : String ("all lanes");
-        g.drawFittedText ("Showing: " + focus, velLabelArea.reduced (10, 6).withTrimmedTop (60), Justification::topLeft, 2);
+        if (detached == nullptr) paintRollCards (g);
     }
 
     // ------------------------------------------------------------ refresh
@@ -776,7 +1113,7 @@ private:
         if (proc.queuedKey.load() != -2) { strip.repaint(); bigStrip.repaint(); }
         {   // Rec lamp: steady while recording, blinking during the count-in
             const int rs = proc.recStateUi.load();
-            const bool lit = rs == 2 || (rs == 1 && (Time::getMillisecondCounter() / 200) % 2 == 0);
+            const bool lit = rs == 2 || ((rs == 1 || rs == 3) && (Time::getMillisecondCounter() / 200) % 2 == 0);
             if (lit != recBtn.getToggleState()) recBtn.setToggleState (lit, dontSendNotification);
         }
         if (headers.pollHits()) headers.repaint();
@@ -958,6 +1295,7 @@ private:
             auto part = readMidiFile (f);
             if (part.notes.empty()) continue;
             for (auto& p : splitToPatterns (part, cut ? st.song().settings.splitBars : 0)) {
+                if (! cut) p.source = f.getFullPathName();
                 const int from = st.song().importMap;
                 if (from >= 0 && from != st.song().playMap) convertPattern (p, st.song().map (from), st.song().map (st.song().playMap));
                 pieces.push_back (std::move (p));
@@ -1186,16 +1524,18 @@ private:
     }
 
     // ------------------------------------------------------------ key groups (Intro, Verse...)
-    void newGroup (int key)
+    void newGroup (int key, std::set<int> targets = {})
     {
+        targets.insert (key);
         auto* aw = new AlertWindow ("New group", "A name, for example Intro, Verse, Chorus:", MessageBoxIconType::NoIcon);
         aw->addTextEditor ("n", "");
         aw->addButton ("Create", 1, KeyPress (KeyPress::returnKey)); aw->addButton ("Cancel", 0, KeyPress (KeyPress::escapeKey));
-        aw->enterModalState (true, ModalCallbackFunction::create ([this, aw, key] (int r) {
+        aw->enterModalState (true, ModalCallbackFunction::create ([this, aw, key, targets] (int r) {
             const auto n = aw->getTextEditorContents ("n").trim();
             if (r != 1 || n.isEmpty()) return;
             static const uint32 cols[] = { 0xff5aa9ff, 0xffb8f28b, 0xffffc15e, 0xffc9a7ff, 0xffff8fa3, 0xff6ee7d8, 0xffffa36e, 0xffe3e37a };
-            st.applySong ("New group", [n, key] (Song& s2) { s2.groups.push_back ({ n, cols[s2.groups.size() % 8] }); s2.keys[(size_t) key].group = (int) s2.groups.size() - 1; });
+            st.applySong ("New group", [n, targets] (Song& s2) { s2.groups.push_back ({ n, cols[s2.groups.size() % 8] }); for (int t : targets) s2.keys[(size_t) t].group = (int) s2.groups.size() - 1; });
+            st.keySel.clear();
             groupColour (st.song().keys[(size_t) key].group);
         }), true);
     }
@@ -1231,7 +1571,11 @@ private:
         const auto& p = s.keys[(size_t) k];
         PopupMenu m;
         m.addSectionHeader (keyName (k) + (p.isEmpty() ? "  (empty)" : "  " + p.name));
+        if (! p.isEmpty()) m.addItem (-1, String (p.bars) + (p.bars == 1 ? " bar" : " bars") + "   (" + typeName (p.type) + ", " + String (p.beatsPerBar) + "/4)", false);
+        std::set<int> targets = st.keySel; targets.insert (k);
+        if (targets.size() > 1) m.addSectionHeader (String ((int) targets.size()) + " keys picked (Option/Alt+click): group and colour go to all of them");
         m.addItem (1, "Edit");
+        if (! p.isEmpty()) m.addItem (50, String (p.fav ? "Remove the star" : "Favourite (star)") + (targets.size() > 1 ? "  (all picked keys)" : ""), true, p.fav);
         if (! p.notes.empty()) m.addItem (2, "Play");
         if (! p.isEmpty()) {
             PopupMenu type; for (int t = 0; t < 4; ++t) type.addItem (10 + t, typeName ((PatternType) t), true, (int) p.type == t);
@@ -1266,8 +1610,14 @@ private:
             m.addSubMenu ("Chains", chain);
         }
         if (! p.isEmpty()) m.addItem (7, "Clear");
-        m.showMenuAsync (PopupMenu::Options().withMousePosition(), [this, k] (int r) {
+        m.showMenuAsync (PopupMenu::Options().withMousePosition(), [this, k, targets] (int r) {
             switch (r) {
+                case 50: {
+                    const bool on = ! st.song().keys[(size_t) k].fav;
+                    st.applySong (on ? "Star" : "Remove star", [targets, on] (Song& s2) { for (int t : targets) if (! s2.keys[(size_t) t].isEmpty()) s2.keys[(size_t) t].fav = on; });
+                    for (int t : targets) { const auto& q = st.song().keys[(size_t) t]; setGrooveStar (q.source.isNotEmpty() ? q.source : q.name, on); }
+                    break;
+                }
                 case 1: st.song().editKey = k; refreshAll(); break;
                 case 2: proc.uiTrigger (k); break;
                 case 3: patternClip = st.song().keys[(size_t) k]; hasPatternClip = true; break;
@@ -1285,7 +1635,7 @@ private:
                     break;
                 }
                 case 8: learnFrom = k; learnSerial = proc.lastInSerial.load(); showToast ("Press the key on your keyboard where " + keyName (k) + "'s pattern should go"); break;
-                case 2900: newGroup (k); break;
+                case 2900: newGroup (k, targets); break;
                 case 2901: renameGroup (st.song().keys[(size_t) k].group); break;
                 case 2902: groupColour (st.song().keys[(size_t) k].group); break;
                 case 2903: { const int g = st.song().keys[(size_t) k].group;
@@ -1293,7 +1643,7 @@ private:
                                  for (auto& q : s2.keys) { if (q.group == g) q.group = -1; else if (q.group > g) q.group--; }
                                  for (auto& q : s2.park) { if (q.group == g) q.group = -1; else if (q.group > g) q.group--; } }); break; }
                 default:
-                    if (r >= 3000 && r < 3062) { const int g = r - 3001; st.applySong ("Key group", [k, g] (Song& s2) { s2.keys[(size_t) k].group = g; }); }
+                    if (r >= 3000 && r < 3062) { const int g = r - 3001; st.applySong ("Key group", [targets, g] (Song& s2) { for (int t : targets) s2.keys[(size_t) t].group = g; }); st.keySel.clear(); strip.repaint(); }
                     else if (r >= 2912 && r <= 2918) {
                         const int n = r - 2910;
                         st.applySong ("Key group", [k, n] (Song& s2) { const int g = s2.keys[(size_t) k].group; for (int i = 1; i <= n && k + i < 128; ++i) s2.keys[(size_t) (k + i)].group = g; });

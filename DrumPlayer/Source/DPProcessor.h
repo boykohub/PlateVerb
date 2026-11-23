@@ -130,7 +130,7 @@ public:
         auto* ui = x->createNewChildElement ("UI");
         String pn; { const ScopedLock l (uiLock); pn = presetName; }
         ui->setAttribute ("scale", uiScale); ui->setAttribute ("preset", pn); ui->setAttribute ("grid", uiGrid);
-        ui->setAttribute ("zoomX", uiZoomX);
+        ui->setAttribute ("zoomX", uiZoomX); ui->setAttribute ("strip", uiStripTools); ui->setAttribute ("headW", uiHeadW);
         return x;
     }
     void restoreUi (const XmlElement& x)
@@ -140,6 +140,7 @@ public:
             { const ScopedLock l (uiLock); presetName = ui->getStringAttribute ("preset"); }
             uiGrid = jlimit (0, numNoteValues - 1, ui->getIntAttribute ("grid", 3));
             uiZoomX = (float) jlimit (0.25, 8.0, ui->getDoubleAttribute ("zoomX", 1.0));
+            uiStripTools = ui->getStringAttribute ("strip", uiStripTools); uiHeadW = jlimit (70, 360, ui->getIntAttribute ("headW", 200));
         }
     }
     void saveLastSession() const
@@ -175,7 +176,8 @@ public:
     Song edit;                         // the editor's working copy
     UndoManager undo { 1000, 100 };
     String presetName; CriticalSection uiLock;
-    float uiScale = 1.0f, uiZoomX = 1.0f; int uiGrid = 3;
+    float uiScale = 1.0f, uiZoomX = 1.0f; int uiGrid = 3, uiHeadW = 200;
+    String uiStripTools = "fit,grid,tools,play,stop,rec,quantize,undo,redo";   // the Option-key strip: what you put on it
     std::atomic<int> stateVersion { 0 };
 
     void publish()
@@ -220,6 +222,7 @@ public:
     void uiStop() { pushCmd (CmdStop, 0); }
     void uiPlayChain (int c) { pushCmd (CmdChain, c); }
     void uiPreview (int note) { pushCmd (CmdPreview, note); }
+    void uiPlayFrom (int key, int tick) { pushCmd (CmdPlayFrom, (key << 20) | jlimit (0, (1 << 20) - 1, tick)); }
     void uiRecord (bool start, int key) { pushCmd (start ? CmdRecStart : CmdRecStop, key); }
     void uiSongPlay (bool start, double fromBeat) { pushCmd (start ? CmdSongPlay : CmdSongStop, (int) std::round (fromBeat * 100)); }
     std::atomic<double> songBeatUi { -1.0 };          // song lane playhead (beats), -1 = not playing
@@ -233,9 +236,10 @@ public:
         else { songRecArmed = false; }
     }
     std::atomic<bool> recArmed { false };            // true while counting in or recording
-    std::atomic<int> recStateUi { 0 };               // 0 off, 1 counting in, 2 recording
+    std::atomic<int> recStateUi { 0 };               // 0 off, 1 counting in, 2 recording, 3 waiting for the first note
     std::atomic<int> recSession { 0 };
     std::array<std::atomic<uint32>, 128> outHits {}, inHits {};   // per note, for the lane lights
+    std::array<std::atomic<int>, 128> outVel {};                  // per note: velocity of the last note sent (the mixer's meters)
     std::atomic<int> lastInNote { -1 }, lastInKey { -1 }, lastInSerial { 0 };   // the last key pressed and the pattern key it hit
     std::atomic<int> lastTrigger { 0 };              // what that press did: 1 starts, 2 empty key, 3 stops it, 4 stop key, 5 chain
     std::atomic<uint32> notesSent { 0 };             // every note Drum Player has sent out
@@ -302,6 +306,25 @@ private:
             if (recSession.load() != lastRecSession) { lastRecSession = recSession.load(); replacedLanes.clear(); }
             auto add = [this] (const RecNote& r) {
                 auto& p = edit.keys[(size_t) jlimit (0, 127, r.key)];
+                if (edit.settings.recTarget == 2) return;                 // the DAW records: nothing is kept here
+                if (edit.settings.recLayers) {                            // every pass is its own layer, the newest plays
+                    if (recSession.load() != layerSession || r.pass != layerPass) {
+                        layerSession = recSession.load(); layerPass = r.pass;
+                        if (p.layers.empty() && ! p.notes.empty()) p.layers.push_back (p.notes);     // what was there becomes layer 1
+                        p.layers.push_back ({});
+                        p.comp = { { 0, p.lengthTicks() * 4, (int) p.layers.size() - 1 } };
+                    }
+                    Note n; n.tick = r.tick; n.note = r.note; n.velocity = r.vel; n.length = 60;
+                    if (edit.settings.recQuantize > 0) {
+                        const int g = noteValues[jlimit (0, numNoteValues - 1, edit.settings.recQuantize - 1)].ticks;
+                        n.tick = (int) std::round ((double) n.tick / g) * g; if (n.tick >= p.lengthTicks()) n.tick -= p.lengthTicks();
+                    }
+                    auto& L = p.layers.back();
+                    for (auto& o : L) if (o.note == n.note && std::abs (o.tick - n.tick) < 12) { o.velocity = n.velocity; p.applyComp(); return; }
+                    L.push_back (n); std::sort (L.begin(), L.end());
+                    p.applyComp(); edit.ensureLane (n.note);
+                    return;
+                }
                 if (edit.settings.recMode == 1 && replacedLanes.insert ((r.key << 8) | r.note).second)       // replace: this lane's old notes go
                     p.notes.erase (std::remove_if (p.notes.begin(), p.notes.end(), [&r] (const Note& x) { return x.note == r.note; }), p.notes.end());
                 Note n; n.tick = r.tick; n.note = r.note; n.velocity = r.vel; n.length = 60;
@@ -325,7 +348,7 @@ private:
         mergePerformance();
         if (dirty && ++saveCounter > 60) { saveCounter = 0; dirty = false; saveLastSession(); }
     }
-    int lastRecSession = -1;
+    int lastRecSession = -1, layerSession = -1, layerPass = -1;
     // ---------------------------------------------------------------- performance → song lane
     struct PerfEvent { int key; double ppq, offset; bool host; };
     AbstractFifo perfFifo { 256 }; std::array<PerfEvent, 256> perfBuf;
@@ -451,7 +474,7 @@ private:
             const double len = S->keys[(size_t) cur.key].lengthTicks() / (double) PPQ;
             if (ppqEnd - recStartPpq >= S->settings.recStopAfter * len) recState = 0;
         }
-        if (cur.key < 0 && ! (queued.active && recState == 1)) recState = 0;
+        if (cur.key < 0 && ! (queued.active && recState == 1) && recState != 3) recState = 0;    // 3: waiting for your first note
         metronome (audio, ppq, ppqEnd);
         recArmed = recState != 0; recStateUi = recState;
 
@@ -481,9 +504,9 @@ private:
     }
     bool inTime() const { return S->settings.startQuant == StartQuant::InTime; }
     struct Off { double ppq; int note, ch; };
-    enum CmdType { CmdNoteOn = 1, CmdNoteOff, CmdStop, CmdChain, CmdPreview, CmdRecStart, CmdRecStop, CmdSongPlay, CmdSongStop };
+    enum CmdType { CmdNoteOn = 1, CmdNoteOff, CmdStop, CmdChain, CmdPreview, CmdRecStart, CmdRecStop, CmdSongPlay, CmdSongStop, CmdPlayFrom };
     struct Cmd { int type = 0, value = 0; };
-    struct RecNote { int key, tick, note, vel; };
+    struct RecNote { int key, tick, note, vel, pass = 0; };
 
     const Song* S = nullptr;
     Play cur; Queue queued;
@@ -557,6 +580,7 @@ private:
         chain = -1;
         recSession++;
         if (cur.key == k) { recState = 2; recKey = k; recStartPpq = now; return; }
+        if (S->settings.recWaitForKey) { recState = 3; recKey = k; return; }    // starts with the first note you play
         const auto& p = S->keys[(size_t) k];
         double at = cur.key >= 0 ? boundary (now) : (wasPlaying ? std::ceil (now - 0.02) : now);
         const double count = cur.key >= 0 ? 0.0 : (double) S->settings.countInBars * p.beatsPerBar;
@@ -657,6 +681,10 @@ private:
         else if (c.type == CmdStop) { stopNow (out, 0); chain = -1; songPlaying = false; }
         else if (c.type == CmdSongPlay) { stopNow (out, 0); chain = -1; songPlaying = true; songOrigin = now - c.value / 100.0; }
         else if (c.type == CmdSongStop) { songPlaying = false; flushOffs (out, 0, true); }
+        else if (c.type == CmdPlayFrom) {                       // this key, from this spot in it, straight away
+            const int k = c.value >> 20, t = c.value & ((1 << 20) - 1);
+            if (k >= 0 && k < numKeys && keyHasPattern (k)) { flushOffs (out, 0, true); chain = -1; queued = {}; cur = { k, now - t / (double) PPQ, -1, now - t / (double) PPQ }; pushPerf (k, now, t / (double) PPQ); }
+        }
         else if (c.type == CmdRecStart) startRecording (c.value, now);
         else if (c.type == CmdRecStop) { if (recState == 1) { queued = {}; } recState = 0; }
         else if (c.type == CmdChain) { if (c.value >= 0 && c.value < (int) S->chains.size()) startChain (c.value, now); }
@@ -694,17 +722,24 @@ private:
                 return;
             }
             if (m.isNoteOn()) inHits[(size_t) nn]++;
+            if (m.isNoteOn() && recState == 3 && recKey >= 0) {              // waiting for a key: this note starts the pattern and the recording
+                flushOffs (out, sample, true); chain = -1; queued = {};
+                cur = { recKey, ppq, -1, ppq }; pushPerf (recKey, ppq, 0.0);
+                recState = 2; recStartPpq = ppq; recSession++;
+            }
             if (m.isNoteOn() && recState == 2 && cur.key >= 0) {
                 const auto& p = S->keys[(size_t) cur.key];
                 double rel = std::fmod ((ppq - cur.start) * PPQ, (double) p.lengthTicks()); if (rel < 0) rel += p.lengthTicks();
                 int s1, n1, s2, n2;
                 recFifo.prepareToWrite (1, s1, n1, s2, n2);
-                const RecNote r { cur.key, (int) rel, nn, st.recFixedVel > 0 ? st.recFixedVel : (int) m.getVelocity() };
+                const double plen = p.lengthTicks() / (double) PPQ;
+                const int pass = plen > 0 ? (int) std::floor ((ppq - recStartPpq) / plen + 1e-9) : 0;
+                const RecNote r { cur.key, (int) rel, nn, st.recFixedVel > 0 ? st.recFixedVel : (int) m.getVelocity(), jmax (0, pass) };
                 if (n1 > 0) recBuf[(size_t) s1] = r; else if (n2 > 0) recBuf[(size_t) s2] = r;
                 recFifo.finishedWrite (n1 + n2);
             }
         }
-        if (st.passThrough) out.addEvent (m, sample);
+        if (st.passThrough && ! (recState == 2 && st.recTarget == 1 && m.isNoteOnOrOff() && st.keyForNote (m.getNoteNumber(), m.getChannel()) < 0)) out.addEvent (m, sample);
     }
 
     void applyQueue()
@@ -756,14 +791,28 @@ private:
     {
         const double sh = songShift(), sa = a - sh, sb = b - sh;
         int keyNow = -1;
-        for (auto& c : S->clips) {
+        const int nc = (int) S->clips.size();
+        for (int i = 0; i < nc; ++i) {
+            const auto& c = S->clips[(size_t) i];
             if (c.muted) continue;
             const double cs = c.start, ce = c.start + c.length;
             if (sb > cs && sa < ce) {
-                const double ia = jmax (sa, cs), ib = jmin (sb, ce);
-                if (ib > ia) renderKey (c.key, sh + cs - c.offset, ia + sh, ib + sh);
+                // the stretch this chunk plays, minus the parts covered by a chunk on top of it
+                std::vector<std::pair<double, double>> parts { { jmax (sa, cs), jmin (sb, ce) } };
+                for (int j = i + 1; j < nc; ++j) {
+                    const auto& o = S->clips[(size_t) j];
+                    if (o.muted) continue;
+                    std::vector<std::pair<double, double>> next;
+                    for (auto [a0, b0] : parts) {
+                        if (o.start >= b0 || o.start + o.length <= a0) { next.push_back ({ a0, b0 }); continue; }
+                        if (o.start > a0) next.push_back ({ a0, o.start });
+                        if (o.start + o.length < b0) next.push_back ({ o.start + o.length, b0 });
+                    }
+                    parts.swap (next);
+                }
+                for (auto [ia, ib] : parts) if (ib > ia) renderKey (c.key, sh + cs - c.offset, ia + sh, ib + sh);
             }
-            if (sb > cs && sb <= ce) keyNow = c.key;
+            if (sb > cs && sb <= ce) keyNow = c.key;                 // the top one wins here too
         }
         songKeyNow = keyNow;
         songBeatUi = sb;
@@ -871,7 +920,7 @@ private:
                 notesSent++;
                 offs.push_back ({ evPpq + jmax (10, nt.length) / (double) PPQ, nt.note, ch });
                 lastHitNote = nt.note; lastHitSerial++;
-                outHits[(size_t) nt.note]++;
+                outVel[(size_t) nt.note] = vel; outHits[(size_t) nt.note]++;
             }
         }
     }

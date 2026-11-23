@@ -110,6 +110,7 @@ public:
         addAndMakeVisible (table); table.setModel (this); table.setRowHeight (22); table.setMultipleSelectionEnabled (false);
         table.setColour (ListBox::backgroundColourId, Colours::black.withAlpha (0.2f));
         auto& h = table.getHeader();
+        h.addColumn (String::fromUTF8 ("\xe2\x98\x85"), 8, 26, 22, 30, TableHeaderComponent::defaultFlags, 0);   // your stars
         h.addColumn ("Name", 1, 190); h.addColumn ("Type", 2, 64); h.addColumn ("Style", 3, 110); h.addColumn ("Bars", 4, 44);
         h.addColumn ("BPM", 5, 52); h.addColumn ("Inspired by", 6, 120); h.addColumn ("Programmed by", 7, 120);
         h.setSortColumnId (1, true);
@@ -169,8 +170,11 @@ private:
         void selectedRowsChanged (int r) override { owner->styleSel = jmax (0, r); owner->filter(); }
     } styleModel;
 
+    StringArray stars;
+    bool starred (const GrooveInfo& g) const { return stars.contains (g.file.getFullPathName()) || stars.contains (g.name); }
     void rebuild()
     {
+        stars = grooveStars();
         StringArray s2; for (auto& g : lib.items) s2.addIfNotAlreadyThere (g.style.isNotEmpty() ? g.style : "Unsorted");
         s2.sortNatural(); s2.insert (0, "All styles");
         styleNames = s2; styles.updateContent();
@@ -196,6 +200,7 @@ private:
     String field (const GrooveInfo& g, int col) const
     {
         switch (col) {
+            case 8: return starred (g) ? "1" : "";
             case 1: return g.name; case 2: return g.type; case 3: return g.style;
             case 4: return g.bars > 0 ? String (g.bars) : String();
             case 5: return g.bpm > 0 ? String (g.bpm, 1) : String();
@@ -215,6 +220,7 @@ private:
     {
         if (row >= (int) rows.size()) return;
         auto& gi = lib.items[(size_t) rows[(size_t) row]];
+        if (col == 8) { if (starred (gi)) KeyStrip::drawStar (g, { w * 0.5f, h * 0.5f }, (float) h * 0.75f); return; }
         if (col == 4 || col == 5) lib.ensureScanned (gi);
         g.setFont (font (12.0f, col == 1 ? 2 : 1));
         g.setColour (col == 2 ? (gi.type == "Fill" ? th::amber : gi.type == "Intro" ? th::green : gi.type == "Ending" ? th::red : th::blue) : th::text);
@@ -231,7 +237,20 @@ private:
         table.updateContent(); table.repaint();
     }
     void cellDoubleClicked (int, int, const MouseEvent&) override { preview(); }
-    void cellClicked (int row, int, const MouseEvent& e) override { if (e.mods.isPopupMenu()) { table.selectRow (row); rowMenu(); } }
+    void cellClicked (int row, int col, const MouseEvent& e) override
+    {
+        if (e.mods.isPopupMenu()) { table.selectRow (row); rowMenu(); return; }
+        if (col == 8 && row < (int) rows.size()) {                        // click the star column: star or unstar
+            auto& gi = lib.items[(size_t) rows[(size_t) row]];
+            const bool on = ! starred (gi);
+            setGrooveStar (gi.file.getFullPathName(), on); if (! on) setGrooveStar (gi.name, false);
+            stars = grooveStars();
+            // keys holding this groove follow
+            for (auto& k : st.song().keys) if (k.source == gi.file.getFullPathName()) k.fav = on;
+            st.proc.publish(); if (st.changed) st.changed();
+            table.repaintRow (row);
+        }
+    }
     var getDragSourceDescription (const SparseSet<int>& sel) override
     {
         if (sel.isEmpty() || sel[0] >= (int) rows.size()) return {};

@@ -60,8 +60,7 @@ class KeyStrip : public Component, public DragAndDropTarget, public FileDragAndD
 public:
     KeyStrip (EditState& e, bool big) : st (e), large (big)
     {
-        setTooltip (big ? "Drag a key onto another key to swap. Drag to the tray to park. Click to choose which key you edit."
-                        : "Click: play (and edit).  Ctrl+click: edit without playing.  Red key: stop.  Drag onto another key: swap.  Drag out of the window: MIDI file.  Drop MIDI files here.");
+        ignoreUnused (big);      // no pop-up text over the keys
     }
     std::function<void (const StringArray&, int key)> onFiles;
     std::function<void (int key)> onKeyMenu;
@@ -201,15 +200,21 @@ public:
         if (! isPatternKey (k) && k != st.song().settings.resolveStop()) return;
         if (e.mods.isPopupMenu()) { if (onKeyMenu) onKeyMenu (k); return; }
         if (! large && k == st.song().settings.resolveStop()) { st.proc.uiStop(); pressedStop = true; repaint(); return; }
+        if (e.mods.isAltDown()) {                                  // Option/Alt+click: pick several keys (to colour them together)
+            if (st.keySel.count (k)) st.keySel.erase (k); else st.keySel.insert (k);
+            repaint(); return;
+        }
+        if (! st.keySel.empty()) { st.keySel.clear(); repaint(); }
         st.song().editKey = k;
         st.focusLane = -1;
-        if (! large && ! e.mods.isCommandDown()) { st.proc.uiTrigger (k); playedKey = k; }
+        pendingPlay = (! large && ! e.mods.isCommandDown()) ? k : -1;   // it plays when you let go, unless you drag it somewhere
         if (st.changed) st.changed();
         dragKey = k;
     }
     void mouseDrag (const MouseEvent& e) override
     {
         if (dragKey < 0 || e.getDistanceFromDragStart() < 6) return;
+        pendingPlay = -1;
         if (st.song().keys[(size_t) dragKey].isEmpty()) return;
         if (auto* c = DragAndDropContainer::findParentDragContainerFor (this))
             if (! c->isDragAndDropActive()) {
@@ -223,6 +228,7 @@ public:
     void mouseUp (const MouseEvent& e) override
     {
         ignoreUnused (e);
+        if (pendingPlay >= 0) { st.proc.uiTrigger (pendingPlay); playedKey = pendingPlay; pendingPlay = -1; }
         if (! st.song().settings.latch && playedKey >= 0) st.proc.uiRelease (playedKey);
         playedKey = -1; dragKey = -1;
         if (pressedStop) { pressedStop = false; repaint(); }
@@ -272,7 +278,7 @@ public:
 private:
     EditState& st;
     bool large;
-    int dragKey = -1, playedKey = -1;
+    int dragKey = -1, playedKey = -1, pendingPlay = -1;
     int viewLow = -1, viewEnd = 0; float wheelAcc = 0;
     static constexpr int arrowW = 18;
     bool pressedStop = false;
@@ -311,7 +317,24 @@ private:
             g.setColour (th::green); g.drawRoundedRectangle (r.reduced (1.0f), 3, 2.5f);
         }
         if (k == flashNote && Time::getMillisecondCounter() < flashUntil) { g.setColour (th::text.withAlpha (0.45f)); g.fillRoundedRectangle (r.reduced (2.0f), 3); }
+        if (st.keySel.count (k)) {                                   // picked with Option/Alt+click
+            g.setColour (th::green.withAlpha (0.3f)); g.fillRoundedRectangle (r.reduced (1.0f), 3);
+            g.setColour (th::green); g.drawRoundedRectangle (r.reduced (1.0f), 3, 2.5f);
+        }
+        if (st.song().keys[(size_t) k].fav) {                         // your star: at the bottom of the key, over the text
+            const float sz = jlimit (8.0f, 16.0f, r.getWidth() * 0.42f);
+            drawStar (g, { r.getCentreX(), r.getBottom() - sz * 0.75f }, sz);
+        }
     }
+public:
+    // a gold star with a dark rim: visible on white and black keys alike
+    static void drawStar (Graphics& g, Point<float> c, float size)
+    {
+        Path p; p.addStar (c, 5, size * 0.22f, size * 0.52f, -MathConstants<float>::halfPi);
+        g.setColour (Colours::black.withAlpha (0.85f)); g.strokePath (p, PathStrokeType (2.2f));
+        g.setColour (Colour (0xffffcc33)); g.fillPath (p);
+    }
+private:
 };
 
 // ---------------------------------------------------------------- parking tray: hold patterns aside while rearranging
@@ -631,19 +654,29 @@ public:
     {
         setWantsKeyboardFocus (true);
         setTooltip ("Drag keys here to arrange a song. Drag chunks to move (Alt: by beat), their right edge to make them longer or shorter, "
-                    "their left edge to trim. Ctrl-drag copies. D duplicates, Alt+X splits at the cursor, M mutes, Del deletes. Double-click: edit the pattern");
+                    "their left edge to trim. Ctrl-drag copies. D duplicates, Alt+X splits at the cursor, M mutes, Del deletes. Double-click: edit the pattern. "
+                    "Right-click + drag up/down: zoom. Double-click the bar numbers: play from there. Where chunks overlap, the one on top plays");
     }
     std::function<void()> onFocus;
-    float pxPerBeat = 12.0f; int scrollX = 0; double cursorBeat = 0; int snap = 0;   // snap: 0 bar, 1 beat, 2 1/8, 3 1/16, 4 off
+    float pxPerBeat = 12.0f; int scrollX = 0; double cursorBeat = 0; int snap = 0;   // snap: an index into snapBeats(), the last = off
+    static const std::vector<std::pair<const char*, double>>& snapBeats()
+    {
+        static const std::vector<std::pair<const char*, double>> v { { "Snap: bar", 4.0 }, { "Snap: beat", 1.0 }, { "Snap: 1/8", 0.5 }, { "Snap: 1/16", 0.25 },
+            { "Snap: 1/32", 0.125 }, { "Snap: 1/64", 0.0625 }, { "Snap: 1/128", 0.03125 }, { "Snap: 1/8T", 1.0 / 3 }, { "Snap: 1/16T", 1.0 / 6 },
+            { "Snap: 1/32T", 1.0 / 12 }, { "Snap: 1/64T", 1.0 / 24 }, { "Snap: 1/128T", 1.0 / 48 }, { "Snap: off", 0.0 } };
+        return v;
+    }
+    std::function<void (const String&, double beat)> onDropPattern;      // a parked pattern dropped here
     static constexpr int rulerH = 16;
 
     double beatToX (double b) const { return b * pxPerBeat - scrollX; }
     double xToBeat (double x) const { return (x + scrollX) / pxPerBeat; }
     double snapBeat (double b, bool alt) const
     {
-        if (alt || snap >= 4) return jmax (0.0, std::round (b * 16) / 16);   // free (1/64 steps)
-        static const double g[] = { 4.0, 1.0, 0.5, 0.25 };
-        return jmax (0.0, std::round (b / g[snap]) * g[snap]);
+        const auto& v = snapBeats();
+        const double g = v[(size_t) jlimit (0, (int) v.size() - 1, snap)].second;
+        if (alt || g <= 0.0) return jmax (0.0, std::round (b * 96) / 96);   // free (fine steps)
+        return jmax (0.0, std::round (b / g) * g);
     }
     // chunks click onto the edges of the other chunks (unless Alt)
     double magnet (double b, bool alt) const
@@ -723,8 +756,13 @@ public:
         grabKeyboardFocus(); if (onFocus) onFocus();
         auto& clips = st.song().clips;
         const int i = clipAt (e.position);
+        if (e.mods.isPopupMenu()) { rzDown = true; rzZoom = false; rzY = e.position.y; rzX = e.position.x; rzPx = pxPerBeat; rzBeat = xToBeat (e.x); rzClip = i; return; }   // menu on release, zoom on drag
         if (e.y < rulerH || i < 0) cursorBeat = snapBeat (xToBeat (e.x), e.mods.isAltDown());
-        if (e.mods.isPopupMenu()) { if (i >= 0 && ! clips[(size_t) i].selected) { for (auto& c : clips) c.selected = false; clips[(size_t) i].selected = true; } menu (i); repaint(); return; }
+        if (e.y < rulerH && e.getNumberOfClicks() > 1) {        // double-click in the ruler: play the song from there
+            if (! st.song().songMode) st.applySong ("Song mode", [] (Song& s) { s.songMode = true; });
+            st.proc.uiSongPlay (true, cursorBeat); repaint(); return;
+        }
+        if (i >= 0 && st.tool == Tool::Split) { splitAt (snapBeat (xToBeat (e.x), e.mods.isAltDown()), i); return; }   // the scissors cut on the grid
         if (i < 0) {
             if (! e.mods.isShiftDown()) for (auto& c : clips) c.selected = false;
             mode = Band; downPos = e.position; repaint(); return;
@@ -742,6 +780,14 @@ public:
     }
     void mouseDrag (const MouseEvent& e) override
     {
+        if (rzDown) {
+            const float dy = e.position.y - rzY;
+            if (! rzZoom && std::abs (dy) < 4.0f) return;
+            rzZoom = true;
+            pxPerBeat = jlimit (2.0f, 240.0f, rzPx * std::exp (-dy * 0.012f));
+            scrollX = jmax (0, (int) (rzBeat * pxPerBeat - rzX));
+            repaint(); return;
+        }
         auto& clips = st.song().clips;
         if (mode == Band) {
             band = Rectangle<float> (downPos, e.position);
@@ -778,6 +824,16 @@ public:
     }
     void mouseUp (const MouseEvent&) override
     {
+        if (rzDown) {
+            rzDown = false;
+            if (! rzZoom) {
+                auto& clips = st.song().clips; const int i = rzClip;
+                if (i < 0) cursorBeat = snapBeat (rzBeat, false);
+                if (i >= 0 && i < (int) clips.size() && ! clips[(size_t) i].selected) { for (auto& c : clips) c.selected = false; clips[(size_t) i].selected = true; }
+                menu (i); repaint();
+            }
+            return;
+        }
         if (mode == Move || mode == ResizeL || mode == ResizeR) st.proc.endEdit (copying ? "Copy chunks" : mode == Move ? "Move chunks" : "Chunk length");
         mode = None; band = {}; anchor = -1; repaint();
     }
@@ -799,14 +855,15 @@ public:
     }
 
     // ------------------------------------------------------------ drops from the keyboard
-    bool isInterestedInDragSource (const SourceDetails& d) override { return d.description.toString().startsWith ("key:"); }
+    bool isInterestedInDragSource (const SourceDetails& d) override { const auto s = d.description.toString(); return s.startsWith ("key:") || s.startsWith ("park:"); }
     void itemDragMove (const SourceDetails& d) override { dropBeat = snapBeat (xToBeat (d.localPosition.x), false); repaint(); }
     void itemDragExit (const SourceDetails&) override { dropBeat = -1; repaint(); }
     void itemDropped (const SourceDetails& d) override
     {
-        const int k = d.description.toString().fromFirstOccurrenceOf ("key:", false, false).getIntValue();
         const double at = snapBeat (xToBeat (d.localPosition.x), false);
         dropBeat = -1;
+        if (d.description.toString().startsWith ("park:")) { if (onDropPattern) onDropPattern (d.description.toString(), at); repaint(); return; }
+        const int k = d.description.toString().fromFirstOccurrenceOf ("key:", false, false).getIntValue();
         const double len = jmax (1.0, st.song().keys[(size_t) jlimit (0, 127, k)].lengthTicks() / (double) PPQ);
         st.applySong ("Add chunk", [k, at, len] (Song& s) { for (auto& c : s.clips) c.selected = false; Clip c; c.start = at; c.length = len; c.key = k; c.selected = true; s.clips.push_back (c); });
         cursorBeat = at + len;
@@ -822,6 +879,24 @@ public:
             for (auto& c : s.clips) if (c.selected) { auto x = c; x.start += hi - lo; add.push_back (x); c.selected = false; }
             for (auto& x : add) s.clips.push_back (x);
         });
+    }
+    // cut one chunk (or the selection, when the chunk is in it) at a spot
+    void splitAt (double at, int clipIndex)
+    {
+        st.applySong ("Cut chunk", [at, clipIndex] (Song& s) {
+            if (clipIndex < 0 || clipIndex >= (int) s.clips.size()) return;
+            const bool many = s.clips[(size_t) clipIndex].selected;
+            std::vector<Clip> add;
+            for (int i = 0; i < (int) s.clips.size(); ++i) {
+                auto& c = s.clips[(size_t) i];
+                if (! (i == clipIndex || (many && c.selected)) || at <= c.start + 1e-6 || at >= c.start + c.length - 1e-6) continue;
+                Clip r = c; const double cut = at - c.start;
+                c.length = cut; r.start = at; r.length -= cut; r.offset += cut; r.selected = false;
+                add.push_back (r);
+            }
+            for (auto& x : add) s.clips.push_back (x);
+        });
+        cursorBeat = at; repaint();
     }
     void splitAtCursor()
     {
@@ -862,6 +937,7 @@ private:
     EditState& st;
     Mode mode = None; Point<float> downPos; std::vector<Clip> orig, clipboard; int anchor = -1; bool copying = false;
     Rectangle<float> band; double dropBeat = -1;
+    bool rzDown = false, rzZoom = false; float rzY = 0, rzX = 0, rzPx = 12; double rzBeat = 0; int rzClip = -1;
 
     Rectangle<float> clipRect (const Clip& c) const
     {
@@ -928,7 +1004,8 @@ public:
             st.proc.setSongRecord (on);
             if (st.toast) st.toast (on ? "Recording: play your pattern keys" : "Recording finished");
         };
-        setupCombo (*this, snap, { "Snap: bar", "Snap: beat", "Snap: 1/8", "Snap: 1/16", "Snap: off" }, 1, "Chunks also click onto each other's edges. Alt while dragging = free");
+        { StringArray sn; for (auto& [n, b] : SongLane::snapBeats()) sn.add (n);
+          setupCombo (*this, snap, sn, 1, "Chunks also click onto each other's edges. Alt while dragging = free. With the scissors (3), clicking a chunk cuts it on this grid"); }
         snap.setSelectedItemIndex (0, dontSendNotification);
         snap.onChange = [this] { lane.snap = snap.getSelectedItemIndex(); };
         dragOut.setButtonText ("Song MIDI"); dragOut.setSize (fitW ("Song MIDI"), btnH); dragOut.setComponentID ("Song MIDI"); addAndMakeVisible (dragOut);
@@ -2054,7 +2131,10 @@ public:
         setupLabel (*this, lCount, "Count-in"); setupCombo (*this, count, { "Off", "1 bar", "2 bars" });
         setupLabel (*this, lMetro, "Click"); setupCombo (*this, metro, { "Off", "Count-in only", "While recording", "Whenever a pattern plays" });
         setupLabel (*this, lLevel, "Click volume"); setupSlider (*this, level); level.setRange (0, 100, 1); level.setTextValueSuffix (" %");
-        setupLabel (*this, lMode, "Mode"); setupCombo (*this, mode, { "Overdub: add to the pattern", "Replace: a drum you play loses its old notes" });
+        setupLabel (*this, lMode, "Mode"); setupCombo (*this, mode, { "Record mix: add to the pattern", "Record replace: a drum you play loses its old notes" });
+        setupLabel (*this, lStart, "Start"); setupCombo (*this, startBox, { "With Rec (after the count-in)", "When I play the first note" });
+        setupLabel (*this, lLayers, "Layers"); setupCombo (*this, layersBox, { "Off: one pattern", "Every pass is a layer (comp them like Studio One)" });
+        setupLabel (*this, lTarget, "Record into"); setupCombo (*this, targetBox, { "Drum Player and the DAW", "Drum Player only", "The DAW only" });
         setupLabel (*this, lStop, "Stop recording after"); setupCombo (*this, stopAfter, { "I press Rec again", "1 pass", "2 passes", "4 passes", "8 passes" });
         setupLabel (*this, lQ, "Quantize while recording");
         StringArray rq { "Off (as played)" }; for (auto& v : noteValues) rq.add (v.name);
@@ -2072,9 +2152,11 @@ public:
             o.metroLevel = (float) level.getValue() / 100.0f; o.recMode = mode.getSelectedItemIndex();
             o.recStopAfter = stops[jlimit (0, 4, stopAfter.getSelectedItemIndex())];
             o.recQuantize = recQ.getSelectedItemIndex(); o.recFixedVel = vels[jlimit (0, 5, vel.getSelectedItemIndex())];
+            o.recWaitForKey = startBox.getSelectedItemIndex() == 1; o.recLayers = layersBox.getSelectedItemIndex() == 1;
+            o.recTarget = jlimit (0, 2, targetBox.getSelectedItemIndex());
             st.proc.publish();
         };
-        for (auto* c : { &count, &metro, &mode, &stopAfter, &recQ, &vel }) c->onChange = commit;
+        for (auto* c : { &count, &metro, &mode, &stopAfter, &recQ, &vel, &startBox, &layersBox, &targetBox }) c->onChange = commit;
         level.onValueChange = commit;
     }
     void refresh() override
@@ -2086,11 +2168,16 @@ public:
         const int sa = o.recStopAfter; stopAfter.setSelectedItemIndex (sa <= 0 ? 0 : sa == 1 ? 1 : sa == 2 ? 2 : sa <= 4 ? 3 : 4, dontSendNotification);
         recQ.setSelectedItemIndex (o.recQuantize, dontSendNotification);
         const int v = o.recFixedVel; vel.setSelectedItemIndex (v == 0 ? 0 : v >= 127 ? 1 : v >= 110 ? 2 : v >= 100 ? 3 : v >= 80 ? 4 : 5, dontSendNotification);
+        startBox.setSelectedItemIndex (o.recWaitForKey ? 1 : 0, dontSendNotification); layersBox.setSelectedItemIndex (o.recLayers ? 1 : 0, dontSendNotification);
+        targetBox.setSelectedItemIndex (o.recTarget, dontSendNotification);
         loading = false;
     }
     void resized() override
     {
         auto a = content(); const int lw = 160;
+        startBox.setBounds (row (a, lStart, lw).removeFromLeft (260));
+        targetBox.setBounds (row (a, lTarget, lw).removeFromLeft (220));
+        layersBox.setBounds (row (a, lLayers, lw));
         count.setBounds (row (a, lCount, lw).removeFromLeft (110));
         metro.setBounds (row (a, lMetro, lw).removeFromLeft (200));
         level.setBounds (row (a, lLevel, lw));
@@ -2102,9 +2189,110 @@ public:
     }
 private:
     EditState& st; bool loading = false;
-    Label lCount, lMetro, lLevel, lMode, lStop, lQ, lVel, help;
-    ComboBox count, metro, mode, stopAfter, recQ, vel;
+    Label lCount, lMetro, lLevel, lMode, lStop, lQ, lVel, help, lStart, lLayers, lTarget;
+    ComboBox count, metro, mode, stopAfter, recQ, vel, startBox, layersBox, targetBox;
     FineSlider level;
+};
+
+// ---------------------------------------------------------------- mixer: a strip per drum with its pan and a meter (MIDI only, no EQ)
+class MixerPage : public Page, private Timer
+{
+public:
+    explicit MixerPage (EditState& e) : Page ("MIXER"), st (e)
+    {
+        addAndMakeVisible (view); view.setViewedComponent (&strips, false); view.setScrollBarsShown (false, true);
+        strips.owner = this;
+        setupLabel (*this, help, "Pan per drum (sent as CC10 on the drum's own MIDI channel; give a drum its own channel in its lane's right-click menu). Meters show what Drum Player sends.", 10.5f, th::faint);
+        help.setJustificationType (Justification::topLeft);
+    }
+    void refresh() override { rebuild(); }
+    void visibilityChanged() override { if (isVisible()) { rebuild(); startTimerHz (30); } else stopTimer(); }
+    void resized() override
+    {
+        auto a = content();
+        help.setBounds (a.removeFromBottom (30));
+        view.setBounds (a);
+        const int need = (int) strips.items.size() * stripW;
+        strips.setSize (jmax (a.getWidth(), need), jmax (120, a.getHeight() - (need > a.getWidth() ? 10 : 0)));
+        strips.layout();
+    }
+private:
+    static constexpr int stripW = 66;
+    struct Strips : public Component
+    {
+        MixerPage* owner = nullptr;
+        struct Item { int note; std::unique_ptr<Slider> pan; float level = 0; uint32 seen = 0; };
+        std::vector<Item> items;
+        void layout()
+        {
+            for (int i = 0; i < (int) items.size(); ++i)
+                items[(size_t) i].pan->setBounds (i * stripW + 8, 26, stripW - 16, stripW - 16);
+        }
+        void paint (Graphics& g) override
+        {
+            auto& st = owner->st;
+            for (int i = 0; i < (int) items.size(); ++i) {
+                const auto& it = items[(size_t) i];
+                auto r = Rectangle<float> ((float) i * stripW + 2, 0, stripW - 4.0f, (float) getHeight());
+                g.setColour (Colours::black.withAlpha (i % 2 ? 0.18f : 0.28f)); g.fillRoundedRectangle (r, 5);
+                const auto* l = st.song().lane (it.note);
+                g.setColour (st.laneColour (it.note)); g.fillRoundedRectangle (r.withHeight (4).reduced (6, 0), 2);
+                g.setFont (font (10.5f, 2)); g.setColour (th::text);
+                g.drawFittedText (l != nullptr ? l->name : gmDrumName (it.note), r.withY (6).withHeight (18).toNearestInt().reduced (3, 0), Justification::centred, 1, 0.7f);
+                // pan readout
+                const int pv = l != nullptr ? l->pan : 64;
+                g.setFont (font (9.5f, 1)); g.setColour (l != nullptr && l->channel > 0 ? th::dim : th::faint);
+                const String pt = pv == 64 ? String ("C") : (pv < 64 ? "L" + String ((64 - pv) * 100 / 64) : "R" + String ((pv - 64) * 100 / 63));
+                g.drawText (pt + (l != nullptr && l->channel > 0 ? "  ch " + String (l->channel) : "  main ch"), r.withY (26.0f + stripW - 16).withHeight (14).toNearestInt(), Justification::centred);
+                // meter
+                auto m = r.withTrimmedTop (26.0f + stripW).withTrimmedBottom (24).withSizeKeepingCentre (12.0f, r.getHeight() - 26.0f - stripW - 24.0f);
+                g.setColour (Colours::black.withAlpha (0.55f)); g.fillRoundedRectangle (m, 2);
+                const float v = it.level;
+                auto fillR = m.reduced (2).withTrimmedTop ((m.getHeight() - 4) * (1.0f - v));
+                g.setGradientFill (ColourGradient (th::red, m.getX(), m.getY(), th::green, m.getX(), m.getBottom(), false));
+                g.fillRoundedRectangle (fillR, 1.5f);
+                g.setFont (font (9.0f, 1)); g.setColour (th::faint);
+                g.drawText (keyName (it.note), r.withTrimmedTop (r.getHeight() - 20).toNearestInt(), Justification::centred);
+            }
+        }
+    } strips;
+    EditState& st;
+    Viewport view; Label help;
+
+    void rebuild()
+    {
+        for (auto& it : strips.items) strips.removeChildComponent (it.pan.get());
+        strips.items.clear();
+        for (auto& l : st.song().lanes) {
+            Strips::Item it; it.note = l.note;
+            it.pan = std::make_unique<Slider> (Slider::RotaryHorizontalVerticalDrag, Slider::NoTextBox);
+            it.pan->setRange (0, 127, 1); it.pan->setValue (l.pan, dontSendNotification); it.pan->setDoubleClickReturnValue (true, 64);
+            it.pan->setColour (Slider::rotarySliderFillColourId, th::amber);
+            const int note = l.note;
+            it.pan->onDragStart = [this] { st.proc.beginEdit(); };
+            it.pan->onValueChange = [this, note, sl = it.pan.get()] {
+                if (auto* ln = st.song().lane (note)) { ln->pan = (int) sl->getValue(); st.proc.publish(); strips.repaint(); }
+            };
+            it.pan->onDragEnd = [this, note] {
+                st.proc.endEdit ("Pan");
+                if (auto* ln = st.song().lane (note); ln != nullptr && ln->channel == 0 && st.toast) st.toast ("This drum is on the main channel: its pan reaches the plugin once it has its own MIDI channel (lane menu)");
+            };
+            strips.addAndMakeVisible (*it.pan);
+            strips.items.push_back (std::move (it));
+        }
+        resized();
+    }
+    void timerCallback() override
+    {
+        bool any = false;
+        const auto now = Time::getMillisecondCounter(); ignoreUnused (now);
+        for (auto& it : strips.items) {
+            const uint32 h = st.proc.outHits[(size_t) it.note].load();
+            if (h != it.seen) { it.seen = h; it.level = jmax (it.level, st.proc.outVel[(size_t) it.note].load() / 127.0f); any = true; }
+            else if (it.level > 0.0f) { it.level = jmax (0.0f, it.level - 0.045f); any = true; }
+        }
+        if (any) strips.repaint();
+    }
 };
 
 } // namespace dp
