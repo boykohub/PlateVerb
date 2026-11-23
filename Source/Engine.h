@@ -208,12 +208,24 @@ struct Resampler {
 // The band gains are solved through the EQ's interaction matrix (and refined twice, since peaking filters are not
 // linear in dB); the result is then checked on a dense grid and the broadband gain lowered if any frequency would
 // lose less than the longest wanted decay allows - so the loop can never gain energy.
+// a peaking section in double precision: inside a reverb loop the rounding of a float filter at low frequencies
+// is recirculated hundreds of times and comes back as rumble and hiss in long tails
+struct BiquadD {
+    double b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0, z1 = 0, z2 = 0;
+    void reset() { z1 = z2 = 0; }
+    inline float process (float xf) { const double x = xf, y = b0 * x + z1; z1 = b1 * x - a1 * y + z2; z2 = b2 * x - a2 * y; return (float) y; }
+    void peak (double fs, double f, double Q, double dB) {
+        const double A = std::pow (10.0, dB / 40.0), w = 2.0 * 3.141592653589793 * std::min (f, 0.45 * fs) / fs, al = std::sin (w) / (2.0 * Q), c = std::cos (w);
+        const double a0 = 1.0 + al / A;
+        b0 = (1.0 + al * A) / a0; b1 = -2.0 * c / a0; b2 = (1.0 - al * A) / a0; a1 = -2.0 * c / a0; a2 = (1.0 - al / A) / a0;
+    }
+};
 struct DecayEq {
     static constexpr int N = 10;
     static constexpr float Q = 1.5f;
-    Biquad pk[N]; float g0 = 1; bool on = false; int nb = N;
+    BiquadD pk[N]; float g0 = 1; bool on = false; int nb = N;
     static float centre (int i) { return 31.25f * std::pow (2.0f, (float) i); }
-    static float respDb (const Biquad& b, float fs, float f) {
+    template <typename B> static float respDb (const B& b, float fs, float f) {
         const double w = 2.0 * 3.141592653589793 * f / fs, c1 = std::cos (w), s1 = std::sin (w), c2 = std::cos (2 * w), s2 = std::sin (2 * w);
         const double nr = b.b0 + b.b1 * c1 + b.b2 * c2, ni = -(b.b1 * s1 + b.b2 * s2);
         const double dr = 1.0 + b.a1 * c1 + b.a2 * c2, di = -(b.a1 * s1 + b.a2 * s2);
@@ -246,14 +258,14 @@ struct DecayEq {
         for (int i = 0; i < nb; ++i) { t[(size_t) i] = -60.0 * loopSec / std::max (0.05f, T[i]); tMax = std::max (tMax, (float) t[(size_t) i]); }
         const double base = t[5 < nb ? 5 : (size_t) nb - 1];
         for (int i = 0; i < nb; ++i) d[(size_t) i] = t[(size_t) i] - base;
-        for (int i = 0; i < nb; ++i) { Biquad u; u.peak (fs, centre (i), Q, 1.0f); for (int j = 0; j < nb; ++j) M[(size_t) (j * nb + i)] = respDb (u, fs, centre (j)); }
+        for (int i = 0; i < nb; ++i) { BiquadD u; u.peak (fs, centre (i), Q, 1.0); for (int j = 0; j < nb; ++j) M[(size_t) (j * nb + i)] = respDb (u, fs, centre (j)); }
         for (int it = 0; it < 3; ++it) {
             std::vector<double> err ((size_t) nb);
             for (int j = 0; j < nb; ++j) { double r = 0; for (int i = 0; i < nb; ++i) r += respDb (pk[i], fs, centre (j)); err[(size_t) j] = it == 0 ? d[(size_t) j] : d[(size_t) j] - r; }
             if (! solve (M, err, nb, sol)) break;
-            for (int i = 0; i < nb; ++i) { gains[(size_t) i] = clampf ((float) (gains[(size_t) i] + sol[(size_t) i]), -48.0f, 24.0f); pk[i].peak (fs, centre (i), Q, (float) gains[(size_t) i]); }
+            for (int i = 0; i < nb; ++i) { gains[(size_t) i] = clampf ((float) (gains[(size_t) i] + sol[(size_t) i]), -48.0f, 24.0f); pk[i].peak (fs, centre (i), Q, gains[(size_t) i]); }
         }
-        for (int i = nb; i < N; ++i) pk[i] = Biquad();
+        for (int i = nb; i < N; ++i) pk[i] = BiquadD();
         // stability: nowhere may one pass lose less than the least-damped band wants (and never less than 0.01 dB)
         float worst = -1e9f;
         for (int k = 0; k <= 160; ++k) {
@@ -302,11 +314,15 @@ struct RandLfo {
 
 // ---------------------------------------------------------------- plate (Dattorro tank, true-stereo input)
 // Diffusion sets the input/tank allpass gains: higher = smoother, denser onset (less grain), lower = more open and "zingy".
+inline float& TankAlgo_wanderMsRef() { static float v = 1.5f; return v; }
+inline float TankAlgo_wanderMs() { return TankAlgo_wanderMsRef(); }
 struct PlateAlgo {
     static constexpr int kEarly = 6;
     Line oa[2], ob[2], d1, d2, d3, d4, e1, e2, e3, e4, apL1, dL1, apL2, apL3, dL2, apR1, dR1, apR2, apR3, dR2, ea[kEarly], eb[kEarly];
-    BandDecay bdL, bdR; RandLfo lfo[2];
+    BandDecay bdL, bdR; RandLfo lfo[2], wl[4];
     float fs = 48000, s = 1, lpL = 0, lpR = 0, tankL = 0, tankR = 0, eScale = 1;
+    float wanderS = 0.0f;            // long decays: the four long delays wander slowly so the plate's resonances smear (0 when short)
+    inline float wr (const Line& l, float n, int k) { return wanderS > 0.0f ? l.readC (n * s + wanderS * (1.0f + wl[k].next())) : l.read (std::round (n * s)); }
     static constexpr float kEaMs[kEarly] = { 0.53f, 0.93f, 1.71f, 3.07f, 5.3f, 8.9f }, kEbMs[kEarly] = { 0.61f, 1.13f, 1.97f, 2.71f, 6.1f, 10.3f };
     static constexpr float kMaxEScale = 55.0f / 15.0f;
     static constexpr float kOutMs[4] = { 1.37f, 3.11f, 1.63f, 2.79f };
@@ -315,8 +331,10 @@ struct PlateAlgo {
         auto sz = [sm] (float n) { return (int) std::ceil (n * sm) + 64; };
         d1.init (sz (142)); d2.init (sz (107)); d3.init (sz (379)); d4.init (sz (277));
         e1.init (sz (153)); e2.init (sz (115)); e3.init (sz (406)); e4.init (sz (297));
-        apL1.init (sz (704)); dL1.init (sz (4453)); apL2.init (sz (1800)); apL3.init (sz (419)); dL2.init (sz (3720));
-        apR1.init (sz (940)); dR1.init (sz (4217)); apR2.init (sz (2656)); apR3.init (sz (557)); dR2.init (sz (3163));
+        const int wx = (int) (0.008f * maxFs);
+        apL1.init (sz (704)); dL1.init (sz (4453) + wx); apL2.init (sz (1800)); apL3.init (sz (419)); dL2.init (sz (3720) + wx);
+        apR1.init (sz (940)); dR1.init (sz (4217) + wx); apR2.init (sz (2656)); apR3.init (sz (557)); dR2.init (sz (3163) + wx);
+        for (int k = 0; k < 4; ++k) wl[k].init ((uint32_t) (91 + k * 13));
         for (int i = 0; i < kEarly; ++i) { ea[i].init ((int) (kEaMs[i] * kMaxEScale * 0.001f * maxFs) + 16); eb[i].init ((int) (kEbMs[i] * kMaxEScale * 0.001f * maxFs) + 16); }
         lfo[0].init (11); lfo[1].init (23);
         for (int i = 0; i < 2; ++i) { oa[i].init ((int) (kOutMs[i] * 0.001f * maxFs * kMaxSize) + 16); ob[i].init ((int) (kOutMs[i + 2] * 0.001f * maxFs * kMaxSize) + 16); }
@@ -326,8 +344,9 @@ struct PlateAlgo {
         auto sz = [sm] (float n) { return (int) std::ceil (n * sm) + 64; };
         d1.clearRecent (sz (142)); d2.clearRecent (sz (107)); d3.clearRecent (sz (379)); d4.clearRecent (sz (277));
         e1.clearRecent (sz (153)); e2.clearRecent (sz (115)); e3.clearRecent (sz (406)); e4.clearRecent (sz (297));
-        apL1.clearRecent (sz (704)); dL1.clearRecent (sz (4453)); apL2.clearRecent (sz (1800)); apL3.clearRecent (sz (419)); dL2.clearRecent (sz (3720));
-        apR1.clearRecent (sz (940)); dR1.clearRecent (sz (4217)); apR2.clearRecent (sz (2656)); apR3.clearRecent (sz (557)); dR2.clearRecent (sz (3163));
+        const int wx = (int) (0.008f * fs);
+        apL1.clearRecent (sz (704)); dL1.clearRecent (sz (4453) + wx); apL2.clearRecent (sz (1800)); apL3.clearRecent (sz (419)); dL2.clearRecent (sz (3720) + wx);
+        apR1.clearRecent (sz (940)); dR1.clearRecent (sz (4217) + wx); apR2.clearRecent (sz (2656)); apR3.clearRecent (sz (557)); dR2.clearRecent (sz (3163) + wx);
         for (int i = 0; i < kEarly; ++i) { ea[i].clearRecent ((int) (kEaMs[i] * kMaxEScale * 0.001f * fs) + 16); eb[i].clearRecent ((int) (kEbMs[i] * kMaxEScale * 0.001f * fs) + 16); }
         for (int i = 0; i < 2; ++i) { oa[i].clearRecent ((int) (kOutMs[i] * 0.001f * fs * kMaxSize) + 16); ob[i].clearRecent ((int) (kOutMs[i + 2] * 0.001f * fs * kMaxSize) + 16); }
         bdL.reset(); bdR.reset();
@@ -353,6 +372,9 @@ struct PlateAlgo {
         if (curveT) { bdL.setCurve (fs, halfLoop, curveT); bdR.setCurve (fs, halfLoop, curveT); }
         else { bdL.curveOff(); bdR.curveOff(); }
         lfo[0].setRate (fs, 0.83f); lfo[1].setRate (fs, 1.07f);
+        for (int k = 0; k < 4; ++k) wl[k].setRate (fs, 0.21f + 0.067f * (float) k);
+        float rtLong = std::max (rtB[0], std::max (rtB[1], rtB[2])); if (curveT) for (int b = 0; b < DecayEq::N; ++b) rtLong = std::max (rtLong, curveT[b]);
+        wanderS = clampf ((rtLong - 1.5f) / 8.0f, 0.0f, 1.0f) * TankAlgo_wanderMs() * 0.001f * fs;
     }
     inline void process (float inL, float inR, float dampA, float mod, float early, float& oL, float& oR) {
         const float exc = mod * 14.0f * s;
@@ -363,13 +385,13 @@ struct PlateAlgo {
         xR = allpass (e3, R (406), gIn2, xR); xR = allpass (e4, R (297), gIn2, xR);
         const float m1 = lfo[0].next(), m2 = lfo[1].next();
         float a = allpassM (apL1, 672 * s + exc * (1 + m1), -gT1, xR + tankR, cubicW);
-        float t1 = dL1.read (R (4453)); dL1.push (a); lpL += dampA * (t1 - lpL);
+        float t1 = wr (dL1, 4453, 0); dL1.push (a); lpL += dampA * (t1 - lpL);
         float b = allpass (apL2, R (1800), gT2, bdL.process (lpL)); b = allpass (apL3, R (419), gT3, b);
-        float t2 = dL2.read (R (3720)); dL2.push (b);
+        float t2 = wr (dL2, 3720, 1); dL2.push (b);
         float c = allpassM (apR1, 908 * s + exc * (1 + m2), -gT1, xL + tankL, cubicW);
-        float t3 = dR1.read (R (4217)); dR1.push (c); lpR += dampA * (t3 - lpR);
+        float t3 = wr (dR1, 4217, 2); dR1.push (c); lpR += dampA * (t3 - lpR);
         float e = allpass (apR2, R (2656), gT2, bdR.process (lpR)); e = allpass (apR3, R (557), gT3, e);
-        float t4 = dR2.read (R (3163)); dR2.push (e);
+        float t4 = wr (dR2, 3163, 3); dR2.push (e);
         tankL = t2; tankR = t4;
         auto T = [this] (const Line& l, float n) { return l.read (std::round (n * s)); };
         oL = 0.6f * (T (dR1, 266) + T (dR1, 2974) - T (apR2, 1913) + T (dR2, 1996) - T (dL1, 1990) - T (apL2, 187) - T (dL2, 1066));
@@ -421,8 +443,11 @@ struct TankAlgo {
     static constexpr float kD2[S]  = { 29.7f, 33.1f, 27.3f, 35.9f };
     static constexpr float kDif[4] = { 1.31f, 2.03f, 3.71f, 5.63f };
     Line ap1[S], d1[S], ap2[S], ap3[S], d2[S], difL[4], difR[4], erL, erR, lateL, lateR;
-    OnePole damp[S]; BandDecay band[S]; RandLfo lfo[S];
+    OnePole damp[S]; BandDecay band[S]; RandLfo lfo[S], lfo2[S];
     float fb[S] = {};
+    // long tails: the second delay of each section wanders slowly and randomly, more the longer the decay, so the
+    // loop's resonances keep moving and smear into a smooth tail instead of ringing (0 for short decays)
+    float wanderS = 0.0f;
     static constexpr int kDense = 128;
     float jit[kDense] = {}, sgnL[kDense] = {}, sgnR[kDense] = {}, erNormDense = 1;
     std::vector<float> tapMs, tapGL, tapGR;
@@ -434,9 +459,9 @@ struct TankAlgo {
         const TankConfig& c = tankConfig (a);
         const float km = maxFs * 0.001f * c.scale * kMaxSize, modS = (c.modMs * 2 + 1) * maxFs * 0.001f;
         for (int i = 0; i < S; ++i) {
-            ap1[i].init ((int) (kAp1[i] * km + modS) + 16); d1[i].init ((int) (kD1[i] * km) + 16);
-            ap2[i].init ((int) (kAp2[i] * km) + 16); ap3[i].init ((int) (kAp3[i] * km) + 16); d2[i].init ((int) (kD2[i] * km) + 16);
-            lfo[i].init ((uint32_t) (a * 17 + i * 5 + 3));
+            ap1[i].init ((int) (kAp1[i] * km + modS) + 16); d1[i].init ((int) (kD1[i] * km + 0.008f * maxFs) + 16);
+            ap2[i].init ((int) (kAp2[i] * km) + 16); ap3[i].init ((int) (kAp3[i] * km) + 16); d2[i].init ((int) (kD2[i] * km + 0.008f * maxFs) + 16);
+            lfo[i].init ((uint32_t) (a * 17 + i * 5 + 3)); lfo2[i].init ((uint32_t) (a * 29 + i * 11 + 7));
         }
         for (int i = 0; i < 4; ++i) { difL[i].init ((int) (kDif[i] * 1.1f * km) + 16); difR[i].init ((int) (kDif[i] * 1.1f * km) + 16); }
         tapMs.clear(); tapGL.clear(); tapGR.clear(); tapS.reserve (kDense);
@@ -462,8 +487,8 @@ struct TankAlgo {
         const TankConfig& c = tankConfig (algo);
         const float km = fs * 0.001f * c.scale * kMaxSize, modS = (c.modMs * 2 + 1) * fs * 0.001f;
         for (int i = 0; i < S; ++i) {
-            ap1[i].clearRecent ((int) (kAp1[i] * km + modS) + 16); d1[i].clearRecent ((int) (kD1[i] * km) + 16);
-            ap2[i].clearRecent ((int) (kAp2[i] * km) + 16); ap3[i].clearRecent ((int) (kAp3[i] * km) + 16); d2[i].clearRecent ((int) (kD2[i] * km) + 16);
+            ap1[i].clearRecent ((int) (kAp1[i] * km + modS) + 16); d1[i].clearRecent ((int) (kD1[i] * km + 0.008f * fs) + 16);
+            ap2[i].clearRecent ((int) (kAp2[i] * km) + 16); ap3[i].clearRecent ((int) (kAp3[i] * km) + 16); d2[i].clearRecent ((int) (kD2[i] * km + 0.008f * fs) + 16);
             damp[i].reset(); band[i].reset(); fb[i] = 0;
         }
         for (int i = 0; i < 4; ++i) { difL[i].clearRecent ((int) (kDif[i] * 1.1f * km) + 16); difR[i].clearRecent ((int) (kDif[i] * 1.1f * km) + 16); }
@@ -498,7 +523,10 @@ struct TankAlgo {
             if (curveT) { float T[DecayEq::N]; for (int b = 0; b < DecayEq::N; ++b) T[b] = curveT[b] * c.rtMul; band[i].setCurve (fs, secLen, T); dampOn = false; }
             else band[i].curveOff();
             lfo[i].setRate (fs, (spinHz > 0.0f ? spinHz : c.modHz) * (0.8f + 0.13f * (float) i));
+            lfo2[i].setRate (fs, 0.23f + 0.071f * (float) i);
         }
+        { float rtLong = rtA; if (curveT) for (int b = 0; b < DecayEq::N; ++b) rtLong = std::max (rtLong, curveT[b] * c.rtMul);
+          wanderS = clampf ((rtLong - 1.5f) / 8.0f, 0.0f, 1.0f) * TankAlgo_wanderMs() * 0.001f * fs * std::sqrt (std::max (0.5f, size)); }
         lateS = std::max (1.0f, c.lateOnsetMs * size * fs * 0.001f);
         if (c.denseER) {           // reflections every ~1.8 ms for 'build' ms: quick rise, gentle sag, short fade
             const float L = clampf (buildMs, 3.0f, 230.0f), att = std::min (12.0f, L * 0.3f), spacing = 1.8f * (0.8f + 0.2f * size);
@@ -579,12 +607,12 @@ struct TankAlgo {
             float x = fb[(i + S - 1) % S];
             if (i == 0) x += xL; else if (i == 2) x += xR;
             x = allpassM (ap1[i], lenA1[i] + md * (1.0f + lfo[i].next()) + 1.0f, gT, x, cubicW);
-            float y = d1[i].read (len1[i]); d1[i].push (x);
+            float y = wanderS > 0.0f ? d1[i].readC (len1[i] + wanderS * (1.0f - lfo2[(i + 2) % S].next())) : d1[i].read (len1[i]); d1[i].push (x);
             if (dampOn && (i & 1) == 0) y = damp[i].lp (y);
             y = band[i].process (y);
             y = allpass (ap2[i], lenA2[i], -gT * 0.85f, y);
             y = allpass (ap3[i], lenA3[i], gT * 0.7f, y);
-            o[i] = d2[i].read (len2[i]); d2[i].push (y);
+            o[i] = wanderS > 0.0f ? d2[i].readC (len2[i] + wanderS * (1.0f + lfo2[i].next())) : d2[i].read (len2[i]); d2[i].push (y);
         }
         for (int i = 0; i < S; ++i) fb[i] = o[i];
         auto T1 = [this] (int i, float f) { return d1[i].readI ((int) (len1[i] * f) + 1); };

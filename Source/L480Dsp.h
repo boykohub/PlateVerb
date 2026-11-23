@@ -1299,7 +1299,10 @@ struct Machine {
             else { fadeG = std::min (1.0f, fadeG + step); if (fadeG >= 1.0f) fadeState = 0; }
             L *= fadeG; R *= fadeG;
         }
+        // an engine without its own Wet/Dry Mix (the Classic engine): the always-visible REVERB MIX blends here
+        if (extMix >= 0.0f) { extS += (extMix - extS) * 0.002f; L = iL + (L - iL) * extS; R = iR + (R - iR) * extS; }
     }
+    float extMix = -1.0f, extS = 1.0f;
 };
 
 } // namespace l480

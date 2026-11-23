@@ -106,6 +106,7 @@ public:
         // quality: oversampling of the ANALOG / EQ / compressor chain, and 64-bit EQ
         l.add (cp ("os", "Oversampling", StringArray { "Off", "2x", "4x", "6x", "8x" }, 0));
         l.add (cp ("prec", "Precision", StringArray { "32-bit", "64-bit" }, 0));
+        l.add (fp ("revMix", "Reverb Mix", 0.0f, 1.0f, 1.0f, false, "%"));
         l.add (cp ("conv", "Converter", StringArray { "24-bit", "12-bit", "15-bit ranging", "16-bit ranging" }, 0));
         // drawer: EQ
         l.add (bp ("eqOn", "EQ On", false));
@@ -501,6 +502,12 @@ public:
         p.eqModel = jlimit (0, cs::kNumEqModels - 1, (int) apvts.getRawParameterValue ("eqModel")->load()); p.eqDrive = apvts.getRawParameterValue ("eqDrive")->load();
         p.loopAmt = apvts.getRawParameterValue ("loopAmt")->load();
         p.addOn = jlimit (0, 3, (int) apvts.getRawParameterValue ("addOn")->load());
+        for (int m = 0; m < 2; ++m)
+        {
+            const auto& ad = l480::algoDef (l480::programs()[(size_t) p.prog[m]].algo); bool own = false;
+            for (int i = 0; i < l480::kMaxParams; ++i) if (ad.p[i].lab != nullptr && std::strcmp (ad.p[i].lab, "MIX") == 0) own = true;
+            p.extMix[m] = own ? -1.0f : apvts.getRawParameterValue ("revMix")->load();
+        }
         p.gtOn = apvts.getRawParameterValue ("gtOn")->load() > 0.5f; p.gtKeyIn = apvts.getRawParameterValue ("gtKey")->load() > 0.5f;
         p.gtThr = apvts.getRawParameterValue ("gtThr")->load(); p.gtRange = apvts.getRawParameterValue ("gtRange")->load(); p.gtRelMs = apvts.getRawParameterValue ("gtRel")->load();
         p.stripOrder = (int) apvts.getRawParameterValue ("stripOrder")->load();

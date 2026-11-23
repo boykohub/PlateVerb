@@ -72,6 +72,7 @@ struct EngineParams {
     int tapN[2] = { 0, 0 }; float tapMs[2][64] = {}, tapDb[2][64] = {};                         // your edits of the algorithm's own taps
     bool mute = false;
     float loopAmt = 1.0f;                    // the 480L's long recirculation (stone depth): 0 off, 1 as measured, 2 double
+    float extMix[2] = { -1.0f, -1.0f };      // REVERB MIX for an engine without its own Wet/Dry Mix (-1 = it has one)
     int addOn = 0;                           // machine B as an add-on to A: 0 off, 1 beside, 2 before (B feeds A), 3 after (A feeds B)
     // channel strip: a gate first, then EQ and compressor in either order
     bool gtOn = false, gtKeyIn = false; float gtThr = -40, gtRange = 60, gtRelMs = 150; int stripOrder = 0;   // 0 EQ > comp, 1 comp > EQ
@@ -146,7 +147,7 @@ public:
     void process (float* L, float* R, int n, const EngineParams& p) {
         setOversampling (p.oversampling);
         for (auto& m : mach) m.erAtk = p.erAtkMs;
-        for (int m = 0; m < 2; ++m) { const auto& pr = programs()[(size_t) p.prog[m]]; mach[m].update (pr.algo, pr.bank, p.val[m], pr.trimDb, p.curveOn[m] ? p.curveMul[m] : nullptr, pr.shape);
+        for (int m = 0; m < 2; ++m) { const auto& pr = programs()[(size_t) p.prog[m]]; mach[m].update (pr.algo, pr.bank, p.val[m], pr.trimDb, p.curveOn[m] ? p.curveMul[m] : nullptr, pr.shape); mach[m].extMix = p.extMix[m];
                                       mach[m].refl.set (p.reflN[m], p.reflMs[m], p.reflDb[m], p.reflPan[m]); mach[m].setTapEdits (p.tapN[m], p.tapMs[m], p.tapDb[m]);
                                       if (mach[m].fadeState != 1) mach[m].loop.set (loopFor (p.prog[m]), p.loopAmt); }
         if (p.anModel != anM || p.anColour != anC || p.anDrive != anD || p.anOut != anO)
