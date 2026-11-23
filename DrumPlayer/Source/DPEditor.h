@@ -1610,7 +1610,7 @@ private:
                 while (k < 128 && s.settings.isStop (k)) ++k;           // never onto a STOP key
                 if (k > 127) break;
                 s.keys[(size_t) k] = p;
-                if (isBlackKey (k)) s.keys[(size_t) k].type = PatternType::Fill;   // imported onto a black key: a fill (change it by hand if not)
+                s.keys[(size_t) k].type = isBlackKey (k) ? PatternType::Fill : PatternType::Groove;   // dropped on a black key: a fill, on a white key: a groove (change it by hand afterwards)
                 s.ensureLanesForPattern (p);
                 if (first < 0) first = k;
                 last = k;
