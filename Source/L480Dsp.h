@@ -7,6 +7,11 @@
 #include <atomic>
 
 namespace l480 {
+
+// Resolution of the modulated delays in every reverb: 1 = 4-point (Hermite) interpolation instead of linear.
+// Linear interpolation of a moving delay dulls and roughens the highs a little each time round the loop -
+// heard as grain or a metallic edge in long tails. The 480L's own delays move smoothly.
+constexpr float kSmooth = 1.0f;
 using pv::Line; using pv::OnePole; using pv::Biquad; using pv::RandLfo; using pv::clampf; using pv::dbToGain; using pv::kPi;
 
 inline float lvGain (float db) { return db <= -47.9f ? 0.0f : dbToGain (db); }       // LARC level: bottom = Off
@@ -50,7 +55,7 @@ struct AlgoBase {
     virtual void key (int slot) { (void) slot; }                             // a slider-display key that is a trigger (PLAY, REC ...)
     virtual std::string status() const { return {}; }                        // shown in the LARC's main display
     // early-reflection taps you edit on the screen: time offset (ms) and level change (dB) per tap; -80 dB = off
-    static constexpr int kMaxTaps = 32;
+    static constexpr int kMaxTaps = 64;
     float tapEdMs[kMaxTaps] = {}, tapEdDb[kMaxTaps] = {}; int tapEdVer = 0;
     // the algorithm's own early taps before your edits: time from the input (ms) and level re the input (dB)
     virtual int baseTaps (float* ms, float* db, int max) const { (void) ms; (void) db; (void) max; return 0; }
@@ -64,9 +69,16 @@ struct Preechoes {      // up to six diffused echo clusters taken from the input
     Line inL, inR, dfL[2], dfR[2]; float g[6] = {}, d[6] = {}; int n = 0; float dif = 0.5f; OnePole lp[2];
     void prepare (float fs) { inL.init ((int) (0.9f * fs)); inR.init ((int) (0.9f * fs)); for (int i = 0; i < 2; ++i) { dfL[i].init ((int) (0.01f * fs)); dfR[i].init ((int) (0.01f * fs)); } }
     void reset() { inL.clear(); inR.clear(); for (int i = 0; i < 2; ++i) { dfL[i].clear(); dfR[i].clear(); } }
-    void set (float fs, const float* lv, const float* dl, int num, float diffusion) {
+    float bG[6] = {}, bMs[6] = {};
+    void set (float fs, const float* lv, const float* dl, int num, float diffusion, const float* edMs = nullptr, const float* edDb = nullptr) {
         n = num; dif = clampf (diffusion, 0, 1);
-        for (int i = 0; i < n; ++i) { g[i] = lvGain (lv[i]); d[i] = msToS (dl[i], fs); }
+        for (int i = 0; i < n; ++i)
+        {
+            bG[i] = lvGain (lv[i]); bMs[i] = dl[i];
+            const float em = edMs ? edMs[i] : 0.0f, ed = edDb ? edDb[i] : 0.0f;
+            g[i] = bG[i] * (ed <= -79.0f ? 0.0f : std::pow (10.0f, ed / 20.0f));
+            d[i] = msToS (clampf (dl[i] + em, 0.1f, 880.0f), fs);
+        }
     }
     // routing: 1 L>L, 2 R>R, 3 R>L, 4 L>R, 5 L>L, 6 R>R
     inline void process (float xL, float xR, float fs, float& oL, float& oR) {
@@ -177,7 +189,18 @@ struct EnvBuilder {
 
 struct ReverbAlgo : AlgoBase {       // aRev6 / aRev2 / aRHall
     pv::TankAlgo tank; pv::PlateAlgo plate; Preechoes pe; Line pdL, pdR; OnePole hfc[2]; Biquad shelf[2]; EnvBuilder env;
-    int baseTaps (float* ms, float* db, int max) const override { return env.baseTaps (ms, db, max, pdS / fs * 1000.0f); }
+    // every reflection you can edit: the build-up taps (0-19), the preechoes (20-25), the hall's own early taps (26-)
+    static constexpr int kPe = 20, kTk = 26;
+    int baseTaps (float* ms, float* db, int max) const override
+    {
+        if (max < kTk) return 0;
+        for (int k = 0; k < kTk; ++k) { ms[k] = 0.0f; db[k] = -200.0f; }
+        env.baseTaps (ms, db, EnvBuilder::K, pdS / fs * 1000.0f);
+        for (int i = 0; i < pe.n; ++i) if (pe.bG[i] > 0.0f) { ms[kPe + i] = pe.bMs[i]; db[kPe + i] = 20.0f * std::log10 (pe.bG[i]); }
+        int n = kTk;
+        if (! usePlate) n += tank.baseTaps (ms + kTk, db + kTk, max - kTk, pdS / fs * 1000.0f, early * wetG);
+        return n;
+    }
     bool usePlate = false, random = false, shelfOn = false; float pdS = 1, mixD = 0, mixW = 1, mod = 0.5f, early = 0.7f, dampA = 1, wetG = 1;
     int algo;
     explicit ReverbAlgo (int a) : algo (a) {}
@@ -208,10 +231,11 @@ struct ReverbAlgo : AlgoBase {       // aRev6 / aRev2 / aRHall
         if (usePlate) {
             dampA = curveMul ? 1.0f : 1.0f - std::exp (-2.0f * kPi * std::min (dampHz, 0.45f * fs) / fs);
             plate.curveT = curveFor (std::min (rt, 70.0f));
-            plate.update (rt, size, bas, 1.0f, build, dif * dens, pv::plateEffect (0, 0, 0.0f), 0.0f);
+            plate.update (rt, size, bas, 1.0f, build, dif * dens, pv::plateEffect (0, 0, 0.0f), kSmooth);
         } else {
             tank.curveT = curveFor (std::min (rt, 70.0f)); tank.erAttackMs = erAttackMs;
-            tank.update (rt, dampHz, size, bas, 1.0f, build, dif * dens, pv::surfaceEffect (0, 0, 0.0f, 3.0f * size), 0.0f, spin, xov);
+            tank.edMs = tapEdMs + kTk; tank.edDb = tapEdDb + kTk; tank.edMax = kMaxTaps - kTk;
+            tank.update (rt, dampHz, size, bas, 1.0f, build, dif * dens, pv::surfaceEffect (0, 0, 0.0f, 3.0f * size), kSmooth, spin, xov);
         }
         for (auto& h : hfc) h.setCut (fs, hfcHz >= 21000.0f ? 0.45f * fs : hfcHz);
         sinCos (v[11], mixD, mixW);
@@ -219,7 +243,7 @@ struct ReverbAlgo : AlgoBase {       // aRev6 / aRev2 / aRHall
         if (algo == aRev6) { npe = 6; for (int i = 0; i < 6; ++i) { lv[i] = v[12 + i]; dl[i] = v[18 + i]; } }
         else if (algo == aRev2) { npe = 2; for (int i = 0; i < 2; ++i) { lv[i] = v[12 + i]; dl[i] = v[18 + i]; } }
         else { npe = 4; for (int i = 0; i < 4; ++i) { lv[i] = v[12 + i]; dl[i] = v[18 + i]; } }
-        pe.set (fs, lv, dl, npe, dif);
+        pe.set (fs, lv, dl, npe, dif, tapEdMs + kPe, tapEdDb + kPe);
         wetG = dbToGain ((usePlate ? 4.0f : tankTrimDb (std::min (rt, 30.0f))));
         shelfOn = false;
         if (random) {
@@ -263,8 +287,9 @@ struct AmbienceAlgo : AlgoBase {
         gDif = 0.35f + 0.4f * v[4] / 99.0f;
         late = v[1] / 100.0f;
         tank.curveT = curveFor (rt); tank.erAttackMs = erAttackMs;
+        tank.edMs = tapEdMs; tank.edDb = tapEdDb; tank.edMax = kMaxTaps;
         tank.update (rt, 9000.0f, clampf (0.5f + siz / 40.0f * 0.8f, 0.5f, 1.3f), 1.0f, 1.0f, clampf (siz * 2.0f, 3.0f, 80.0f), v[4] / 99.0f,
-                     pv::surfaceEffect (0, 0, 0.0f, 2.0f), 0.0f, std::max (0.05f, v[6] / 50.0f), 500.0f);
+                     pv::surfaceEffect (0, 0, 0.0f, 2.0f), kSmooth, std::max (0.05f, v[6] / 50.0f), 500.0f);
         for (auto& r : rol) r.setCut (fs, v[3] >= 21000.0f ? 0.45f * fs : v[3]);
         const float rate = std::max (0.05f, v[6] / 40.0f);
         for (auto& c : lfo) for (int i = 0; i < kN; ++i) c[i].setRate (fs, rate * (0.7f + 0.1f * (float) i));
@@ -273,6 +298,7 @@ struct AmbienceAlgo : AlgoBase {
         sinCos (v[5], mixD, mixW);
         trim = dbToGain (tankTrimDb (rt) - 2.0f);
     }
+    int baseTaps (float* ms, float* db, int max) const override { return tank.baseTaps (ms, db, max, pdS / fs * 1000.0f, 0.4f * late * trim); }
     void process (float& L, float& R, const Ctx&) override {
         inD[0].push (L); inD[1].push (R);
         const float dL = inD[0].read (indS), dR = inD[1].read (indS);
@@ -302,12 +328,14 @@ struct ClassicAlgo : AlgoBase {
         const float size = clampf (0.6f + (v[8] - 8.0f) / 32.0f * 0.8f, 0.5f, 1.4f);
         const float lowMul = clampf (bas / std::max (0.05f, mid), 0.25f, 4.0f);
         plate.curveT = tank.curveT = curveFor (mid); tank.erAttackMs = erAttackMs;
-        if (isPlate) { dampA = curveMul ? 1.0f : 1.0f - std::exp (-2.0f * kPi * std::min (tdc, 0.45f * fs) / fs); plate.update (mid, size, lowMul, 1.0f, 8.0f, dif, pv::plateEffect (0, 0, 0.0f), 0.0f); }
-        else tank.update (mid, tdc, size, lowMul, 1.0f, 15.0f + 40.0f * v[4] / 99.0f, dif, pv::surfaceEffect (0, 0, 0.0f, 3.0f * size), 0.0f, -1.0f, xov);
+        if (isPlate) { dampA = curveMul ? 1.0f : 1.0f - std::exp (-2.0f * kPi * std::min (tdc, 0.45f * fs) / fs); plate.update (mid, size, lowMul, 1.0f, 8.0f, dif, pv::plateEffect (0, 0, 0.0f), kSmooth); }
+        else { tank.edMs = tapEdMs; tank.edDb = tapEdDb; tank.edMax = kMaxTaps;
+               tank.update (mid, tdc, size, lowMul, 1.0f, 15.0f + 40.0f * v[4] / 99.0f, dif, pv::surfaceEffect (0, 0, 0.0f, 3.0f * size), kSmooth, -1.0f, xov); }
         for (auto& h : hfc) h.setCut (fs, v[9] >= 21000.0f ? 0.45f * fs : v[9]);
         sinCos (v[11], mixD, mixW);
         wetG = dbToGain (isPlate ? 4.5f : tankTrimDb (mid) - 2.0f);
     }
+    int baseTaps (float* ms, float* db, int max) const override { return isPlate ? 0 : tank.baseTaps (ms, db, max, pdS / fs * 1000.0f, early * wetG); }
     void process (float& L, float& R, const Ctx&) override {
         const float pl = pdL.read (pdS), pr = pdR.read (pdS); pdL.push (L); pdR.push (R);
         float oL, oR;
@@ -1018,7 +1046,7 @@ struct HDAlgo : AlgoBase {
         const float size = clampf (0.5f + siz / 31.0f * 0.45f, 0.5f, 1.4f);
         tank.curveT = curveFor (rt); tank.erAttackMs = erAttackMs;
         tank.update (rt, v[8] >= 21000.0f ? 20000.0f : v[8], size, v[6], 1.0f, clampf (3.0f + spr / 255.0f * 200.0f, 3, 230), v[14] / 99.0f,
-                     pv::surfaceEffect (0, 0, 0.0f, 3.0f * size), 0.0f, std::max (0.05f, v[9] / 50.0f), v[7]);
+                     pv::surfaceEffect (0, 0, 0.0f, 3.0f * size), kSmooth, std::max (0.05f, v[9] / 50.0f), v[7]);
         rpdS = msToS (v[11], fs);
         lbdS = msToS (v[12], fs);
         for (auto& f : lbf) f.setCut (fs, v[13]);
@@ -1084,13 +1112,15 @@ struct LegacyAlgo : AlgoBase {
         if (isPlate) {
             dampA = curveMul ? 1.0f : 1.0f - std::exp (-2.0f * kPi * std::min (dampHz, 0.45f * fs) / fs);
             plate.curveT = curveFor (sp.decaySec);
-            plate.update (sp.decaySec, sp.size, sp.lowMult, sp.highMult, sp.buildMs, sp.diffusion, pv::plateEffect (0, 0, 0.0f), 0.0f);
+            plate.update (sp.decaySec, sp.size, sp.lowMult, sp.highMult, sp.buildMs, sp.diffusion, pv::plateEffect (0, 0, 0.0f), kSmooth);
         } else {
             tank.curveT = curveFor (sp.decaySec); tank.erAttackMs = erAttackMs;
+            tank.edMs = tapEdMs; tank.edDb = tapEdDb; tank.edMax = kMaxTaps;
             tank.update (sp.decaySec, dampHz, sp.size, sp.lowMult, sp.highMult, sp.buildMs, sp.diffusion,
-                         pv::surfaceEffect (0, 0, 0.0f, 3.0f * sp.size), 0.0f, std::max (0.05f, sp.spinHz), sp.xoverHz);
+                         pv::surfaceEffect (0, 0, 0.0f, 3.0f * sp.size), kSmooth, std::max (0.05f, sp.spinHz), sp.xoverHz);
         }
     }
+    int baseTaps (float* ms, float* db, int max) const override { return isPlate ? 0 : tank.baseTaps (ms, db, max, sp.predelayMs, sp.early); }
     void process (float& L, float& R, const Ctx&) override {
         float pl, pr; ch.input (L, R, preS, inW, true, pl, pr);
         if (sp.converter != pv::Conv24) { pl = pv::convert (pl, sp.converter); pr = pv::convert (pr, sp.converter); }
@@ -1169,14 +1199,17 @@ struct UserRefl {
 struct LoopSpec { int n = 0; float ms[3] = {}, g[3] = {}; };
 struct LoopStage {
     Line l, r; int n = 0, d[3] = {}; float g[3] = {}, norm = 1, fs = 48000, amt = -1; const LoopSpec* cur = nullptr;
-    void prepare (float sr) { fs = sr; l.init ((int) (0.4f * sr) + 8); r.init ((int) (0.4f * sr) + 8); l.clear(); r.clear(); cur = nullptr; amt = -1; n = 0; }
+    // each return drifts very slightly (a few hundredths of a millisecond, below a second per cycle), read with
+    // 4-point interpolation: the returns stay where they are measured but never ring as a fixed comb
+    float ph[3] = { 0.0f, 0.33f, 0.71f }, inc[3] = {}, dep = 0;
+    void prepare (float sr) { fs = sr; const float hz[3] = { 0.31f, 0.47f, 0.59f }; for (int k = 0; k < 3; ++k) inc[k] = hz[k] / sr; dep = 0.00006f * sr; l.init ((int) (0.4f * sr) + 8); r.init ((int) (0.4f * sr) + 8); l.clear(); r.clear(); cur = nullptr; amt = -1; n = 0; }
     void reset() { l.clear(); r.clear(); }
     void set (const LoopSpec* s, float amount) {
         if (s == cur && amount == amt) return;
         if (s != cur) reset();
         cur = s; amt = amount; n = (s && amount > 0.001f) ? s->n : 0;
         float sum = 0, sq = 0;
-        for (int k = 0; k < n; ++k) { d[k] = std::max (1, std::min ((int) (0.39f * fs), (int) std::lround (s->ms[k] * 0.001f * fs))); g[k] = s->g[k] * amount; sum += std::fabs (g[k]); }
+        for (int k = 0; k < n; ++k) { d[k] = std::max (4, std::min ((int) (0.39f * fs), (int) std::lround (s->ms[k] * 0.001f * fs))); g[k] = s->g[k] * amount; sum += std::fabs (g[k]); }
         if (sum > 0.85f) for (int k = 0; k < n; ++k) g[k] *= 0.85f / sum;          // always stable
         for (int k = 0; k < n; ++k) sq += g[k] * g[k];
         norm = std::sqrt (std::max (0.05f, 1.0f - sq));
@@ -1185,7 +1218,9 @@ struct LoopStage {
         if (n == 0) return;
         float yL = L, yR = R;
         for (int k = 0; k < n; ++k) {
-            const float a = l.readI (d[k]), b = r.readI (d[k]);
+            ph[k] += inc[k]; if (ph[k] >= 1.0f) ph[k] -= 1.0f;
+            const float dd = (float) d[k] + dep * std::sin (6.2831853f * ph[k]);
+            const float a = l.readC (dd), b = r.readC (dd);
             if (k & 1) { yL += g[k] * b; yR += g[k] * a; } else { yL += g[k] * a; yR += g[k] * b; }
         }
         l.push (yL); r.push (yR);

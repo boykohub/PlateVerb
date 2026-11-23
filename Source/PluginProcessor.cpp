@@ -106,6 +106,7 @@ public:
         // quality: oversampling of the ANALOG / EQ / compressor chain, and 64-bit EQ
         l.add (cp ("os", "Oversampling", StringArray { "Off", "2x", "4x", "6x", "8x" }, 0));
         l.add (cp ("prec", "Precision", StringArray { "32-bit", "64-bit" }, 0));
+        l.add (cp ("conv", "Converter", StringArray { "24-bit", "12-bit", "15-bit ranging", "16-bit ranging" }, 0));
         // drawer: EQ
         l.add (bp ("eqOn", "EQ On", false));
         { StringArray m; for (int i = 0; i < cs::kNumEqModels; ++i) m.add (cs::eqModelName (i)); l.add (cp ("eqModel", "EQ Model", m, 1)); }
@@ -122,6 +123,12 @@ public:
             l.add (fp ("eqG" + String (b), String ("EQ ") + bn[b] + " Gain", -15.0f, 15.0f, 0.0f, false, "dB", 1));
         }
         // drawer: compressor (VCA / FET / Opto; COLOR adds what that type's hardware adds)
+        l.add (bp ("gtOn", "Gate On", false));
+        l.add (bp ("gtKey", "Gate Key Input", false));
+        l.add (fp ("gtThr", "Gate Threshold", -80.0f, 0.0f, -40.0f, false, "dB", 1));
+        l.add (fp ("gtRange", "Gate Range", 0.0f, 80.0f, 60.0f, false, "dB", 0));
+        l.add (fp ("gtRel", "Gate Release", 5.0f, 2000.0f, 150.0f, true, "ms", 0));
+        l.add (cp ("stripOrder", "Strip Order", StringArray { "EQ > Comp", "Comp > EQ" }, 0));
         l.add (bp ("cpOn", "Comp On", false));
         l.add (cp ("cpType", "Comp Type", StringArray { "VCA", "FET", "Opto" }, 0));
         l.add (bp ("cpColor", "Comp Color", false));
@@ -278,27 +285,31 @@ public:
     }
     // ------------------------------------------------------------------ decay-time curve (RT graph), per machine
     // Points are (frequency Hz, multiplier of the program's main reverb time), joined in log-log, flat beyond the ends.
-    struct CurvePt { float f, m; };
+    // ---- your decay-time curve: points on top of the program's own decay shape. Each point is a bell in frequency
+    // (its width set by Q: high = sharp, low = broad) that lengthens or shortens the decay by m around f.
+    // A point with q = 0 is flat: it scales the whole curve (the big point on the graph).
+    struct CurvePt { float f, m, q = 1.0f; };
     std::vector<CurvePt> curvePts[2]; bool curveOn[2] = { false, false };
-    static float curveEval (const std::vector<CurvePt>& pts, float f)
+    static float bell (const CurvePt& p, float f)
     {
-        if (pts.empty()) return 1.0f;
-        if (f <= pts.front().f) return pts.front().m;
-        if (f >= pts.back().f) return pts.back().m;
-        for (size_t i = 1; i < pts.size(); ++i)
-            if (f <= pts[i].f)
-            {
-                const float t = std::log (f / pts[i - 1].f) / std::log (pts[i].f / pts[i - 1].f);
-                return std::exp (std::log (pts[i - 1].m) + t * (std::log (pts[i].m) - std::log (pts[i - 1].m)));
-            }
-        return pts.back().m;
+        if (p.q <= 0.001f) return 1.0f;
+        const float oct = std::log2 (f / p.f) * p.q;           // width: one octave at Q 1
+        return std::exp (-0.5f * oct * oct * 2.77f);           // half way down at half an octave each side at Q 1
     }
-    static String curveToString (const std::vector<CurvePt>& pts) { String s; for (auto& p : pts) s << String (p.f, 1) << ":" << String (p.m, 4) << ";"; return s; }
+    static float curveEval (const std::vector<CurvePt>& pts, float f)      // multiplier relative to the program's decay
+    {
+        float l = 0; for (auto& p : pts) l += std::log (jlimit (0.02f, 20.0f, p.m)) * bell (p, f);
+        return std::exp (l);
+    }
+    static String curveToString (const std::vector<CurvePt>& pts) { String s; for (auto& p : pts) s << String (p.f, 1) << ":" << String (p.m, 4) << ":" << String (p.q, 3) << ";"; return s; }
     static std::vector<CurvePt> curveFromString (const String& s)
     {
         std::vector<CurvePt> v; StringArray t; t.addTokens (s, ";", "");
-        for (auto& k : t) if (k.contains (":")) v.push_back ({ jlimit (20.0f, 20000.0f, k.upToFirstOccurrenceOf (":", false, false).getFloatValue()),
-                                                               jlimit (0.02f, 20.0f, k.fromFirstOccurrenceOf (":", false, false).getFloatValue()) });
+        for (auto& k : t)
+        {
+            StringArray a; a.addTokens (k, ":", "");
+            if (a.size() >= 2) v.push_back ({ jlimit (20.0f, 20000.0f, a[0].getFloatValue()), jlimit (0.02f, 20.0f, a[1].getFloatValue()), a.size() >= 3 ? jlimit (0.0f, 8.0f, a[2].getFloatValue()) : 1.0f });
+        }
         std::sort (v.begin(), v.end(), [] (const CurvePt& a, const CurvePt& b) { return a.f < b.f; });
         return v;
     }
@@ -311,6 +322,8 @@ public:
         apvts.state.setProperty (m == 0 ? "curveA" : "curveB", curveToString (pts), nullptr);
         apvts.state.setProperty (m == 0 ? "curveOnA" : "curveOnB", curveOn[m], nullptr);
     }
+    // the whole curve as a multiplier of the main decay time: the program's own shape times your points
+    float totalDecayMul (int m, float f) const { return programDecayMul (m, f) * (curveOn[m] ? curveEval (curvePts[m], f) : 1.0f); }
     bool hasDecayCurve (int m) const { return l480::algoHasDecayCurve (algoOf (m)); }
     // ---- your own early reflections (edited on the screen like velocities)
     struct Refl { float ms, db, pan; };
@@ -334,10 +347,10 @@ public:
     // ---- your edits of the algorithm's own early taps (time offset ms, level change dB; -80 = off), by tap number
     struct TapEd { float ms = 0, db = 0; };
     std::vector<TapEd> tapEd[2];
-    std::atomic<int> aTapN[2] {}; std::atomic<float> aTapMs[2][32] {}, aTapDb[2][32] {};
+    std::atomic<int> aTapN[2] {}; std::atomic<float> aTapMs[2][64] {}, aTapDb[2][64] {};
     void setTapEdits (int m, std::vector<TapEd> e)
     {
-        if (e.size() > 32) e.resize (32);
+        if (e.size() > 64) e.resize (64);
         tapEd[m] = e;
         for (size_t k = 0; k < e.size(); ++k) { aTapMs[m][k].store (e[k].ms); aTapDb[m][k].store (e[k].db); }
         aTapN[m].store ((int) e.size());
@@ -461,6 +474,7 @@ public:
         if (engine.latency() != getLatencySamples()) setLatencySamples (engine.latency());
         meterIn.store (jmax (meterIn.load() * 0.85f, engine.meterIn()));
         meterOut.store (jmax (meterOut.load() * 0.85f, engine.meterOut()));
+        gateKey.store (engine.gateKeyDb()); gateGain.store (engine.gateGainDb());
         compGr.store (prm.comp.on ? engine.compGr() : 0.0f);
     }
     void fillParams (l480::EngineParams& p)
@@ -472,10 +486,13 @@ public:
             p.prog[m] = programOf (m);
             const int a = l480::programs()[(size_t) p.prog[m]].algo;
             for (int i = 0; i < l480::kMaxParams; ++i) p.val[m][i] = l480::toValue (l480::algoDef (a).p[i], pSlot[m][l480::realIndex (a, i)]->load());
+            // the converter of the Classic engine is a SETUP option (one for the whole plug-in), not a fader
+            for (int i = 0; i < l480::kMaxParams; ++i) if (l480::algoDef (a).p[i].lab != nullptr && std::strcmp (l480::algoDef (a).p[i].lab, "CONV") == 0) p.val[m][i] = (float) (int) apvts.getRawParameterValue ("conv")->load();
         }
         p.config = jlimit (0, 3, (int) f (pCfg)); p.mute = mute.load();
         { static const int osF[] = { 1, 2, 4, 6, 8 }; p.oversampling = osF[jlimit (0, 4, (int) f (pOs))]; p.precision64 = f (pPrec) > 0.5f; }
-        for (int m = 0; m < 2; ++m) { p.curveOn[m] = aCurveOn[m].load(); for (int b = 0; b < pv::DecayEq::N; ++b) p.curveMul[m][b] = aCurveMul[m][b].load(); }
+        for (int m = 0; m < 2; ++m) { p.curveOn[m] = aCurveOn[m].load();
+                                      if (p.curveOn[m]) for (int b = 0; b < pv::DecayEq::N; ++b) p.curveMul[m][b] = aCurveMul[m][b].load() * programDecayMul (m, pv::DecayEq::centre (b)); }
         for (int m = 0; m < 2; ++m) { p.tapN[m] = aTapN[m].load(); for (int k = 0; k < p.tapN[m]; ++k) { p.tapMs[m][k] = aTapMs[m][k].load(); p.tapDb[m][k] = aTapDb[m][k].load(); } }
         for (int m = 0; m < 2; ++m) { p.reflN[m] = aReflN[m].load(); for (int k = 0; k < p.reflN[m]; ++k) { p.reflMs[m][k] = aReflMs[m][k].load(); p.reflDb[m][k] = aReflDb[m][k].load(); p.reflPan[m][k] = aReflPan[m][k].load(); } }
         p.anOn = on (pAnOn); p.anTarget = jlimit (0, 2, (int) f (pAnTarget)); p.anModel = jlimit (0, 4, (int) f (pAnModel));
@@ -484,6 +501,9 @@ public:
         p.eqModel = jlimit (0, cs::kNumEqModels - 1, (int) apvts.getRawParameterValue ("eqModel")->load()); p.eqDrive = apvts.getRawParameterValue ("eqDrive")->load();
         p.loopAmt = apvts.getRawParameterValue ("loopAmt")->load();
         p.addOn = jlimit (0, 3, (int) apvts.getRawParameterValue ("addOn")->load());
+        p.gtOn = apvts.getRawParameterValue ("gtOn")->load() > 0.5f; p.gtKeyIn = apvts.getRawParameterValue ("gtKey")->load() > 0.5f;
+        p.gtThr = apvts.getRawParameterValue ("gtThr")->load(); p.gtRange = apvts.getRawParameterValue ("gtRange")->load(); p.gtRelMs = apvts.getRawParameterValue ("gtRel")->load();
+        p.stripOrder = (int) apvts.getRawParameterValue ("stripOrder")->load();
         p.erAtkMs = apvts.getRawParameterValue ("erAtk")->load(); p.dlAtkMs = apvts.getRawParameterValue ("dlAtk")->load(); for (int b = 0; b < 4; ++b) { p.eqF[b] = f (pEqF[b]); p.eqG[b] = f (pEqG[b]); }
         auto& c = p.comp;
         c.on = on (pCpOn); c.type = jlimit (0, 2, (int) f (pCpType)); c.vintage = on (pCpColor); c.duck = on (pCpDuck);
@@ -565,7 +585,7 @@ public:
 
     APVTS apvts;
     std::atomic<bool> mute { false }, programLoaded { true };
-    std::atomic<float> meterIn { 0 }, meterOut { 0 }, compGr { 0 };
+    std::atomic<float> meterIn { 0 }, meterOut { 0 }, compGr { 0 }, gateKey { -120 }, gateGain { 0 };
     std::atomic<double> sampleRateUi { 48000.0 };
     static constexpr int kScopeSize = 8192;
     std::array<float, kScopeSize> scope {};

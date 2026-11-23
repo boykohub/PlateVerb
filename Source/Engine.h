@@ -454,7 +454,8 @@ struct TankAlgo {
             tapMs.assign (kDense, 0.0f); tapGL.assign (kDense, 0.0f); tapGR.assign (kDense, 0.0f);
             maxTap = 250.0f / kMaxSize;
         } else { maxTap = 0; for (float m : tapMs) maxTap = std::max (maxTap, m); }
-        erL.init ((int) (maxTap * kMaxSize * maxFs * 0.001f) + 16); erR.init ((int) (maxTap * kMaxSize * maxFs * 0.001f) + 16);
+        erMaxS = (int) (maxTap * kMaxSize * maxFs * 0.001f + 0.25f * maxFs) + 8;      // room to move a reflection 250 ms later
+        erL.init (erMaxS + 16); erR.init (erMaxS + 16);
         lateL.init ((int) (c.lateOnsetMs * kMaxSize * maxFs * 0.001f) + 16); lateR.init ((int) (c.lateOnsetMs * kMaxSize * maxFs * 0.001f) + 16);
     }
     void clear() {
@@ -521,10 +522,33 @@ struct TankAlgo {
         const int maxS = (int) (maxTap * kMaxSize * fs * 0.001f) + 8;
         for (size_t t = 0; t < tapMs.size(); ++t) tapS[t] = std::min (maxS, std::max (1, (int) std::lround (tapMs[t] * (c.denseER ? 1.0f : buildScale) * kEr)));
         // reflection attack: the early reflections fade in over erAttackMs instead of starting at full level
+        tapS0 = tapS; tapEdG.assign (tapS.size(), 1.0f);
+        if (! c.denseER && edMs != nullptr && edDb != nullptr)
+            for (size_t t = 0; t < tapS.size() && (int) t < edMax; ++t)
+            {
+                tapS[t] = std::min (erMaxS, std::max (1, tapS[t] + (int) std::lround (edMs[t] * 0.001f * fs)));
+                tapEdG[t] = edDb[t] <= -79.0f ? 0.0f : std::pow (10.0f, edDb[t] / 20.0f);
+            }
         tapAtk.resize (tapS.size());
-        for (size_t t = 0; t < tapS.size(); ++t) tapAtk[t] = erAttackMs > 0.1f ? 1.0f - std::exp (-(tapS[t] / fs * 1000.0f) / erAttackMs) : 1.0f;
+        for (size_t t = 0; t < tapS.size(); ++t) tapAtk[t] = (erAttackMs > 0.1f ? 1.0f - std::exp (-(tapS[t] / fs * 1000.0f) / erAttackMs) : 1.0f) * tapEdG[t];
     }
-    std::vector<int> tapS; std::vector<float> tapAtk;
+    std::vector<int> tapS, tapS0; std::vector<float> tapAtk, tapEdG;
+    int erMaxS = 0;
+    // your edits of these reflections (time offset ms, level dB; -80 = off), set before update(); nullptr = none
+    const float* edMs = nullptr; const float* edDb = nullptr; int edMax = 0;
+    // the reflections before your edits, for the screen: time from the tank input (ms) and level re the input (dB) times 'gain'
+    int baseTaps (float* ms, float* db, int max, float offMs, float gain) const
+    {
+        const TankConfig& c = tankConfig (algo);
+        if (c.denseER || tapS0.empty()) return 0;
+        const int n = std::min ((int) tapS0.size(), max); const float nrm = 1.8f / std::sqrt ((float) tapS0.size());
+        for (int t = 0; t < n; ++t)
+        {
+            ms[t] = offMs + (float) tapS0[(size_t) t] / fs * 1000.0f;
+            db[t] = 20.0f * std::log10 (std::max (1e-6f, 0.5f * (std::abs (tapGL[(size_t) t]) + std::abs (tapGR[(size_t) t])) * nrm * c.erLevel * gain));
+        }
+        return n;
+    }
     float buildScale = 1; bool dampOn = false;
     float erAttackMs = 0.0f;         // set before update(): softer attack of the early reflections
     inline void process (float inL, float inR, float mod, float erAmt, float& oL, float& oR) {

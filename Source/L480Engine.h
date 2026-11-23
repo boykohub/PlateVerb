@@ -69,10 +69,12 @@ struct EngineParams {
     bool anOn = false; int anTarget = 0, anModel = 1, anColour = 1; float anDrive = 6.0f, anOut = 0.0f;   // anTarget 0 reverb, 1 EQ, 2 both
     bool curveOn[2] = { false, false }; float curveMul[2][pv::DecayEq::N] = {};   // RT graph per machine
     int reflN[2] = { 0, 0 }; float reflMs[2][32] = {}, reflDb[2][32] = {}, reflPan[2][32] = {};   // your own early reflections
-    int tapN[2] = { 0, 0 }; float tapMs[2][32] = {}, tapDb[2][32] = {};                         // your edits of the algorithm's own taps
+    int tapN[2] = { 0, 0 }; float tapMs[2][64] = {}, tapDb[2][64] = {};                         // your edits of the algorithm's own taps
     bool mute = false;
-    float loopAmt = 1.0f;
-    int addOn = 0;                           // machine B as an add-on to A: 0 off, 1 beside, 2 before (B feeds A), 3 after (A feeds B)                    // the 480L's long recirculation (stone depth): 0 off, 1 as measured, 2 double
+    float loopAmt = 1.0f;                    // the 480L's long recirculation (stone depth): 0 off, 1 as measured, 2 double
+    int addOn = 0;                           // machine B as an add-on to A: 0 off, 1 beside, 2 before (B feeds A), 3 after (A feeds B)
+    // channel strip: a gate first, then EQ and compressor in either order
+    bool gtOn = false, gtKeyIn = false; float gtThr = -40, gtRange = 60, gtRelMs = 150; int stripOrder = 0;   // 0 EQ > comp, 1 comp > EQ
     // drawer: EQ
     bool eqOn = false; float eqF[4] = { 100, 400, 2500, 8000 }, eqG[4] = {};
     // drawer: compressor
@@ -81,6 +83,25 @@ struct EngineParams {
     bool dlOn = false, dlPing = false; float dlMsL = 375, dlMsR = 500, dlFb = 0.35f, dlMix = 0.3f, dlLow = 0, dlHigh = 0;
     // setup
     pv::HwParams hw; bool trOn = false; int trModel = 0; float trFreq = 80, trAmt = 0.3f; float outDb = 0;
+};
+
+// the channel strip's gate: opens fast, holds a moment, closes over the release time, down to its range
+struct Gate {
+    float fs = 48000, env = 0, g = 1, hold = 0, envR = 0, openC = 0, closeC = 0, lastRel = -1, lastFs = -1;
+    void reset() { env = 0; g = 1; hold = 0; }
+    inline void process (float& L, float& R, float kL, float kR, float thrDb, float rangeDb, float relMs) {
+        if (relMs != lastRel || fs != lastFs) { lastRel = relMs; lastFs = fs; envR = std::exp (-1.0f / (0.05f * fs)); openC = 1.0f - std::exp (-1.0f / (0.0005f * fs)); closeC = 1.0f - std::exp (-1.0f / (0.001f * std::max (5.0f, relMs) * fs)); }
+        const float k = std::max (std::fabs (kL), std::fabs (kR));
+        env = k > env ? k : env * envR;
+        const float thr = std::pow (10.0f, thrDb / 20.0f), floorG = std::pow (10.0f, -rangeDb / 20.0f);
+        if (env >= thr) hold = 0.015f * fs; else if (hold > 0) hold -= 1;
+        const float tgt = (env >= thr || hold > 0) ? 1.0f : floorG;
+        g += (tgt - g) * (tgt > g ? openC : closeC);
+        L *= g; R *= g;
+    }
+    inline void follow (float L, float R) { const float k = std::max (std::fabs (L), std::fabs (R)); env = k > env ? k : env * (envR > 0 ? envR : 0.9995f); g = 1; }
+    float keyLevelDb() const { return 20.0f * std::log10 (std::max (env, 1.0e-6f)); }
+    float gainLevelDb() const { return 20.0f * std::log10 (std::max (g, 1.0e-6f)); }
 };
 
 class Engine {
@@ -99,7 +120,7 @@ public:
         n = (n == 2 || n == 4 || n == 6 || n == 8) ? n : 1;
         if (n == os) return;
         os = n; fsOs = fs * (float) os;
-        comp.fs = fsOs; comp.reset(); comp.lastFs = -1;
+        comp.fs = fsOs; comp.reset(); comp.lastFs = -1; gate.fs = fsOs; gate.reset();
         anVerb.prepare (fsOs); anEq.prepare (fsOs); anM = -1;
         for (auto& c : eq) for (auto& b : c) b.reset();
         for (auto& c : eqD) for (auto& b : c) b.reset();
@@ -116,6 +137,8 @@ public:
     float meterIn() const { return mIn; }
     float meterOut() const { return mOut; }
     float compGr() const { return comp.reductionDb(); }
+    float gateKeyDb() const { return gate.keyLevelDb(); }
+    float gateGainDb() const { return gate.gainLevelDb(); }
     int baseTaps (int m, float* ms, float* db, int max) const { return mach[m].baseTaps (ms, db, max); }
     const Machine& machine (int i) const { return mach[i]; }
     Machine& machine (int i) { return mach[i]; }
@@ -231,15 +254,22 @@ public:
 private:
     inline void post (float& yL, float& yR, float kL, float kR, const EngineParams& p, bool anV, bool anE) {
         if (anV) { yL = anVerb.process (0, yL); yR = anVerb.process (1, yR); }
-        if (p.eqOn) {
-            if (++eqStep >= 16) { eqStep = 0; eqBank.step(); }
-            yL = eqBank.process (0, yL); yR = eqBank.process (1, yR);         // 64-bit filters with the model's analog colour
-        }
-        if (anE) { yL = anEq.process (0, yL); yR = anEq.process (1, yR); }
-        if (p.comp.on) comp.process (yL, yR, p.comp.duck ? kL : yL, p.comp.duck ? kR : yR, p.comp);
-        else comp.meter (yL, yR);
+        if (p.gtOn) gate.process (yL, yR, p.gtKeyIn ? kL : yL, p.gtKeyIn ? kR : yR, p.gtThr, p.gtRange, p.gtRelMs);
+        else gate.follow (yL, yR);
+        auto eqStage = [&] {
+            if (p.eqOn) {
+                if (++eqStep >= 16) { eqStep = 0; eqBank.step(); }
+                yL = eqBank.process (0, yL); yR = eqBank.process (1, yR);         // 64-bit filters with the model's analog colour
+            }
+            if (anE) { yL = anEq.process (0, yL); yR = anEq.process (1, yR); }
+        };
+        auto compStage = [&] {
+            if (p.comp.on) comp.process (yL, yR, p.comp.duck ? kL : yL, p.comp.duck ? kR : yR, p.comp);
+            else comp.meter (yL, yR);
+        };
+        if (p.stripOrder == 1) { compStage(); eqStage(); } else { eqStage(); compStage(); }
     }
-    cs::EqBank eqBank; int eqStep = 0;
+    cs::EqBank eqBank; int eqStep = 0; Gate gate;
     int os = 1; float fsOs = 48000; Upsampler up[4]; Downsampler dn[2]; BiquadD eqD[2][4];
     float wL[512] = {}, wR[512] = {};
     float fs = 48000, sOut = 1, sDl = 0, sMute = 0, mIn = 0, mOut = 0; bool firstBlock = true;
