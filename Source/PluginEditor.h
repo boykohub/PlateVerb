@@ -148,12 +148,28 @@ public:
     String textId() const { return "button:" + text; }
     float textPt() const { return th.tpt (textId(), th.keyPt); }
     bool slim = false;                                   // channel strip keys: little room around the text
-    float preferredWidth() const { return textW (ui (textPt(), W::Bold, 0.06f), text) + (slim ? textPt() * 0.7f + 4.0f : textPt() * 1.6f + 8.0f + th.keyPad); }
+    bool textOnly = false;                               // no key at all: the word is the switch, lit yellow when on
+    float preferredWidth() const { return textW (ui (textPt(), W::Bold, 0.06f), text) + (textOnly ? 4.0f : slim ? textPt() * 0.7f + 4.0f : textPt() * 1.6f + 8.0f + th.keyPad); }
     std::function<void()> onRightClick, onPress, onRelease;
     void paint (Graphics& g) override
     {
+        if (textOnly)
+        {
+            const bool on = lit || pressed;
+            const auto f = ui (textPt(), W::Bold, 0.06f);
+            auto r = getLocalBounds().toFloat();
+            if (on)
+            {   // a soft yellow glow behind the lit word
+                g.setFont (f);
+                for (int i = 3; i >= 1; --i) { g.setColour (th.keyLight.withAlpha (0.10f)); for (int dx = -i; dx <= i; dx += i) for (int dy = -i; dy <= i; dy += i) g.drawText (text, r.translated ((float) dx, (float) dy), Justification::centred, false); }
+            }
+            g.setFont (f);
+            g.setColour (on ? th.keyLight : (isMouseOver() ? th.panelText : th.panelText.withAlpha (0.6f)));
+            g.drawText (text, r, Justification::centred, false);
+            return;
+        }
         auto r = getLocalBounds().toFloat().reduced (0.5f);
-        const float rad = 3.5f;
+        const float rad = jmax (3.5f, getHeight() * 0.28f);    // soft, rounded corners
         const bool on = lit || pressed || flash;
         g.setColour (Colours::black.withAlpha (0.75f)); g.fillRoundedRectangle (r, rad + 1.5f);
         if (on) { g.setColour (th.keyLight.withAlpha (0.35f)); g.drawRoundedRectangle (r.expanded (0.5f), rad + 2.0f, 2.0f); }
@@ -358,6 +374,24 @@ static void drawKnobBody (Graphics& g, const Theme& th, Rectangle<float> k, floa
 {
     const Colour body = th.*item;
     const float d = k.getWidth();
+    if (body.getSaturation() < 0.3f)
+    {
+        // black knobs: flat, no exaggerated light and shadow
+        g.setColour (Colours::black.withAlpha (0.25f)); g.fillEllipse (k.translated (0.6f, 1.0f));
+        if (skirt)
+        {
+            g.setColour (body.brighter (0.12f)); g.fillEllipse (k);
+            g.setColour (Colours::black.withAlpha (0.12f));
+            for (int i = 0; i < 36; ++i) { const float a = i * MathConstants<float>::twoPi / 36.0f; g.drawLine (Line<float> (k.getCentre().getPointOnCircumference (d * 0.43f, a), k.getCentre().getPointOnCircumference (d * 0.5f, a)), 0.6f); }
+            k = k.reduced (d * 0.1f);
+        }
+        g.setColour (body); g.fillEllipse (k);
+        g.setColour (Colours::black.withAlpha (0.35f)); g.drawEllipse (k, 0.8f);
+        g.setColour (pointer);
+        const auto c = k.getCentre(); const float r = k.getWidth() * 0.5f;
+        g.drawLine (Line<float> (c.getPointOnCircumference (r * 0.25f, angle), c.getPointOnCircumference (r * 0.95f, angle)), 2.2f);
+        return;
+    }
     g.setColour (Colours::black.withAlpha (th.shadow())); g.fillEllipse (k.translated (1.5f * th.d3(), 2.5f * th.d3()));
     if (skirt)
     {
@@ -987,6 +1021,101 @@ static const std::vector<int>& browseOrder()
     return order;
 }
 
+// ============================================================================ the reverb EQ (the channel strip's EQ) as a graph
+// up to four points, one per band; double-click anywhere adds one, double-click a point removes it, drag to move it
+class ReverbEqGraph : public Component
+{
+public:
+    ReverbEqGraph (const Theme& t, Flexiverb480Processor& p) : th (t), proc (p)
+    { for (int b = 0; b < 4; ++b) { fP[b] = p.apvts.getParameter ("eqF" + String (b)); gP[b] = p.apvts.getParameter ("eqG" + String (b)); } model = p.apvts.getParameter ("eqModel"); }
+    std::function<void (const String&, const String&)> onShow;
+    void paint (Graphics& g) override
+    {
+        plot = getLocalBounds().toFloat().reduced (th.sz (40.0f), 6).withTrimmedRight (th.sz (30.0f)).withTrimmedBottom (th.sz (11.0f)).withTrimmedTop (th.sz (14.0f));
+        const Colour col = th.displayText;
+        g.setFont (ui (th.sz (8.5f), W::Bold));
+        g.setColour (col.withAlpha (0.8f));
+        g.drawText ("REVERB EQ:  double-click adds a point (up to 4), double-click a point removes it, drag to move it", getLocalBounds().toFloat().withHeight (th.sz (13.0f)).withTrimmedLeft (th.sz (40.0f)), Justification::centredLeft, false);
+        g.setFont (ui (th.sz (8.5f), W::Medium));
+        for (float f : { 50.0f, 100.0f, 200.0f, 500.0f, 1000.0f, 2000.0f, 5000.0f, 10000.0f })
+        {
+            const float x = xOf (f); g.setColour (col.withAlpha (0.10f)); g.drawVerticalLine ((int) x, plot.getY(), plot.getBottom());
+            g.setColour (col.withAlpha (0.55f)); g.drawText (f >= 1000 ? String (f / 1000, 0) + "k" : String ((int) f), Rectangle<float> (x - 18, plot.getBottom() + 1, 36, th.sz (12.0f)), Justification::centred, false);
+        }
+        for (float db : { -12.0f, -6.0f, 0.0f, 6.0f, 12.0f })
+        {
+            const float y = yOf (db); g.setColour (col.withAlpha (db == 0 ? 0.25f : 0.10f)); g.drawHorizontalLine ((int) y, plot.getX(), plot.getRight());
+            g.setColour (col.withAlpha (0.55f)); g.drawText ((db > 0 ? "+" : "") + String ((int) db) + " dB", Rectangle<float> (plot.getX() - th.sz (40.0f), y - 6, th.sz (37.0f), 12), Justification::centredRight, false);
+        }
+        const bool on = proc.apvts.getRawParameterValue ("eqOn")->load() > 0.5f;
+        Path pc;
+        for (int i = 0; i <= 200; ++i) { const float f = 20.0f * std::pow (1000.0f, i / 200.0f); const Point<float> pt (xOf (f), yOf (magDb (f))); if (i == 0) pc.startNewSubPath (pt); else pc.lineTo (pt); }
+        g.setColour (col.withAlpha (on ? 0.25f : 0.1f)); g.strokePath (pc, PathStrokeType (4.0f));
+        g.setColour (col.withAlpha (on ? 1.0f : 0.45f)); g.strokePath (pc, PathStrokeType (1.8f));
+        for (int b = 0; b < 4; ++b)
+        {
+            if (! shown (b)) continue;
+            const auto pt = pointOf (b);
+            g.setColour (Colours::black); g.fillEllipse (Rectangle<float> (11, 11).withCentre (pt));
+            g.setColour (b == drag || b == hover ? Colours::white : col); g.drawEllipse (Rectangle<float> (9, 9).withCentre (pt), 2.0f);
+        }
+    }
+    void mouseMove (const MouseEvent& e) override { const int h = hit (e.position); if (h != hover) { hover = h; repaint(); } }
+    void mouseExit (const MouseEvent&) override { hover = -1; repaint(); }
+    void mouseDown (const MouseEvent& e) override { drag = hit (e.position); if (drag >= 0) { fP[drag]->beginChangeGesture(); gP[drag]->beginChangeGesture(); } }
+    void mouseDrag (const MouseEvent& e) override
+    {
+        if (drag < 0) return;
+        set (drag, fOf (e.position.x), dbOf (e.position.y));
+    }
+    void mouseUp (const MouseEvent&) override { if (drag >= 0) { fP[drag]->endChangeGesture(); gP[drag]->endChangeGesture(); } drag = -1; }
+    void mouseDoubleClick (const MouseEvent& e) override
+    {
+        const int h = hit (e.position);
+        if (h >= 0) { setShown (h, false); gP[h]->beginChangeGesture(); gP[h]->setValueNotifyingHost (gP[h]->convertTo0to1 (0.0f)); gP[h]->endChangeGesture(); repaint(); return; }
+        // the free band nearest in frequency takes the new point
+        const float f = fOf (e.position.x); int best = -1; float bd = 1e9f;
+        for (int b = 0; b < 4; ++b) if (! shown (b)) { const float d = std::abs (std::log2 (f / jmax (20.0f, value (fP[b])))); if (d < bd) { bd = d; best = b; } }
+        if (best < 0) { if (onShow) onShow ("Reverb EQ", "all four points are in use"); return; }
+        setShown (best, true);
+        fP[best]->beginChangeGesture(); gP[best]->beginChangeGesture(); set (best, f, dbOf (e.position.y)); fP[best]->endChangeGesture(); gP[best]->endChangeGesture();
+    }
+private:
+    const Theme& th; Flexiverb480Processor& proc; RangedAudioParameter* fP[4] {}; RangedAudioParameter* gP[4] {}; RangedAudioParameter* model = nullptr;
+    Rectangle<float> plot; int drag = -1, hover = -1;
+    static float value (RangedAudioParameter* p) { return p->convertFrom0to1 (p->getValue()); }
+    bool shown (int b) const { const int m = (int) proc.getUiProperty ("eqPoints", -1); return m < 0 ? std::abs (value (gP[b])) > 0.05f : ((m >> b) & 1) != 0; }
+    void setShown (int b, bool v)
+    {
+        int m = (int) proc.getUiProperty ("eqPoints", -1);
+        if (m < 0) { m = 0; for (int k = 0; k < 4; ++k) if (std::abs (value (gP[k])) > 0.05f) m |= 1 << k; }
+        m = v ? (m | (1 << b)) : (m & ~(1 << b)); proc.setUiProperty ("eqPoints", m);
+    }
+    void set (int b, float f, float db)
+    {
+        fP[b]->setValueNotifyingHost (fP[b]->convertTo0to1 (fP[b]->getNormalisableRange().snapToLegalValue (f)));
+        gP[b]->setValueNotifyingHost (gP[b]->convertTo0to1 (jlimit (-15.0f, 15.0f, db)));
+        if (onShow) onShow ("Reverb EQ " + String (b + 1), (f >= 1000 ? String (f / 1000, 2) + " kHz" : String (roundToInt (f)) + " Hz") + "   " + String (db, 1) + " dB");
+        repaint();
+    }
+    float magDb (float f) const
+    {
+        const int mdl = model ? (int) model->convertFrom0to1 (model->getValue()) : 0; double m = 0;
+        for (int b = 0; b < 4; ++b)
+        {
+            cs::BandSettings bs; bs.on = true; bs.shelf = (b == 0 || b == 3); bs.freq = value (fP[b]); bs.gain = value (gP[b]); bs.qScale = 1.0f;
+            if (std::abs (bs.gain) > 0.01f) m += cs::EqBank::bandMagDb (mdl, bs, b, f, 96000.0);
+        }
+        return (float) m;
+    }
+    Point<float> pointOf (int b) const { return { xOf (value (fP[b])), yOf (value (gP[b])) }; }
+    int hit (Point<float> p) const { for (int b = 0; b < 4; ++b) if (shown (b) && pointOf (b).getDistanceFrom (p) < 9.0f) return b; return -1; }
+    float xOf (float f) const { return plot.getX() + plot.getWidth() * std::log (jmax (20.0f, f) / 20.0f) / std::log (1000.0f); }
+    float fOf (float x) const { return 20.0f * std::pow (1000.0f, jlimit (0.0f, 1.0f, (x - plot.getX()) / plot.getWidth())); }
+    float yOf (float db) const { return plot.getCentreY() - plot.getHeight() * 0.5f * jlimit (-1.1f, 1.1f, db / 16.0f); }
+    float dbOf (float y) const { return jlimit (-15.0f, 15.0f, (plot.getCentreY() - y) / (plot.getHeight() * 0.5f) * 16.0f); }
+};
+
 // ============================================================================ preset browser: every preset at once, by category
 class PresetBrowser : public Component
 {
@@ -994,6 +1123,7 @@ public:
     PresetBrowser (const Theme& t, Flexiverb480Processor& p) : th (t), proc (p) { addAndMakeVisible (view); view.setViewedComponent (&list, false); view.setScrollBarsShown (true, false); }
     std::function<void (int program)> onFactory; std::function<void (const String&)> onUser; std::function<void()> onClose;
     std::function<int()> machine;
+    std::vector<std::pair<String, int>> algorithms;       // HALL, RANDOM HALL ...: each loads its default program
     void refresh() { list.build (*this); resized(); repaint(); }
     void resized() override { auto r = getLocalBounds().reduced (16); r.removeFromTop (44); view.setBounds (r); list.setSize (r.getWidth() - 12, list.heightFor (r.getWidth() - 12)); list.layout(); }
     void paint (Graphics& g) override
@@ -1035,6 +1165,12 @@ private:
                 }
                 sections.push_back (s);
             };
+            if (! b.algorithms.empty())
+            {
+                Section a; a.title = "Algorithms  (each loads its default program)"; Box bx; bx.title = "Algorithms";
+                for (auto& al : b.algorithms) bx.items.push_back ({ al.first.substring (0, 1) + al.first.substring (1).toLowerCase(), al.second, {}, {} });
+                a.boxes.push_back (bx); sections.push_back (a);
+            }
             sec ("Flexiverb  (each fitted to its 480L impulse response)", 27, 31); sec ("Surround (HD Card)", 22, 26);
             sec ("480L  (factory programs)", 1, 21);
             Section u; u.title = "Your presets  (" + Flexiverb480Processor::presetFolder().getFullPathName() + ")";
@@ -1247,7 +1383,7 @@ public:
         const Colour col = th.displayText;
         auto r = getLocalBounds().toFloat().reduced (6, 4);
         auto erA = r.removeFromLeft (r.getWidth() * 0.36f).reduced (0, 2); r.removeFromLeft (10);
-        auto meters = r.removeFromRight (26); r.removeFromRight (6);
+        auto meters = r.removeFromRight (0);       // the L/M/H meters are gone: the waterfall gets the room
         const float lh = th.sz (12.0f);
         erArea = erA.withTrimmedTop (lh + 4).withTrimmedBottom (lh + 2).withTrimmedLeft (lh * 2.2f); decArea = r.withTrimmedTop (lh + 4).withTrimmedBottom (lh + 2).withTrimmedLeft (lh * 2.4f).withTrimmedRight (lh * 3.2f);
         g.setFont (ui (th.sz (9.0f), W::Bold, 0.05f)); g.setColour (col.withAlpha (0.7f));
@@ -1303,16 +1439,7 @@ public:
         }
         else rtAnchor = { -1, -1 };
         g.setFont (ui (th.sz (8.0f), W::Bold));
-        const char* bn[3] = { "L", "M", "H" };
-        for (int b = 0; b < 3; ++b) { g.setColour (bc[b]); g.drawText (bn[b], Rectangle<float> (meters.getX() + b * 9.0f - 1, decArea.getBottom() + 1, 9, th.sz (12.0f)), Justification::centred, false); }
-        // live output bars
-        for (int b = 0; b < 3; ++b)
-        {
-            auto bar = Rectangle<float> (meters.getX() + b * 9.0f, decArea.getY(), 7.0f, decArea.getHeight());
-            g.setColour (col.withAlpha (0.08f)); g.fillRect (bar);
-            const float h = bar.getHeight() * jlimit (0.0f, 1.0f, (Decibels::gainToDecibels (live[b], -60.0f) + 60.0f) / 60.0f);
-            g.setColour (bc[b]); g.fillRect (bar.withTop (bar.getBottom() - h));
-        }
+        ignoreUnused (bc, meters);
     }
     void mouseDown (const MouseEvent& e) override
     {
@@ -1602,8 +1729,10 @@ public:
         auto r = getLocalBounds().toFloat().reduced (2, 4);
         const float gp = th.tpt ("knob:GATE", th.gatePt);
         auto lab = r.removeFromBottom (gp + 5);
-        auto bar = r.withSizeKeepingCentre (jmin (22.0f, r.getWidth() * 0.32f), r.getHeight());
-        auto gr = bar.translated (bar.getWidth() + 6, 0).withWidth (6);
+        // two bars of the same size side by side: the level, and how far the gate has closed
+        const float bw = jmin (16.0f, r.getWidth() * 0.26f);
+        auto bar = r.withSizeKeepingCentre (bw, r.getHeight()).translated (-(bw + 6) * 0.5f, 0);
+        auto gr = bar.translated (bw + 6, 0);
         g.setColour (Colours::black.withAlpha (0.65f)); g.fillRoundedRectangle (bar.expanded (2), 3); g.fillRoundedRectangle (gr.expanded (2), 2);
         auto yOf = [&bar] (float db) { return bar.getBottom() - bar.getHeight() * jlimit (0.0f, 1.0f, (db + 72.0f) / 72.0f); };
         // the level: lit segments
@@ -1617,7 +1746,7 @@ public:
         }
         // the threshold
         const float ty = yOf (thrDb);
-        g.setColour (th.keyLight); g.fillRect (bar.getX() - 5, ty - 1, bar.getWidth() + 10, 2.0f);
+        g.setColour (th.keyLight); g.fillRect (bar.getX() - 3, ty - 1, gr.getRight() - bar.getX() + 6, 2.0f);
         // how far it has closed: a red bar from the top
         const float closed = jlimit (0.0f, 1.0f, -gainDb / 72.0f);
         g.setColour (Colour (0xffff4a2a).withAlpha (on ? 0.9f : 0.25f)); g.fillRect (gr.withHeight (gr.getHeight() * closed));
@@ -1954,6 +2083,11 @@ public:
         // screen
         content.addAndMakeVisible (screen); screen.ed = this;
         screen.addAndMakeVisible (reverbView); screen.addAndMakeVisible (decay); screen.addChildComponent (delayView);
+        screen.addAndMakeVisible (eqGraph); eqGraph.onShow = [this] (const String& a, const String& b) { showMessage (a, b); };
+        // dividers: drag them to give the waterfall, the decay graph, the EQ graph and the faders more or less room
+        for (int i = 0; i < 2; ++i) { screen.addAndMakeVisible (scrDiv[i]); scrDiv[i].onDrag = [this, i] (int dy) { dragScreenDiv (i, dy); }; }
+        content.addAndMakeVisible (faderDiv); faderDiv.onDrag = [this] (int dy) { const int h = (int) proc.getUiProperty ("uiScrH", 0) > 0 ? (int) proc.getUiProperty ("uiScrH", 0) : screen.getHeight();
+                                                                               proc.setUiProperty ("uiScrH", jlimit (200, mainH - 330, h + dy)); layout(); content.repaint(); };
         decay.machine = [this] { return machine; }; delayView.machine = [this] { return machine; };
         delayView.utility = [this] { return delayTaps (proc.algoOf (machine)).empty(); };
         auto shower = [this] (const String& a, const String& b) { showMessage (a, b); };
@@ -2035,7 +2169,7 @@ public:
         for (auto& a : algs) { auto k = mk (a.name); int pi = l480::findProgram (a.bank, a.num);
                                 if (isMatchedOriginal (pi)) for (int i = 0; i < l480::numPrograms(); ++i)   // the matched version of it
                                 { const auto& q = l480::programs()[(size_t) i]; if (q.bank >= 27 && q.bank <= 31 && presetKey (q.name) == presetKey (l480::programs()[(size_t) pi].name)) { pi = i; break; } } k->onClick = [this, pi] { proc.loadProgram (machine, pi); page = 0; refreshPage (true); };
-                                auto* kp = k.get(); k->onRightClick = [this, kp] { keyMenu (-1, kp); }; algKeys.push_back (std::move (k)); }
+                                auto* kp = k.get(); k->onRightClick = [this, kp] { keyMenu (-1, kp); }; browser.algorithms.push_back ({ a.name, pi }); algKeys.push_back (std::move (k)); }
         pageKey->onRightClick = [this] { keyMenu (-1, pageKey.get()); };
         loadMyKeys();
         // DELAY and CHORUS: right-click adds them to the reverb (machine B) instead of replacing it
@@ -2113,20 +2247,18 @@ public:
         sysKnob[2] = knob ("trFreq", "IRON FREQ", { { 20, "20" }, { 30, "30" }, { 50, "50" }, { 80, "80" }, { 120, "120" }, { 200, "200" }, { 400, "400" } }, &Theme::compKnob);
         depthKnob = knob ("loopAmt", "480 DEPTH", { { 0, "0" }, { 0.5f, "50" }, { 1, "100" }, { 1.5f, "150" }, { 2, "200" } }, &Theme::compKnob);
         sysKnob[3] = knob ("trAmt", "IRON AMOUNT", { { 0, "0" }, { 0.2f, "20" }, { 0.4f, "40" }, { 0.6f, "60" }, { 0.8f, "80" }, { 1, "100" } }, &Theme::compKnob);
+        for (auto* k : { sysKnob[0].get(), sysKnob[1].get(), sysKnob[2].get(), sysKnob[3].get(), depthKnob.get() }) k->strip = true;
         anKnob[0] = knob ("anDrive", "DRIVE", numberScale (0, 30, 4, 2), &Theme::analogKnob);
         anKnob[1] = knob ("anOut", "OUTPUT", numberScale (-12, 12, 4, 2, true), &Theme::analogKnob);
         anKnob[2] = knob ("anModel", "MODEL", { { 0, "CLEAN" }, { 1, "TUBE" }, { 2, "1073" }, { 3, "1080" }, { 4, "212" } }, &Theme::analogKnob);
         anKnob[3] = knob ("anColour", "CHARACTER", { { 0, "ODD" }, { 1, "EVEN" }, { 2, "HEAVY" }, { 3, "CRUSH" } }, &Theme::analogKnob);
         anKnob[4] = knob ("anTarget", "AFFECTS", { { 0, "REVERB" }, { 1, "EQ" }, { 2, "BOTH" } }, &Theme::analogKnob);
-        for (auto& k : anKnob) k->sizeMul = &theme.analogSize;
+        for (auto& k : anKnob) { k->sizeMul = &theme.analogSize; k->strip = true; }
         eqKnob2[0] = knob ("eqModel", "EQ MODEL", { { 0, "CLEAN" }, { 1, "73" }, { 2, "73/84" }, { 3, "4K" }, { 4, "4K U" }, { 5, "TUBE" }, { 6, "550" } }, &Theme::eqKnob);
         eqKnob2[1] = knob ("eqDrive", "EQ COLOUR", { { 0, "0" }, { 0.2f, "20" }, { 0.4f, "40" }, { 0.6f, "60" }, { 0.8f, "80" }, { 1, "100" } }, &Theme::eqKnob);
         const char* bn[] = { "LOW", "LOW MID", "HIGH MID", "HIGH" };
-        const std::vector<ScaleMark> fm[4] = {
-            { { 20, "20" }, { 40, "40" }, { 70, "70" }, { 120, "120" }, { 200, "200" }, { 300, "300" }, { 500, "500" } },
-            { { 100, "100" }, { 200, "200" }, { 350, "350" }, { 600, "600" }, { 1000, "1k" }, { 2000, "2k" } },
-            { { 800, ".8k" }, { 1200, "1.2k" }, { 2000, "2k" }, { 3000, "3k" }, { 5000, "5k" }, { 8000, "8k" } },
-            { { 2000, "2k" }, { 3500, "3.5k" }, { 5000, "5k" }, { 8000, "8k" }, { 12000, "12k" }, { 20000, "20k" } } };
+        const std::vector<ScaleMark> fAll { { 20, "20" }, { 50, "50" }, { 100, "100" }, { 200, "200" }, { 500, "500" }, { 1000, "1k" }, { 2000, "2k" }, { 5000, "5k" }, { 10000, "10k" }, { 20000, "20k" } };
+        const std::vector<ScaleMark> fm[4] = { fAll, fAll, fAll, fAll };     // every band is free over the whole range
         for (int b = 0; b < 4; ++b) { eqKnob[b] = std::make_unique<DualKnob> (theme, proc.apvts, "eqF" + String (b), "eqG" + String (b), bn[b], fm[b]); eqKnob[b]->onShow = shower; drawer.addAndMakeVisible (*eqKnob[b]); }
         gtKnob[0] = knob ("gtThr", "THRESHOLD", numberScale (-80, 0, 20, 2), &Theme::compKnob);
         gtKnob[1] = knob ("gtRange", "RANGE", numberScale (0, 80, 20, 2), &Theme::compKnob);
@@ -2378,43 +2510,26 @@ private:
     void paintDrawer (Graphics& g)
     {
         auto r = drawer.getLocalBounds().toFloat();
-        g.setGradientFill (theme.grad (&Theme::drawerPanel, r.withHeight ((float) mainH), 0.45f));
+        g.setGradientFill (theme.grad (&Theme::panel, r.withHeight ((float) mainH), 0.45f));
         g.fillRect (r);
-        engineLabelR = Rectangle<int> (engineLabelX, engineLabelY, 90, keyH());
-        drawLegend (g, "ENGINE", engineLabelR.toFloat(), ui (theme.tpt ("label:ENGINE", jmax (9.0f, theme.keyPt * 0.9f)), W::Bold, 0.08f), theme.tcol ("label:ENGINE", theme.panelText), Justification::centredLeft);
         titleR.clear();
         for (auto& s : sections)
         {
+            // each module in the fader panel's own colours: its rim, then its face
             auto b = s.area.toFloat();
-            if (s.title != "SYSTEM")
-            {   // the channel strip: a blue-grey console panel with screws
-                const auto sp = theme.stripPanel;
-                g.setColour (Colours::black.withAlpha (theme.shadow())); g.fillRoundedRectangle (b.translated (1.5f * theme.d3(), 3.0f * theme.d3()), 5);
-                g.setGradientFill (theme.grad (&Theme::stripPanel, b, 0.7f));
-                g.fillRoundedRectangle (b, 5);
-                g.setColour (Colours::white.withAlpha (0.025f));
-                for (float yy = b.getY() + 2; yy < b.getBottom(); yy += 3) g.drawHorizontalLine ((int) yy, b.getX() + 2, b.getRight() - 2);
-                g.setColour (Colours::white.withAlpha (0.18f)); g.drawRoundedRectangle (b, 5, 1.0f);
-                for (auto c : { b.getTopLeft().translated (9, 9), b.getTopRight().translated (-9, 9), b.getBottomLeft().translated (9, -9), b.getBottomRight().translated (-9, -9) })
-                {
-                    const auto sr = Rectangle<float> (9, 9).withCentre (c);
-                    g.setGradientFill (ColourGradient (Colour (0xffe2e4e6), sr.getX(), sr.getY(), Colour (0xff6d7277), sr.getRight(), sr.getBottom(), false)); g.fillEllipse (sr);
-                    g.setColour (Colours::black.withAlpha (0.55f)); g.drawLine (sr.getX() + 2, sr.getCentreY(), sr.getRight() - 2, sr.getCentreY(), 1.2f);
-                }
-                const String tid = "section:" + s.title;
-                const auto f = ui (theme.tpt (tid, jmax (10.0f, theme.knobPt * 1.0f)), W::Bold, 0.18f);
-                const auto tr = Rectangle<float> (b.getX() + 20, b.getY() + 4, textW (f, s.title) + 10, (float) keyH());
-                titleR.push_back ({ s.title, tr.toNearestInt() });
-                drawLegend (g, s.title, tr, f, theme.tcol (tid, Colours::white.withAlpha (0.92f)), Justification::centredLeft);
-                continue;
-            }
-            g.setColour (theme.panelText.withAlpha (0.25f)); g.drawRoundedRectangle (b, 4, 1.0f);
+            g.setColour (Colours::black.withAlpha (theme.shadow())); g.fillRoundedRectangle (b.translated (0, 3.0f * theme.d3()), 12);
+            g.setGradientFill (theme.grad (&Theme::larcRim, b, 0.8f)); g.fillRoundedRectangle (b, 12);
+            auto f2 = b.reduced (5);
+            g.setGradientFill (theme.grad (&Theme::larc, f2, 0.5f)); g.fillRoundedRectangle (f2, 8);
+            if (s.title == "ANALOG") continue;                      // its title is its on/off switch
             const String tid = "section:" + s.title;
             const auto f = ui (theme.tpt (tid, jmax (10.0f, theme.knobPt * 1.0f)), W::Bold, 0.18f);
             const auto tr = Rectangle<float> (b.getX() + 10, b.getY() + 6, textW (f, s.title) + 10, (float) keyH());
             titleR.push_back ({ s.title, tr.toNearestInt() });
-            drawLegend (g, s.title, tr, f, theme.tcol (tid, theme.panelText.withAlpha (0.85f)), Justification::centredLeft);
+            drawLegend (g, s.title, tr, f, theme.tcol (tid, theme.panelText.withAlpha (0.9f)), Justification::centredLeft);
         }
+        engineLabelR = Rectangle<int> (engineLabelX, engineLabelY, 90, keyH());
+        drawLegend (g, "ENGINE", engineLabelR.toFloat(), ui (theme.tpt ("label:ENGINE", jmax (9.0f, theme.keyPt * 0.9f)), W::Bold, 0.08f), theme.tcol ("label:ENGINE", theme.panelText), Justification::centredLeft);
     }
 
     // ---------------------------------------------------------------- layout
@@ -2434,24 +2549,31 @@ private:
         nextKey->setBounds (saveKey->getX() - gap - kh, y, kh, kh); prevKey->setBounds (nextKey->getX() - 2 - kh, y, kh, kh);
         presetName.setBounds (x0, y, prevKey->getX() - gap - x0, kh);
         y += kh + 10;
-        // the screen: wider window, longer waterfall
-        const int scrH = jlimit (230, 470, (int) (H * 0.32f));
-        screen.setBounds (x0, y, wAll, scrH); layoutScreen(); y += scrH + 10;
+        // the screen: waterfall, decay time and the reverb EQ, one under the other; drag the line under it to resize
+        const int scrDef = jlimit (260, H - 330, (int) (H * 0.47f)), scrSet = (int) proc.getUiProperty ("uiScrH", 0);
+        const int scrH = jlimit (200, jmax (200, H - 330), scrSet > 0 ? scrSet : scrDef);
+        screen.setBounds (x0, y, wAll, scrH); layoutScreen(); y += scrH;
+        faderDiv.setBounds (x0, y, wAll, 10); y += 10;
         pageKey->setVisible (false);
-        std::vector<LarcKey*> keys; for (auto& k : algKeys) keys.push_back (k.get()); for (auto& k : myKeys) keys.push_back (k.get());
-        y = flowKeys (keys, x0, wAll, y, kh, gap) + 6;
-        // the red display, and the keys that still matter: PAGE (when not every page fits), MACH (two machines), MUTE
-        for (auto* k : { regKey.get(), progKey.get(), fnKey[0].get(), fnKey[1].get(), fnKey[2].get(), fnKey[3].get(), fnKey[7].get() }) k->setVisible (false);
+        for (auto& k : algKeys) k->setVisible (false);
+        for (auto& k : myKeys) k->setVisible (false);
+        larcMain.setVisible (false);
+        for (auto* k : { regKey.get(), progKey.get(), fnKey[0].get(), fnKey[1].get(), fnKey[2].get(), fnKey[3].get(), fnKey[4].get(), fnKey[5].get(), fnKey[6].get(), fnKey[7].get() }) k->setVisible (false);
         for (auto& k : numKey) k->setVisible (false);
         for (auto& k : sdKey) k->setVisible (false);
-        std::vector<LarcKey*> side;
-        fnKey[6]->setVisible (pagesPerView() < pages()); if (fnKey[6]->isVisible()) side.push_back (fnKey[6].get());
-        fnKey[4]->setVisible (config() != 0 || addMode() > 0); if (fnKey[4]->isVisible()) side.push_back (fnKey[4].get());
-        side.push_back (fnKey[5].get());
-        const int dh = jmax (2 * kh + gap, roundToInt (larcPt() * 2.5f + 18));
-        int sx = x0 + wAll;
-        for (auto* k : side) { const int w = jmax (70, (int) k->preferredWidth()); sx -= w; k->setBounds (sx, y + (dh - kh) / 2, w, kh); sx -= gap; }
-        larcMain.setBounds (x0, y, sx - gap - x0, dh); y += dh + 12;
+        // the shortcut bar: the first keys at the left, MUTE at the right (above Reverb Mix)
+        {
+            if (scKeys.empty() && ! shortcutIds().isEmpty()) buildShortcuts();
+            scBarR = Rectangle<int> (x0, y, wAll, kh);
+            int lx = x0, rx = x0 + wAll;
+            for (size_t k = 0; k < scKeys.size(); ++k)
+            {
+                auto& key = *scKeys[k]; const int w = jmax (70, (int) key.preferredWidth());
+                if (key.getText() == "MUTE") { rx -= w; key.setBounds (rx, y, w, kh); rx -= gap; }
+                else { key.setBounds (lx, y, w, kh); lx += w + gap; }
+            }
+            y += kh + 8;
+        }
         // the faders: full names, the value in a red window, then the fader
         larcR = Rectangle<int> (x0 - 8, y, wAll + 16, H - 12 - y);
         const float np = theme.faderPt, vp = theme.faderPt;
@@ -2474,8 +2596,11 @@ private:
     {
         auto r = screen.getLocalBounds().reduced (8);
         delayView.setBounds (r);                       // shown instead of the reverb picture for the delay programs
-        reverbView.setBounds (r.withHeight (r.getHeight() * 2 / 3 - 3));
-        decay.setBounds (r.withTrimmedTop (r.getHeight() * 2 / 3 + 3));
+        const float a = (float) (double) proc.getUiProperty ("uiFrA", 0.56), b = (float) (double) proc.getUiProperty ("uiFrB", 0.22);
+        const int hA = roundToInt ((r.getHeight() - 16) * a), hB = roundToInt ((r.getHeight() - 16) * b);
+        reverbView.setBounds (r.removeFromTop (hA)); scrDiv[0].setBounds (r.removeFromTop (8));
+        decay.setBounds (r.removeFromTop (hB)); scrDiv[1].setBounds (r.removeFromTop (8));
+        eqGraph.setBounds (r);
         placeCells();
     }
     // the numbers sit on the picture: predelay at its line, decay time at the decay handle, the rest written across the
@@ -2628,76 +2753,70 @@ private:
     }
     void layoutDrawer()
     {
-        // No scrolling: every box edge sits on a line of the main window.
-        //   SYSTEM      preset bar top        -> waterfall / decay line
-        //   ANALOG      waterfall / decay line -> screen bottom
-        //   EQUALISER   buttons top           -> a fader scale line
-        //   COMPRESSOR  that fader line       -> faders bottom
+        // three modules in the fader panel's colour; every switch is its own word (yellow when on); knobs fill the space
         sections.clear();
-        const int fx = 6, fw = kDrawer - 12, pad = 6, x0 = fx + pad, wAll = fw - 2 * pad, gap = 5, kh = keyH(), kTxt = roundToInt (theme.knobPt) + 5;
-        const int A = presetName.getY();
-        const int sysHead = 6 + 2 * (keyH() + 5), anHead = 8 + jmax (keyH(), roundToInt (theme.knobPt) + 10);
-        const int knobRow = jmax (100, roundToInt (theme.knobPt * 6.4f));    // one row of SYSTEM / ANALOG knobs, no empty space
-        const int S = A + sysHead + knobRow + 6, D = S + 8 + anHead + knobRow;
-        const int E = D + 8;
-        const int fTop = faderArea.getY() + 12, fBot = faderArea.getBottom() - 12, H = mainH - 10;
-        int T = fBot; { int best = 1 << 30; for (int k = 0; k <= 10; ++k) { const int t = fBot - (fBot - fTop) * k / 10; if (std::abs (t - (E + 215)) < best) { best = std::abs (t - (E + 215)); T = t; } } }
+        const int fx = 6, fw = kDrawer - 12, pad = 8, x0 = fx + pad, wAll = fw - 2 * pad, kh = keyH();
+        const int th = roundToInt (theme.keyPt * 1.5f + 6);                   // a row of word switches
+        const int A = presetName.getY(), H = mainH - 10;
+        for (auto* k : std::initializer_list<LarcKey*> { muteKey.get(), setupKey.get(), ironKey.get(), machAKey.get(), machBKey.get(), anOnKey.get(), gtOnKey.get(), gtKeyKey.get(),
+                         eqOnKey.get(), cpOnKey.get(), satKey.get(), duckKey.get() }) k->textOnly = true;
+        orderKey->setVisible (false);
+        for (auto& d : cpDual) d->setVisible (false);
+        auto words = [&] (std::vector<LarcKey*> ks, int x, int y, int gapW) { for (auto* k : ks) { if (! k->isVisible()) continue; const int w = (int) k->preferredWidth(); k->setBounds (x, y, w, th); x += w + gapW; } return x; };
+        const int titleH = jmax (kh, roundToInt (theme.knobPt) + 12);
+        // heights: one knob row each for SYSTEM and ANALOG, the strip takes the rest
+        const int sysH = titleH + th + 6 + 118, anH = titleH + 112;
+        const int S = A + sysH, D = S + 8 + anH, E = D + 8;
         auto frame = [&] (const String& t, int top, int bot) { sections.push_back ({ t, { fx, top, fw, bot - top } }); };
-        const int titleH = jmax (kh, roundToInt (theme.knobPt) + 10);
         // SYSTEM
-        frame ("SYSTEM", A, S - 4);
+        frame ("SYSTEM", A, S);
         drawerX.setBounds (fx + fw - 8 - 24, A + 7, 24, 24);
         {
             int y = A + 6;
             machAKey->setVisible (config() != 0); machBKey->setVisible (config() != 0);
             const int lw = (int) textW (ui (theme.tpt ("label:ENGINE", jmax (9.0f, theme.keyPt * 0.9f)), W::Bold, 0.08f), "ENGINE") + 14;
             engineLabelY = y; engineLabelX = x0 + (int) textW (ui (theme.tpt ("section:SYSTEM", jmax (10.0f, theme.knobPt)), W::Bold, 0.18f), "SYSTEM") + 24;
-            engineBox.setBounds (engineLabelX + lw, y, 120, kh); y += kh + gap;
-            y = flowKeys ({ machAKey.get(), machBKey.get(), muteKey.get(), setupKey.get(), ironKey.get() }, x0, wAll, y, kh, gap);
-            const int qw = wAll / 5, kb = S - 4 - 6 - y;
-            for (int i = 0; i < 4; ++i) sysKnob[i]->setBounds (x0 + i * qw, y, qw, jmax (40, kb));
-            depthKnob->setBounds (x0 + 4 * qw, y, qw, jmax (40, kb));
+            engineBox.setBounds (engineLabelX + lw, y, jmin (120, drawerX.getX() - 8 - engineLabelX - lw), kh);
+            y = A + titleH;
+            words ({ muteKey.get(), setupKey.get(), ironKey.get(), machAKey.get(), machBKey.get() }, x0 + 2, y, 14);
+            y += th + 4;
+            const int qw = wAll / 5, kb = S - 6 - y;
+            for (int i = 0; i < 4; ++i) sysKnob[i]->setBounds (x0 + i * qw, y, qw, kb);
+            depthKnob->setBounds (x0 + 4 * qw, y, qw, kb);
         }
-        // ANALOG
-        frame ("ANALOG", S + 4, D);
+        // ANALOG: the title is the switch
+        frame ("ANALOG", S + 8, D);
         {
-            const int y = S + 4 + 4;
-            anOnKey->setBounds (x0 + wAll - (int) anOnKey->preferredWidth(), y, (int) anOnKey->preferredWidth(), kh);
-            { const int bw = jmin (175, anOnKey->getX() - 8 - (x0 + 100)); anOsBox.setBounds (anOnKey->getX() - 8 - bw, y, bw, kh); }
-            const int ky = y + titleH, kb = D - 4 - ky, w5 = wAll / 5;
+            const int y = S + 8 + 6;
+            anOnKey->setBounds (x0 + 2, y + (kh - th) / 2, (int) anOnKey->preferredWidth(), th);
+            { const int bw = jmin (190, wAll - anOnKey->getWidth() - 24); anOsBox.setBounds (x0 + wAll - bw, y, bw, kh); }
+            const int ky = S + 8 + titleH, kb = D - 6 - ky, w5 = wAll / 5;
             const int order[5] = { 0, 1, 4, 2, 3 };
-            for (int i = 0; i < 5; ++i) anKnob[order[i]]->setBounds (x0 + i * w5, ky, w5, jmax (40, kb));
+            for (int i = 0; i < 5; ++i) anKnob[order[i]]->setBounds (x0 + i * w5, ky, w5, kb);
         }
-        // CHANNEL STRIP: gate, EQ and compressor in one panel (in the order they run), big knobs, every key the same height
+        // CHANNEL STRIP: gate, EQ, compressor; their switches are words in one row
         frame ("CHANNEL STRIP", E, H);
         {
-            int y = E + 4 + titleH;
-            orderKey->setText (stripOrder() == 1 ? "COMP > EQ" : "EQ > COMP");
-            // the order key sits in the title row (like the ANALOG key), the others in one row below
-            { const int ow = (int) orderKey->preferredWidth(); orderKey->setBounds (x0 + wAll - ow, E + 4, ow, kh); }
-            y = flowKeys ({ gtOnKey.get(), gtKeyKey.get(), eqOnKey.get(), cpOnKey.get(), satKey.get(), duckKey.get() }, x0, wAll, y, kh, 4) + 2;
-            // gate:  THRESHOLD  RANGE  RELEASE  meter                       (four cells)
-            // EQ:    LOW  |  LOW MID        HIGH MID  |  HIGH                  (nested, two per row, big)
-            //        EQ MODEL  EQ COLOUR  VU meter (two cells)
-            // comp:  THRESHOLD / RATIO  |  ATTACK / RELEASE                     (nested)
-            //        TYPE  MAKEUP  MIX
-            const bool compFirst = stripOrder() == 1;
-            // rows in running order: 0 gate, then the EQ block (3 rows) and the comp block (2 rows), swapped for COMP > EQ
+            int y = E + titleH;
+            words ({ gtOnKey.get(), gtKeyKey.get() }, x0 + 2, y, 12);
+            const int wEq = (int) (eqOnKey->preferredWidth() + cpOnKey->preferredWidth() + satKey->preferredWidth() + duckKey->preferredWidth()) + 3 * 12;
+            words ({ eqOnKey.get(), cpOnKey.get(), satKey.get(), duckKey.get() }, x0 + wAll - wEq - 2, y, 12);
+            y += th + 4;
             enum { rGate, rEq1, rEq2, rEq3, rCp1, rCp2 };
-            const int order[6] = { rGate, compFirst ? rCp1 : rEq1, compFirst ? rCp2 : rEq2, compFirst ? rEq1 : rEq3, compFirst ? rEq2 : rCp1, compFirst ? rEq3 : rCp2 };
-            float wtOf[6] = { 0.9f, 1.28f, 1.28f, 0.95f, 1.32f, 0.9f };
+            const float wtOf[6] = { 0.95f, 1.3f, 1.3f, 1.0f, 1.0f, 0.95f };
             int top[6], bot[6]; { float tot = 0; for (float w : wtOf) tot += w; float acc = 0;
-                for (int k = 0; k < 6; ++k) { const int r = order[k]; top[r] = y + roundToInt ((float) (H - 6 - y) * acc / tot); acc += wtOf[r]; bot[r] = y + roundToInt ((float) (H - 6 - y) * acc / tot); } }
+                for (int r = 0; r < 6; ++r) { top[r] = y + roundToInt ((float) (H - 6 - y) * acc / tot); acc += wtOf[r]; bot[r] = y + roundToInt ((float) (H - 6 - y) * acc / tot); } }
             auto cell = [&] (Component& c, int row, float col, float span, int cols) { const float w = (float) wAll / (float) cols;
-                c.setBounds (x0 + roundToInt (col * w), top[row], roundToInt (span * w), bot[row] - top[row]); };
+                c.setBounds (x0 + roundToInt (col * w), top[row], roundToInt (span * w), bot[row] - top[row]); c.setVisible (true); };
             cell (*gtKnob[0], rGate, 0, 1, 4); cell (*gtKnob[1], rGate, 1, 1, 4); cell (*gtKnob[2], rGate, 2, 1, 4);
             { const int w = wAll / 4; gateMeter.setBounds (x0 + 3 * w + 4, top[rGate] + 2, w - 8, bot[rGate] - top[rGate] - 4); }
             cell (*eqKnob[0], rEq1, 0, 1, 2); cell (*eqKnob[1], rEq1, 1, 1, 2);
             cell (*eqKnob[2], rEq2, 0, 1, 2); cell (*eqKnob[3], rEq2, 1, 1, 2);
-            cell (*eqKnob2[0], rEq3, 0, 1, 4); cell (*eqKnob2[1], rEq3, 1, 1, 4);
-            { const int w = wAll / 4, h = bot[rEq3] - top[rEq3]; vu.setBounds (x0 + 2 * w + 2, top[rEq3] + 3, 2 * w - 4, h - 6); }
-            cell (*cpDual[0], rCp1, 0, 1, 2); cell (*cpDual[1], rCp1, 1, 1, 2);
-            cell (*cpKnob[0], rCp2, 0.5f, 1, 4); cell (*cpKnob[5], rCp2, 1.5f, 1, 4); cell (*cpKnob[6], rCp2, 2.5f, 1, 4);
+            cell (*eqKnob2[0], rEq3, 0, 1.25f, 4); cell (*eqKnob2[1], rEq3, 1.25f, 1.25f, 4);
+            { const float w = wAll / 4.0f; const int h = bot[rEq3] - top[rEq3]; vu.setBounds (x0 + roundToInt (2.5f * w) + 2, top[rEq3] + 3, roundToInt (1.5f * w) - 4, h - 6); }
+            // the compressor: every control its own knob
+            for (int k = 1; k <= 4; ++k) cell (*cpKnob[k], rCp1, (float) (k - 1), 1, 4);
+            cell (*cpKnob[0], rCp2, 0, 1, 3); cell (*cpKnob[5], rCp2, 1, 1, 3); cell (*cpKnob[6], rCp2, 2, 1, 3);
         }
         drawer.setSize (kDrawer, mainH);
     }
@@ -2718,6 +2837,7 @@ private:
     }
     void panelRightClick (Point<int> p)
     {
+        if (scBarR.contains (p)) { shortcutMenu(); return; }
         if (sdLineR.contains (p)) { editText ("slider line", "Slider display line", sdPt(), theme.larcText, &content, sdLineR); return; }
         if (brandR.contains (p))
         {
@@ -2888,7 +3008,7 @@ private:
         const int algo = proc.algoOf (machine), ppv = pagesPerView();
         if (page >= pages()) page = 0;
         page -= page % ppv;
-        for (int i = 0; i < 6 * jmin (ppv, pages() - page); ++i)
+        for (int i = 0; i < jmin (jmax (6, faderCols()), 6 * (pages() - page)); ++i)
         {
             const int slot = page * 6 + i; Target t;
             const auto& sp = proc.spec (machine, slot);
@@ -2973,7 +3093,7 @@ private:
         findMix(); mixFader->setTarget (targetNorm (mixTg)); if (snap) mixFader->snap();
         const int al = proc.algoOf (machine);
         const bool dl = al == l480::aTwin || al == l480::aMBand || al == l480::aPrime || al == l480::aChorus || al == l480::aFx;
-        delayView.setVisible (dl); reverbView.setVisible (! dl); decay.setVisible (! dl);
+        delayView.setVisible (dl); reverbView.setVisible (! dl); decay.setVisible (! dl); eqGraph.setVisible (! dl); for (auto& d : scrDiv) d.setVisible (! dl);
         lastRv = -1; screen.repaint();
     }
 
@@ -3148,6 +3268,68 @@ private:
     DecayGraph decay; DelayGraph delayView; ReverbView reverbView; ResponseRenderer renderer;
     std::vector<std::unique_ptr<NumberCell>> cells;
     std::unique_ptr<LarcKey> prevKey, nextKey, saveKey, panelKey, pageKey, machAKey, machBKey, muteKey, setupKey;
+    // ---- a thin bar you drag up or down
+    struct DragDivider : public Component
+    {
+        std::function<void (int)> onDrag; int last = 0;
+        DragDivider() { setMouseCursor (MouseCursor::UpDownResizeCursor); setRepaintsOnMouseActivity (true); }
+        void paint (Graphics& g) override { g.setColour (Colours::white.withAlpha (isMouseOver() || isMouseButtonDown() ? 0.28f : 0.06f)); g.fillRect (getLocalBounds().toFloat().withSizeKeepingCentre ((float) getWidth() - 20.0f, isMouseOver() ? 3.0f : 1.0f)); }
+        void mouseDown (const MouseEvent& e) override { last = e.getScreenY(); }
+        void mouseDrag (const MouseEvent& e) override { const int dy = e.getScreenY() - last; if (dy != 0 && onDrag) { last = e.getScreenY(); onDrag (dy); } }
+    };
+    DragDivider scrDiv[2], faderDiv;
+    ReverbEqGraph eqGraph { theme, proc };
+    void dragScreenDiv (int i, int dy)
+    {
+        const float h = (float) jmax (1, screen.getHeight() - 16);
+        float a = (float) (double) proc.getUiProperty ("uiFrA", 0.56), b = (float) (double) proc.getUiProperty ("uiFrB", 0.22);
+        if (i == 0) { a = jlimit (0.2f, 0.8f, a + dy / h); b = jlimit (0.08f, 0.9f - a, b); }
+        else b = jlimit (0.08f, 0.92f - a, b + dy / h);
+        proc.setUiProperty ("uiFrA", a); proc.setUiProperty ("uiFrB", b); layoutScreen();
+    }
+    // ---- the shortcut bar over the faders: right-click it to choose its keys
+    struct Shortcut { String id; LarcKey* target; };
+    std::vector<Shortcut> shortcutDefs()
+    {
+        std::vector<Shortcut> v = { { "PAGE", fnKey[6].get() }, { "MUTE", fnKey[5].get() }, { "MACH", fnKey[4].get() }, { "SAVE", saveKey.get() }, { "SETUP", setupKey.get() },
+                                    { "IRON", ironKey.get() }, { "ANALOG", anOnKey.get() }, { "GATE", gtOnKey.get() }, { "EQ", eqOnKey.get() }, { "COMP", cpOnKey.get() },
+                                    { "SAT", satKey.get() }, { "DUCK", duckKey.get() } };
+        return v;
+    }
+    StringArray shortcutIds() const { auto t = StringArray::fromTokens (proc.getUiProperty ("uiShortcuts", "PAGE,MUTE").toString(), ",", ""); t.removeEmptyStrings(); return t; }
+    std::vector<std::unique_ptr<LarcKey>> scKeys; std::vector<LarcKey*> scTargets; Rectangle<int> scBarR;
+    void buildShortcuts()
+    {
+        for (auto& k : scKeys) content.removeChildComponent (k.get());
+        scKeys.clear(); scTargets.clear();
+        const auto defs = shortcutDefs();
+        for (auto& id : shortcutIds())
+            for (auto& d : defs)
+                if (d.id == id && d.target != nullptr)
+                {
+                    auto k = std::make_unique<LarcKey> (theme, id); k->kc = &Theme::keyBar; content.addAndMakeVisible (*k);
+                    auto* t = d.target;
+                    k->onClick = [t] { if (t->onClick) t->onClick(); };
+                    k->onPress = [t] { if (t->onPress) t->onPress(); };
+                    k->onRelease = [t] { if (t->onRelease) t->onRelease(); };
+                    k->onRightClick = [this] { shortcutMenu(); };
+                    scTargets.push_back (t); scKeys.push_back (std::move (k));
+                }
+    }
+    void shortcutMenu()
+    {
+        PopupMenu m; m.addSectionHeader ("Keys on this bar");
+        const auto ids = shortcutIds(); const auto defs = shortcutDefs();
+        for (int i = 0; i < (int) defs.size(); ++i) m.addItem (i + 1, defs[(size_t) i].id, true, ids.contains (defs[(size_t) i].id));
+        m.showMenuAsync (PopupMenu::Options(), [this, defs] (int r)
+        {
+            if (r <= 0) return;
+            auto ids = shortcutIds(); const auto& id = defs[(size_t) r - 1].id;
+            if (ids.contains (id)) ids.removeString (id); else ids.add (id);
+            proc.setUiProperty ("uiShortcuts", ids.joinIntoString (","));
+            buildShortcuts(); layout(); content.repaint();
+        });
+    }
     std::vector<std::unique_ptr<LarcKey>> algKeys;
     // ---- your own buttons: each loads a preset; made from SETUP or by right-clicking a button
     struct MyDef { String label; int program = 0; String user; };

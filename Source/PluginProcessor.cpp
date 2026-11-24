@@ -117,7 +117,7 @@ public:
         l.add (cp ("addOn", "Add-On (Machine B)", StringArray { "Off", "Beside", "Before", "After" }, 0));   // delay / chorus with the reverb
         l.add (fp ("dlAtk", "Delay Attack", 0.0f, 500.0f, 0.0f, false, "ms", 0));
         const char* bn[] = { "Low", "Low Mid", "High Mid", "High" };
-        const float fLo[] = { 20, 100, 800, 2000 }, fHi[] = { 500, 2000, 8000, 20000 }, fDef[] = { 100, 400, 2500, 8000 };
+        const float fLo[] = { 20, 20, 20, 20 }, fHi[] = { 20000, 20000, 20000, 20000 }, fDef[] = { 100, 400, 2500, 8000 };   // every band free over the whole range
         for (int b = 0; b < 4; ++b)
         {
             l.add (fp ("eqF" + String (b), String ("EQ ") + bn[b] + " Freq", fLo[b], fHi[b], fDef[b], true, "Hz"));
