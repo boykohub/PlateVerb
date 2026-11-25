@@ -677,8 +677,8 @@ struct Compressor {
         lastA = atkMs; lastR = relMs; lastFs = fs;
         hold.set (fs, kHoldMs);
         const float holdComp = kHoldMs * 1.5f;                    // the peak window adds this much on average
-        aA = done (atkMs, fs); aR = done (std::max (1.0f, relMs - holdComp), fs);
-        relV = std::max (1.0f, relMs - holdComp); relF = std::max (1.0f, clampf (relMs, kFetRelMin, kFetRelMax) - holdComp);
+        aA = tc (std::max (0.05f, atkMs), fs); aR = tc (std::max (1.0f, relMs), fs);
+        relV = std::max (1.0f, relMs); relF = std::max (1.0f, clampf (relMs, kFetRelMin, kFetRelMax) - holdComp);
         aFA = done (clampf (atkMs, kFetAtkMin, kFetAtkMax), fs);
         aFR = done (std::max (1.0f, clampf (relMs, kFetRelMin, kFetRelMax) - holdComp), fs);
         aOA = done (10.0f, fs);
@@ -701,24 +701,16 @@ struct Compressor {
         env = target > env ? att * env + (1 - att) * target : rel * env + (1 - rel) * target;
         return (target <= 0.0f && env < 0.02f) ? 0.0f : env;
     }
-    // Release that lands exactly on time: when the gain reduction starts to recover, the curve is
-    // set so that it is back at 0 dB after 'relMs', however deep it was.
+    // Release as in the original Flexiverb compressor: a smooth exponential return with a fixed time
+    // constant, the same however deep the gain reduction was (the threshold no longer changes the release).
     struct Timed {
-        float env = 0, coef = 0, startGr = 0; bool rel = false;
-        void reset() { env = startGr = 0; rel = false; }
+        float env = 0, coef = 0, lastMs = -1, lastFs = -1;
+        void reset() { env = 0; }
         inline float step (float target, float att, float relMs, float fs) {
-            if (target > env) { env = att * env + (1 - att) * target; rel = false; }
-            else {
-                if (! rel) {                                          // recovery starts here
-                    rel = true; startGr = env;
-                    const float n = std::max (1.0f, relMs * 0.001f * fs);
-                    const float span = std::log (std::max (1.0001f, (env - target + 0.02f) / 0.02f));
-                    coef = std::exp (-span / n);
-                }
-                env = target + (env - target) * coef;
-                if (target <= 0.0f && env < 0.02f) env = 0.0f;
-                if (env - target < 0.02f) rel = false;               // settled: next recovery recomputes
-            }
+            if (relMs != lastMs || fs != lastFs) { lastMs = relMs; lastFs = fs; coef = std::exp (-1.0f / (std::max (1.0f, relMs) * 0.001f * fs)); }
+            if (target > env) env = att * env + (1 - att) * target;
+            else env = target + (env - target) * coef;
+            if (target <= 0.0f && env < 1.0e-4f) env = 0.0f;
             return env;
         }
     };
