@@ -9,6 +9,25 @@ namespace l480 {
 
 enum Cfg { kSingle = 0, kCascade, kStereoSplit, kMonoSplit };
 
+// ---------------------------------------------------------------- the reverb's own EQ: the Flexi 180V 4-band parametric
+// (modelled on the original's Mono Parametric EQ program): each band 30 Hz - 17 kHz, +-12 dB, Q from shelf to 7;
+// the low band can also be a notch (Q 16 or 32, -36 dB), the high band a high shelf. Digital filters, 64-bit.
+struct RevEqParams { double f[4] = { 1000, 1000, 1000, 1000 }, g[4] = {}, q[4] = { 1.5, 1.5, 1.5, 1.5 }; int t[4] = {}; double lvl = 0; };   // t: 0 peak, 1 shelf, 2 notch 16, 3 notch 32
+inline void designRevEq (pv::Biquad& bq, double fs, int b, double f, double g, double q, int t)
+{
+    f = std::min (17000.0, std::max (30.0, f));
+    if ((t == 2 || t == 3) && b == 0) bq.peak (fs, f, t == 3 ? 32.0 : 16.0, -36.0);
+    else if (t == 1 && b == 0) bq.lowShelf (fs, f, std::max (-12.0, std::min (12.0, g)), 1.0);
+    else if (t == 1 && b == 3) bq.highShelf (fs, f, std::max (-12.0, std::min (12.0, g)), 1.0);
+    else bq.peak (fs, f, std::max (0.3, std::min (7.0, q)), std::max (-12.0, std::min (12.0, g)));
+}
+inline double biquadMagDb (const pv::Biquad& b, double fs, double f)
+{
+    const double w = 2.0 * 3.141592653589793 * f / fs, c1 = std::cos (w), s1 = std::sin (w), c2 = std::cos (2 * w), s2 = std::sin (2 * w);
+    const double nr = b.b0 + b.b1 * c1 + b.b2 * c2, ni = -(b.b1 * s1 + b.b2 * s2), dr = 1 + b.a1 * c1 + b.a2 * c2, di = -(b.a1 * s1 + b.a2 * s2);
+    return 10.0 * std::log10 ((nr * nr + ni * ni) / std::max (1e-30, dr * dr + di * di) + 1e-30);
+}
+
 // ---------------------------------------------------------------- oversampling for the ANALOG / EQ / compressor chain
 // Linear-phase polyphase FIR (Kaiser-windowed sinc, 24 taps per phase, pass band to 0.45 of the base rate, about
 // -90 dB stop band). Factors 2, 4, 6 and 8. Latency: (taps - 1) / factor base samples in total (up + down).
@@ -83,7 +102,7 @@ struct EngineParams {
     // drawer: delay
     bool dlOn = false, dlPing = false; double dlMsL = 375, dlMsR = 500, dlFb = 0.35, dlMix = 0.3, dlLow = 0, dlHigh = 0;
     // setup
-    pv::HwParams hw; bool trOn = false; int trModel = 0; double trFreq = 80, trAmt = 0.3; double outDb = 0, cleanDb = 0;
+    pv::HwParams hw; bool trOn = false; int trModel = 0; double trFreq = 80, trAmt = 0.3; double outDb = 0, cleanDb = 0, cleanInDb = 0, stripOutDb = 0; RevEqParams rq;
 };
 
 // the channel strip's gate: opens fast, holds a moment, closes over the release time, down to its range
@@ -114,7 +133,7 @@ public:
         delay.fs = fs; delay.init (fs); delay.clearSmart (fs); delay.curL = delay.curR = 0; firstBlock = true;
         hwIn.prepare (fs, fs); hwA.prepare (fs, fs); hwB.prepare (fs, fs);
         tr.fs = fs; tr.clear();
-        sOut = 1; sClean = 1; sMute = 0;
+        sOut = 1; sClean = 1; sIn = 1; sStrip = 1; sMute = 0; for (auto& c : rqF) for (auto& b : c) b.reset();
     }
     // the ANALOG / EQ / compressor chain runs at fs * os
     void setOversampling (int n) {
@@ -167,11 +186,13 @@ public:
             eqBank.set (p.eqModel, bs, p.eqDrive);
         }
         tr.set (p.trModel, p.trFreq, p.trAmt);
+        for (int c = 0; c < 2; ++c) for (int b = 0; b < 4; ++b) designRevEq (rqF[c][b], fs, b, p.rq.f[b], p.rq.g[b], p.rq.q[b], p.rq.t[b]);
+        const double rqLvl = dbToGain (p.rq.lvl);
         const double tL = pv::clampf (p.dlMsL * 0.001 * fs, 1.0, pv::kMaxDelaySec * fs - 4), tR = pv::clampf (p.dlMsR * 0.001 * fs, 1.0, pv::kMaxDelaySec * fs - 4);
         if (firstBlock) { delay.curL = tL; delay.curR = tR; firstBlock = false; }
         delay.service();
         const double smA = 1.0 - std::exp (-1.0 / (0.02 * fs));
-        const double tgtOut = dbToGain (p.outDb), tgtClean = dbToGain (p.cleanDb), tgtDl = p.dlOn ? p.dlMix : 0.0, tgtMute = p.mute ? 1.0 : 0.0;
+        const double tgtOut = dbToGain (p.outDb), tgtClean = dbToGain (p.cleanDb), tgtIn = dbToGain (p.cleanInDb), tgtStrip = dbToGain (p.stripOutDb), tgtDl = p.dlOn ? p.dlMix : 0.0, tgtMute = p.mute ? 1.0 : 0.0;
         const bool hwInOn = p.hw.on && p.hw.inAnalog, hwOutOn = p.hw.on && p.hw.outAnalog;
         double pkIn = 0, pkOut = 0;
         pv::ScopedLineQuant mem (p.hw.on ? 18 : 0);        // the 480L's 18-bit audio memory, set once per block
@@ -183,6 +204,7 @@ public:
         const bool stripOn = p.gtOn || p.eqOn || p.comp.on;
         for (int i = 0; i < n; ++i) {
             sOut += smA * (tgtOut - sOut); gOut[i] = sOut;
+            sIn += smA * (tgtIn - sIn); L[i] *= sIn; R[i] *= sIn;           // CLEAN IN: plain gain, first of all
             const double xL = L[i], xR = R[i];
             pkIn = std::max (pkIn, std::max (std::fabs (xL), std::fabs (xR)));
             double hL = xL, hR = xR;
@@ -230,6 +252,9 @@ public:
                 }
             }
             }
+            // the reverb's own EQ (Flexi 180V parametric), on the reverb only
+            for (int b = 0; b < 4; ++b) { yL = rqF[0][b].process (yL); yR = rqF[1][b].process (yR); }
+            yL *= rqLvl; yR *= rqLvl;
             if (stripOn) { yL *= sOut; yR *= sOut; }
             wL[i] = yL; wR[i] = yR;
             if (! splitDry) dryB[0][i] = dryB[1][i] = 0.0;
@@ -253,6 +278,8 @@ public:
             const double xL = L[i], xR = R[i];
             double yL = wL[i], yR = wR[i];
             const double g = gOut[i];
+            sStrip += smA * (tgtStrip - sStrip);
+            if (stripOn) { yL *= sStrip; yR *= sStrip; }                       // the strip's CLEAN OUT: after the strip, on the reverb
             {   // the untouched dry part back in, delayed as much as the oversampled chain delays the reverb
                 dryRing[0][dryPos] = dryB[0][i]; dryRing[1][dryPos] = dryB[1][i];
                 const int rp = (dryPos - lat + kDryRing) % kDryRing; dryPos = (dryPos + 1) % kDryRing;
@@ -296,6 +323,7 @@ private:
     double wL[512] = {}, wR[512] = {}, gOut[512] = {};
     double dryB[2][512] = {};                                        // the dry part of this block (split off in the machines)
     static constexpr int kDryRing = 2048; double dryRing[2][kDryRing] = {}; int dryPos = 0;
+    pv::Biquad rqF[2][4]; double sIn = 1, sStrip = 1;
     double fs = 48000, sOut = 1, sClean = 1, sDl = 0, sMute = 0, mIn = 0, mOut = 0; bool firstBlock = true;
     Machine mach[2];
     cs::Preamp anVerb, anEq; int anM = -1, anC = -1; double anD = -1, anO = -99;

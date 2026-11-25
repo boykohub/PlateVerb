@@ -38,6 +38,8 @@ public:
         pCpAtk = P ("cpAtk"); pCpRel = P ("cpRel"); pCpMakeup = P ("cpMakeup"); pCpMix = P ("cpMix");
         pDlOn = P ("dlOn"); pDlSync = P ("dlSync"); pDlPing = P ("dlPing"); pDlTimeL = P ("dlTimeL"); pDlTimeR = P ("dlTimeR");
         pDlDivL = P ("dlDivL"); pDlDivR = P ("dlDivR"); pDlFb = P ("dlFb"); pDlMix = P ("dlMix"); pDlLow = P ("dlLow"); pDlHigh = P ("dlHigh");
+        for (int b = 0; b < 4; ++b) { pRqF[b] = apvts.getRawParameterValue ("rqF" + String (b)); pRqG[b] = apvts.getRawParameterValue ("rqG" + String (b)); pRqQ[b] = apvts.getRawParameterValue ("rqQ" + String (b)); }
+        pRqT0 = P ("rqT0"); pRqT3 = P ("rqT3"); pRqLvl = P ("rqLvl"); pCleanIn = P ("cleanIn"); pCleanOut = P ("cleanOut"); pStripOut = P ("stripOut");
         pHwOn = P ("hwOn"); pHwIn = P ("hwIn"); pHwOut = P ("hwOut"); pHwXfIn = P ("hwXfIn"); pHwXfOut = P ("hwXfOut"); pHwNoise = P ("hwNoise");
         pAnOn = P ("anOn"); pAnTarget = P ("anTarget"); pAnModel = P ("anModel"); pAnColour = P ("anColour"); pAnDrive = P ("anDrive"); pAnOut = P ("anOut");
         pTrOn = P ("trOn"); pTrModel = P ("trModel"); pTrFreq = P ("trFreq"); pTrAmt = P ("trAmt");
@@ -153,7 +155,7 @@ public:
         l.add (fp ("dlLow", "Delay Low", -12.0f, 12.0f, 0.0f, false, "dB", 1));
         l.add (fp ("dlHigh", "Delay High", -12.0f, 12.0f, 0.0f, false, "dB", 1));
         // setup: 480L hardware model and output
-        l.add (bp ("hwOn", "Analog Hardware", true));
+        l.add (bp ("hwOn", "Analog Stages", true));
         l.add (cp ("hwIn", "Input", StringArray { "Analog", "Digital" }, 0));
         l.add (cp ("hwOut", "Output Type", StringArray { "Analog", "Digital" }, 0));
         l.add (bp ("hwXfIn", "Input Transformers", false));
@@ -164,6 +166,18 @@ public:
         l.add (cp ("hwInSt", "Flexi 180V Input Stage", StringArray { "Analog (standard)", "Analog + transformer option", "Digital I/O" }, 0));
         l.add (cp ("hwOutSt", "Flexi 180V Output Stage", StringArray { "Analog (standard)", "Analog + transformer option", "Digital I/O" }, 0));
         l.add (fp ("cleanOut", "Clean Out", -24.0f, 12.0f, 0.0f, false, "dB", 1));
+        l.add (fp ("cleanIn", "Clean In", -24.0f, 12.0f, 0.0f, false, "dB", 1));
+        l.add (fp ("stripOut", "Strip Clean Out", -24.0f, 12.0f, 0.0f, false, "dB", 1));
+        // the reverb's own EQ: Flexi 180V 4-band parametric; the factory program has every band at 1.0 kHz, Q 1.5, 0 dB
+        for (int b = 0; b < 4; ++b)
+        {
+            l.add (fp ("rqF" + String (b), "Reverb EQ " + String (b + 1) + " Freq", 30.0f, 17000.0f, 1000.0f, true, "Hz"));
+            l.add (fp ("rqG" + String (b), "Reverb EQ " + String (b + 1) + " Level", -12.0f, 12.0f, 0.0f, false, "dB", 1));
+            l.add (fp ("rqQ" + String (b), "Reverb EQ " + String (b + 1) + " Q", 0.3f, 7.0f, 1.5f, true, "", 2));
+        }
+        l.add (cp ("rqT0", "Reverb EQ 1 Type", StringArray { "Peak", "Low Shelf", "Notch Q16", "Notch Q32" }, 0));
+        l.add (cp ("rqT3", "Reverb EQ 4 Type", StringArray { "Peak", "High Shelf" }, 0));
+        l.add (fp ("rqLvl", "Reverb EQ Level", -12.0f, 12.0f, 0.0f, false, "dB", 2));
         l.add (bp ("trOn", "Transformer On", false));
         l.add (cp ("trModel", "Transformer Model", trNames(), 0));
         l.add (fp ("trFreq", "Transformer Freq", 20.0f, 400.0f, 80.0f, true, "Hz"));
@@ -539,7 +553,10 @@ public:
             (void) pHwOn; (void) pHwIn; (void) pHwOut; (void) pHwXfIn; (void) pHwXfOut;
         }
         p.trOn = false; (void) pTrOn; (void) pTrModel; (void) pTrFreq; (void) pTrAmt;     // IRON is gone: the 180V stages replace it
-        p.outDb = f (pOut); p.cleanDb = apvts.getRawParameterValue ("cleanOut")->load();
+        p.outDb = f (pOut);
+        p.cleanInDb = f (pCleanIn); p.stripOutDb = f (pStripOut); p.cleanDb = f (pCleanOut);
+        for (int b = 0; b < 4; ++b) { p.rq.f[b] = f (pRqF[b]); p.rq.g[b] = f (pRqG[b]); p.rq.q[b] = f (pRqQ[b]); p.rq.t[b] = 0; }
+        p.rq.t[0] = (int) f (pRqT0); p.rq.t[3] = (int) f (pRqT3); p.rq.lvl = f (pRqLvl);
     }
 
     // message thread: the Pitch program's glide sliders follow PCH/FIN like the hardware's
@@ -605,6 +622,7 @@ public:
     std::atomic<bool> mute { false }, programLoaded { true };
     std::atomic<float> meterIn { 0 }, meterOut { 0 }, compGr { 0 }, gateKey { -120 }, gateGain { 0 };
     std::atomic<double> sampleRateUi { 48000.0 };
+    std::atomic<float>* pRqF[4] {}; std::atomic<float>* pRqG[4] {}; std::atomic<float>* pRqQ[4] {}; std::atomic<float> *pRqT0 = nullptr, *pRqT3 = nullptr, *pRqLvl = nullptr, *pCleanIn = nullptr, *pCleanOut = nullptr, *pStripOut = nullptr;
     static constexpr int kScopeSize = 8192;
     std::array<float, kScopeSize> scope {};
     std::atomic<int> scopeWrite { 0 };
