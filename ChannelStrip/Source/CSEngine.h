@@ -414,7 +414,7 @@ struct DS2 {
             for (int c = 0; c < 2; ++c) {
                 e.env[c] = lv[c] > e.env[c] ? e.aA * e.env[c] + (1 - e.aA) * lv[c] : e.aR * e.env[c] + (1 - e.aR) * lv[c];
                 const float db = 20.0f * std::log10 (e.env[c] + 1e-9f);
-                e.gr[c] = std::min (p[k].range, pv::gainComputer (db, p[k].thr, 4.0f, 6.0f));
+                e.gr[c] = std::min (p[k].range, (float) pv::gainComputer (db, p[k].thr, 4.0f, 6.0f));
                 maxGr = std::max (maxGr, e.gr[c]);
             }
             if (split) {      // dynamic bell cut at the de-ess frequency, re-matched every 16 samples
@@ -446,7 +446,7 @@ struct Gate {
         env = lvl > env ? lvl : rE * env + (1 - rE) * lvl;
         const float db = 20.0f * std::log10 (env + 1e-9f), floorG = dbToGain (-p.range);
         float target;
-        if (p.expander) target = std::max (floorG, dbToGain (std::min (0.0f, db - p.thr)));
+        if (p.expander) target = std::max (floorG, (float) dbToGain (std::min (0.0f, db - p.thr)));
         else {
             if (db > p.thr) { open = true; holdCnt = p.holdMs * 0.001f * fs; }
             else if (db < p.thr - p.hyst) { if (holdCnt > 0) holdCnt -= 1; else open = false; }

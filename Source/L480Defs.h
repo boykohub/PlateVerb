@@ -327,7 +327,7 @@ inline int realIndex (int algo, int i) { const auto& s = algoDef (algo).p[i]; re
 
 // ---------------------------------------------------------------- banks and programs
 inline const char* bankName (int bank) {
-    static const char* n[] = { "", "480 Halls", "480 Rooms", "Wild Spaces", "Plates", "Effects", "Twin Delays", "Samplers", "Pitch/Doppler", "Mastering", "Compressor",
+    static const char* n[] = { "", "180V Halls", "180V Rooms", "Wild Spaces", "Plates", "Effects", "Twin Delays", "Samplers", "Pitch/Doppler", "Mastering", "Compressor",
                                "Random Hall", "Random Spaces", "Ambience", "Post Ambience", "Prime Time III", "Freq. Stuff", "Test & Reference",
                                "Concert Hall", "Rich Plate", "6-Voice Chorus", "Multiband Delays",
                                "HD Combo", "Surround", "Classic Surround", "HD Reverb", "HD Classic",

@@ -113,7 +113,7 @@ public:
         { StringArray m; for (int i = 0; i < cs::kNumEqModels; ++i) m.add (cs::eqModelName (i)); l.add (cp ("eqModel", "EQ Model", m, 1)); }
         l.add (fp ("eqDrive", "EQ Colour", 0.0f, 1.0f, 0.5f, false, "%"));
         l.add (fp ("erAtk", "Reflection Attack", 0.0f, 100.0f, 0.0f, false, "ms", 1));
-        l.add (fp ("loopAmt", "480 Depth", 0.0f, 2.0f, 1.0f, false, "%"));      // the measured long recirculation (stone depth)
+        l.add (fp ("loopAmt", "180V Depth", 0.0f, 2.0f, 1.0f, false, "%"));      // the measured long recirculation (stone depth)
         l.add (cp ("addOn", "Add-On (Machine B)", StringArray { "Off", "Beside", "Before", "After" }, 0));   // delay / chorus with the reverb
         l.add (fp ("dlAtk", "Delay Attack", 0.0f, 500.0f, 0.0f, false, "ms", 0));
         const char* bn[] = { "Low", "Low Mid", "High Mid", "High" };
@@ -159,6 +159,11 @@ public:
         l.add (bp ("hwXfIn", "Input Transformers", false));
         l.add (bp ("hwXfOut", "Output Transformers", false));
         l.add (bp ("hwNoise", "Converter Noise", false));
+        // Flexi 180V hardware stages: the 480L's own analog I/O (electronically balanced, 18-bit A/D and D/A),
+        // its user-installable transformer option, or its digital I/O (no analog stage at all)
+        l.add (cp ("hwInSt", "Flexi 180V Input Stage", StringArray { "Analog (standard)", "Analog + transformer option", "Digital I/O" }, 0));
+        l.add (cp ("hwOutSt", "Flexi 180V Output Stage", StringArray { "Analog (standard)", "Analog + transformer option", "Digital I/O" }, 0));
+        l.add (fp ("cleanOut", "Clean Out", -24.0f, 12.0f, 0.0f, false, "dB", 1));
         l.add (bp ("trOn", "Transformer On", false));
         l.add (cp ("trModel", "Transformer Model", trNames(), 0));
         l.add (fp ("trFreq", "Transformer Freq", 20.0f, 400.0f, 80.0f, true, "Hz"));
@@ -360,7 +365,7 @@ public:
     }
     static std::vector<TapEd> tapsFromString (const String& s)
     { std::vector<TapEd> r; StringArray t; t.addTokens (s, ";", ""); for (auto& x : t) { StringArray v; v.addTokens (x, ":", ""); if (v.size() == 2) r.push_back ({ v[0].getFloatValue(), v[1].getFloatValue() }); } return r; }
-    int baseTaps (int m, float* ms, float* db, int max) const { return engine.baseTaps (m, ms, db, max); }
+    int baseTaps (int m, float* ms, float* db, int max) const { double a[64], b[64]; const int k = engine.baseTaps (m, a, b, jmin (max, 64)); for (int i = 0; i < k; ++i) { ms[i] = (float) a[i]; db[i] = (float) b[i]; } return k; }
     float mainRt (int m) const { return slotValue (m, l480::algoMainRtSlot (algoOf (m))); }
     // the program's own decay shape (BAS/XOV and the RT high cut), as a multiplier of the main reverb time
     float programDecayMul (int m, float f) const
@@ -427,36 +432,37 @@ public:
     void prepareToPlay (double sampleRate, int samplesPerBlock) override
     {
         engine.prepare (sampleRate);
-        fbuf.setSize (2, jmax (samplesPerBlock, 512));
+        dbuf.setSize (2, jmax (samplesPerBlock, 512));
         sampleRateUi.store (sampleRate);
     }
     void releaseResources() override {}
     // 64-bit audio from the host: converted at the edges (the EQ runs in 64-bit when Precision is 64-bit)
-    bool supportsDoublePrecisionProcessing() const override { return true; }
-    void processBlock (AudioBuffer<double>& buffer, MidiBuffer& midi) override
+    // 64-bit everywhere: the whole engine runs in double; a 32-bit host buffer is converted in and out
+    void processBlock (AudioBuffer<float>& buffer, MidiBuffer& midi) override
     {
         const int n = buffer.getNumSamples(), nc = jmin (2, buffer.getNumChannels());
-        if (fbuf.getNumSamples() < n || fbuf.getNumChannels() < 2) fbuf.setSize (2, n, false, false, true);
-        for (int c = 0; c < nc; ++c) { auto* d = fbuf.getWritePointer (c); const auto* s2 = buffer.getReadPointer (c); for (int i = 0; i < n; ++i) d[i] = (float) s2[i]; }
-        AudioBuffer<float> view (fbuf.getArrayOfWritePointers(), 2, n);
+        if (dbuf.getNumSamples() < n || dbuf.getNumChannels() < 2) dbuf.setSize (2, n, false, false, true);
+        for (int c = 0; c < nc; ++c) { auto* d = dbuf.getWritePointer (c); const auto* s2 = buffer.getReadPointer (c); for (int i = 0; i < n; ++i) d[i] = s2[i]; }
+        AudioBuffer<double> view (dbuf.getArrayOfWritePointers(), 2, n);
         if (nc == 1) view.copyFrom (1, 0, view, 0, 0, n);
         processBlock (view, midi);
-        for (int c = 0; c < buffer.getNumChannels(); ++c) { auto* d = buffer.getWritePointer (c); const auto* s2 = view.getReadPointer (jmin (c, 1)); for (int i = 0; i < n; ++i) d[i] = s2[i]; }
+        for (int c = 0; c < buffer.getNumChannels(); ++c) { auto* d = buffer.getWritePointer (c); const auto* s2 = view.getReadPointer (jmin (c, 1)); for (int i = 0; i < n; ++i) d[i] = (float) s2[i]; }
     }
+    bool supportsDoublePrecisionProcessing() const override { return true; }
     using AudioProcessor::processBlock;
     bool isBusesLayoutSupported (const BusesLayout& b) const override
     {
         const auto in = b.getMainInputChannelSet(), out = b.getMainOutputChannelSet();
         return out == AudioChannelSet::stereo() && (in == AudioChannelSet::stereo() || in == AudioChannelSet::mono());
     }
-    void processBlock (AudioBuffer<float>& buffer, MidiBuffer&) override
+    void processBlock (AudioBuffer<double>& buffer, MidiBuffer&) override
     {
         ScopedNoDenormals noDenormals;
         const int n = buffer.getNumSamples();
         if (buffer.getNumChannels() < 2 || n == 0) return;
         if (getTotalNumInputChannels() == 1) buffer.copyFrom (1, 0, buffer, 0, 0, n);
         fillParams (prm);
-        float* L = buffer.getWritePointer (0); float* R = buffer.getWritePointer (1);
+        double* L = buffer.getWritePointer (0); double* R = buffer.getWritePointer (1);
         for (int pos = 0; pos < n; pos += 256)
         {
             const int k = jmin (256, n - pos);
@@ -469,14 +475,14 @@ public:
         }
         {   // live display feed: the output, mono
             int w = scopeWrite.load (std::memory_order_relaxed);
-            for (int i = 0; i < n; ++i) { scope[(size_t) w] = 0.5f * (L[i] + R[i]); w = (w + 1) & (kScopeSize - 1); }
+            for (int i = 0; i < n; ++i) { scope[(size_t) w] = (float) (0.5 * (L[i] + R[i])); w = (w + 1) & (kScopeSize - 1); }
             scopeWrite.store (w, std::memory_order_release);
         }
         if (engine.latency() != getLatencySamples()) setLatencySamples (engine.latency());
-        meterIn.store (jmax (meterIn.load() * 0.85f, engine.meterIn()));
-        meterOut.store (jmax (meterOut.load() * 0.85f, engine.meterOut()));
+        meterIn.store (jmax (meterIn.load() * 0.85f, (float) engine.meterIn()));
+        meterOut.store (jmax (meterOut.load() * 0.85f, (float) engine.meterOut()));
         gateKey.store (engine.gateKeyDb()); gateGain.store (engine.gateGainDb());
-        compGr.store (prm.comp.on ? engine.compGr() : 0.0f);
+        compGr.store (prm.comp.on ? (float) engine.compGr() : 0.0f);
     }
     void fillParams (l480::EngineParams& p)
     {
@@ -491,15 +497,16 @@ public:
             for (int i = 0; i < l480::kMaxParams; ++i) if (l480::algoDef (a).p[i].lab != nullptr && std::strcmp (l480::algoDef (a).p[i].lab, "CONV") == 0) p.val[m][i] = (float) (int) apvts.getRawParameterValue ("conv")->load();
         }
         p.config = jlimit (0, 3, (int) f (pCfg)); p.mute = mute.load();
-        { static const int osF[] = { 1, 2, 4, 6, 8 }; p.oversampling = osF[jlimit (0, 4, (int) f (pOs))]; p.precision64 = f (pPrec) > 0.5f; }
+        { static const int osF[] = { 1, 2, 4, 6, 8 }; p.oversampling = osF[jlimit (0, 4, (int) f (pOs))]; p.precision64 = true; (void) pPrec; }   // 64-bit everywhere
         for (int m = 0; m < 2; ++m) { p.curveOn[m] = aCurveOn[m].load();
                                       if (p.curveOn[m]) for (int b = 0; b < pv::DecayEq::N; ++b) p.curveMul[m][b] = aCurveMul[m][b].load() * programDecayMul (m, pv::DecayEq::centre (b)); }
         for (int m = 0; m < 2; ++m) { p.tapN[m] = aTapN[m].load(); for (int k = 0; k < p.tapN[m]; ++k) { p.tapMs[m][k] = aTapMs[m][k].load(); p.tapDb[m][k] = aTapDb[m][k].load(); } }
         for (int m = 0; m < 2; ++m) { p.reflN[m] = aReflN[m].load(); for (int k = 0; k < p.reflN[m]; ++k) { p.reflMs[m][k] = aReflMs[m][k].load(); p.reflDb[m][k] = aReflDb[m][k].load(); p.reflPan[m][k] = aReflPan[m][k].load(); } }
-        p.anOn = on (pAnOn); p.anTarget = jlimit (0, 2, (int) f (pAnTarget)); p.anModel = jlimit (0, 4, (int) f (pAnModel));
+        p.anOn = false; (void) pAnOn;   // the ANALOG section is gone
+        p.anTarget = jlimit (0, 2, (int) f (pAnTarget)); p.anModel = jlimit (0, 4, (int) f (pAnModel));
         p.anColour = jlimit (0, 3, (int) f (pAnColour)); p.anDrive = f (pAnDrive); p.anOut = f (pAnOut);
         p.eqOn = on (pEqOn);
-        p.eqModel = jlimit (0, cs::kNumEqModels - 1, (int) apvts.getRawParameterValue ("eqModel")->load()); p.eqDrive = apvts.getRawParameterValue ("eqDrive")->load();
+        p.eqModel = jlimit (0, cs::kNumEqModels - 1, (int) apvts.getRawParameterValue ("eqModel")->load()); p.eqDrive = 0.5f;   // each EQ model at its own hardware colour
         p.loopAmt = apvts.getRawParameterValue ("loopAmt")->load();
         p.addOn = jlimit (0, 3, (int) apvts.getRawParameterValue ("addOn")->load());
         for (int m = 0; m < 2; ++m)
@@ -525,10 +532,14 @@ public:
             p.dlMsR = jmin (2990.0f, (float) (kDivBeats[jlimit (0, 15, (int) f (pDlDivR))] * 60000.0 / bpm));
         }
         else { p.dlMsL = f (pDlTimeL); p.dlMsR = f (pDlTimeR); }
-        p.hw.on = false; (void) pHwOn;                     // no hardware modelling p.hw.inAnalog = f (pHwIn) < 0.5f; p.hw.outAnalog = f (pHwOut) < 0.5f;
-        p.hw.xfIn = on (pHwXfIn); p.hw.xfOut = on (pHwXfOut); p.hw.noise = on (pHwNoise);
-        p.trOn = on (pTrOn); p.trModel = jlimit (0, pv::kNumTransformers - 1, (int) f (pTrModel)); p.trFreq = f (pTrFreq); p.trAmt = f (pTrAmt);
-        p.outDb = f (pOut);
+        {   // Flexi 180V input and output stages (fixed model of the hardware, at its standard load)
+            const int si = (int) apvts.getRawParameterValue ("hwInSt")->load(), so = (int) apvts.getRawParameterValue ("hwOutSt")->load();
+            p.hw.inAnalog = si < 2; p.hw.outAnalog = so < 2; p.hw.xfIn = si == 1; p.hw.xfOut = so == 1;
+            p.hw.on = p.hw.inAnalog || p.hw.outAnalog; p.hw.noise = on (pHwNoise);
+            (void) pHwOn; (void) pHwIn; (void) pHwOut; (void) pHwXfIn; (void) pHwXfOut;
+        }
+        p.trOn = false; (void) pTrOn; (void) pTrModel; (void) pTrFreq; (void) pTrAmt;     // IRON is gone: the 180V stages replace it
+        p.outDb = f (pOut); p.cleanDb = apvts.getRawParameterValue ("cleanOut")->load();
     }
 
     // message thread: the Pitch program's glide sliders follow PCH/FIN like the hardware's
@@ -599,7 +610,7 @@ public:
     std::atomic<int> scopeWrite { 0 };
 
 private:
-    l480::Engine engine; l480::EngineParams prm; AudioBuffer<float> fbuf;
+    l480::Engine engine; l480::EngineParams prm; AudioBuffer<double> dbuf;
     std::atomic<float>* pProg[2] = {}; std::atomic<float>* pSlot[2][l480::kMaxParams] = {};
     std::atomic<float> *pCfg, *pOut, *pEqOn, *pEqF[4], *pEqG[4], *pCpOn, *pCpType, *pCpColor, *pCpDuck, *pCpThr, *pCpRatio, *pCpAtk, *pCpRel, *pCpMakeup, *pCpMix;
     std::atomic<float> *pDlOn, *pDlSync, *pDlPing, *pDlTimeL, *pDlTimeR, *pDlDivL, *pDlDivR, *pDlFb, *pDlMix, *pDlLow, *pDlHigh;

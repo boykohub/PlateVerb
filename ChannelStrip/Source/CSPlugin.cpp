@@ -304,10 +304,12 @@ public:
         {
             if (scOn) { kL = sc[0].process (kL); kR = sc[1].process (kR); }   // filters what the compressor hears, not the audio
             c[0].setTimes (p.atkMs, p.relMs);
-            if (linked) { c[0].process (L, R, kL, kR, p); return; }
+            double dL = L, dR = R;
+            if (linked) { c[0].process (dL, dR, kL, kR, p); L = (float) dL; R = (float) dR; return; }
             c[1].setTimes (p.atkMs, p.relMs);
-            float l2 = L, r2 = R;
-            c[0].process (L, l2, kL, kL, p); c[1].process (R, r2, kR, kR, p);
+            double l2 = dL, r2 = dR;
+            c[0].process (dL, l2, kL, kL, p); c[1].process (dR, r2, kR, kR, p);
+            L = (float) dL; R = (float) dR;
         }
         float gr() const { return std::max (c[0].reductionDb(), c[1].reductionDb()); }
     };
