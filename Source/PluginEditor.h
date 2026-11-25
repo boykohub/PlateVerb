@@ -1057,30 +1057,37 @@ static const std::vector<int>& browseOrder()
 class ReverbEqGraph : public Component
 {
 public:
-    // the reverb's own EQ: the Flexi 180V 4-band parametric. Four points, always there (the factory program has them all at 1.0 kHz)
+    // the reverb's own EQ: the Flexi 180V 4-band parametric. Bands 1-4 are always there (spread over the range so each one is
+    // seen); click an empty spot to add a band right there (up to 8). Drag a point to move it, right-click and drag up/down
+    // for its Q (a right-click without moving opens its shape menu), double-click: bands 1-4 back to 0 dB, an added one goes.
+    static constexpr int N = l480::kRevEqBands;
     ReverbEqGraph (const Theme& t, Flexiverb480Processor& p) : th (t), proc (p)
     {
-        for (int b = 0; b < 4; ++b) { fP[b] = p.apvts.getParameter ("rqF" + String (b)); gP[b] = p.apvts.getParameter ("rqG" + String (b)); qP[b] = p.apvts.getParameter ("rqQ" + String (b)); }
+        for (int b = 0; b < N; ++b) { fP[b] = p.apvts.getParameter ("rqF" + String (b)); gP[b] = p.apvts.getParameter ("rqG" + String (b)); qP[b] = p.apvts.getParameter ("rqQ" + String (b));
+                                      uP[b] = b < 4 ? nullptr : p.apvts.getParameter ("rqU" + String (b)); }
         tP[0] = p.apvts.getParameter ("rqT0"); tP[3] = p.apvts.getParameter ("rqT3");
     }
     std::function<void (const String&, const String&)> onShow;
+    float textPt() const { return th.tpt ("reverb eq text", th.faderPt); }   // as big as the numbers above the faders
     void paint (Graphics& g) override
     {
-        plot = getLocalBounds().toFloat().reduced (th.sz (40.0f), 6).withTrimmedRight (th.sz (30.0f)).withTrimmedBottom (th.sz (11.0f)).withTrimmedTop (th.sz (14.0f));
+        const float tp = textPt();
+        plot = getLocalBounds().toFloat().reduced (tp * 3.6f, 6).withTrimmedRight (tp * 1.6f).withTrimmedBottom (tp + 4.0f).withTrimmedTop (tp + 6.0f);
         const Colour col = th.displayText;
-        g.setFont (ui (th.sz (8.5f), W::Bold));
+        g.setFont (ui (tp, W::Bold));
         g.setColour (col.withAlpha (0.8f));
-        g.drawText ("REVERB EQ (Flexi 180V, 4 bands):  drag a point, mouse wheel = Q, right-click = Q and shape, double-click = back to 1 kHz / 0 dB", getLocalBounds().toFloat().withHeight (th.sz (13.0f)).withTrimmedLeft (th.sz (40.0f)), Justification::centredLeft, false);
-        g.setFont (ui (th.sz (8.5f), W::Medium));
+        g.drawFittedText ("REVERB EQ:  click to add a point there,  drag a point,  right-click + drag up/down = Q,  double-click = reset / remove",
+                          getLocalBounds().withHeight ((int) (tp + 6.0f)).withTrimmedLeft ((int) (tp * 3.6f)), Justification::centredLeft, 1, 0.7f);
+        g.setFont (ui (tp, W::Medium));
         for (float f : { 50.0f, 100.0f, 200.0f, 500.0f, 1000.0f, 2000.0f, 5000.0f, 10000.0f })
         {
             const float x = xOf (f); g.setColour (col.withAlpha (0.10f)); g.drawVerticalLine ((int) x, plot.getY(), plot.getBottom());
-            g.setColour (col.withAlpha (0.55f)); g.drawText (f >= 1000 ? String (f / 1000, 0) + "k" : String ((int) f), Rectangle<float> (x - 18, plot.getBottom() + 1, 36, th.sz (12.0f)), Justification::centred, false);
+            g.setColour (col.withAlpha (0.6f)); g.drawText (f >= 1000 ? String (f / 1000, 0) + "k" : String ((int) f), Rectangle<float> (x - tp * 2, plot.getBottom() + 2, tp * 4, tp + 2), Justification::centred, false);
         }
         for (float db : { -12.0f, -6.0f, 0.0f, 6.0f, 12.0f })
         {
             const float y = yOf (db); g.setColour (col.withAlpha (db == 0 ? 0.25f : 0.10f)); g.drawHorizontalLine ((int) y, plot.getX(), plot.getRight());
-            g.setColour (col.withAlpha (0.55f)); g.drawText ((db > 0 ? "+" : "") + String ((int) db) + " dB", Rectangle<float> (plot.getX() - th.sz (40.0f), y - 6, th.sz (37.0f), 12), Justification::centredRight, false);
+            g.setColour (col.withAlpha (0.6f)); g.drawText ((db > 0 ? "+" : "") + String ((int) db) + " dB", Rectangle<float> (plot.getX() - tp * 3.6f, y - tp * 0.6f, tp * 3.4f, tp * 1.2f), Justification::centredRight, false);
         }
         Path pc;
         for (int i = 0; i <= 240; ++i) { const float f = 20.0f * std::pow (1000.0f, i / 240.0f); const Point<float> pt (xOf (f), yOf (magDb (f))); if (i == 0) pc.startNewSubPath (pt); else pc.lineTo (pt); }
@@ -1088,13 +1095,14 @@ public:
         g.setColour (col.withAlpha (0.25f)); g.strokePath (pc, PathStrokeType (4.0f));
         g.setColour (col); g.strokePath (pc, PathStrokeType (1.8f));
         g.restoreState();
-        g.setFont (ui (th.sz (8.0f), W::Bold));
-        for (int b = 3; b >= 0; --b)
+        g.setFont (ui (jmax (9.0f, tp * 0.8f), W::Bold));
+        for (int b = N - 1; b >= 0; --b)
         {
+            if (! used (b)) continue;
             const auto pt = pointOf (b);
             g.setColour (Colours::black); g.fillEllipse (Rectangle<float> (13, 13).withCentre (pt));
-            g.setColour (b == drag || b == hover ? Colours::white : col); g.drawEllipse (Rectangle<float> (11, 11).withCentre (pt), 2.0f);
-            g.drawText (String (b + 1), Rectangle<float> (14, 12).withCentre (pt.translated (0, -12)), Justification::centred, false);
+            g.setColour (b == drag || b == hover ? Colours::white : (b >= 4 ? th.keyLight : col)); g.drawEllipse (Rectangle<float> (11, 11).withCentre (pt), 2.0f);
+            g.drawText (String (b + 1), Rectangle<float> (tp * 1.6f, tp + 2).withCentre (pt.translated (0, -tp * 0.6f - 8)), Justification::centred, false);
         }
     }
     void mouseMove (const MouseEvent& e) override { const int h = hit (e.position); if (h != hover) { hover = h; repaint(); } }
@@ -1102,17 +1110,48 @@ public:
     void mouseDown (const MouseEvent& e) override
     {
         if (arrangeMods (e)) return;
-        drag = hit (e.position);
-        if (drag >= 0 && e.mods.isPopupMenu()) { menu (drag); drag = -1; return; }
+        drag = hit (e.position); qDrag = false; moved = false;
+        if (e.mods.isPopupMenu())
+        {   // right-click: drag up/down for the Q; without moving, the shape menu
+            if (drag >= 0) { qDrag = true; qStart = value (qP[drag]); qP[drag]->beginChangeGesture(); show (drag); }
+            return;
+        }
+        if (drag < 0 && plot.expanded (6).contains (e.position))
+        {   // an empty spot: a new band right here
+            for (int b = 4; b < N; ++b) if (! used (b))
+            {
+                drag = b;
+                setParam (qP[b], 1.5f);
+                uP[b]->beginChangeGesture(); uP[b]->setValueNotifyingHost (1.0f); uP[b]->endChangeGesture();
+                break;
+            }
+            if (drag < 0) { if (onShow) onShow ("Reverb EQ", "all 8 points are in use: double-click one of 5-8 to remove it"); return; }
+            fP[drag]->beginChangeGesture(); gP[drag]->beginChangeGesture();
+            set (drag, fOf (e.position.x), dbOf (e.position.y));
+            return;
+        }
         if (drag >= 0) { fP[drag]->beginChangeGesture(); gP[drag]->beginChangeGesture(); }
     }
     void mouseDrag (const MouseEvent& e) override
     {
         if (arrangeMods (e)) return;
         if (drag < 0) return;
+        if (e.getDistanceFromDragStart() > 2) moved = true;
+        if (qDrag)
+        {   // up = higher Q (narrower), down = lower Q (wider): a factor of 2 every 60 pixels
+            const float q = jlimit (0.3f, 7.0f, qStart * std::pow (2.0f, -(float) e.getDistanceFromDragStartY() / 60.0f));
+            qP[drag]->setValueNotifyingHost (qP[drag]->convertTo0to1 (qP[drag]->getNormalisableRange().snapToLegalValue (q)));
+            if (tP[drag] && (int) value (tP[drag]) != 0) setParam (tP[drag], 0.0f);    // a Q means a peak
+            show (drag); repaint(); return;
+        }
         set (drag, fOf (e.position.x), dbOf (e.position.y));
     }
-    void mouseUp (const MouseEvent&) override { if (drag >= 0) { fP[drag]->endChangeGesture(); gP[drag]->endChangeGesture(); } drag = -1; }
+    void mouseUp (const MouseEvent&) override
+    {
+        if (qDrag && drag >= 0) { qP[drag]->endChangeGesture(); if (! moved) menu (drag); }
+        else if (drag >= 0) { fP[drag]->endChangeGesture(); gP[drag]->endChangeGesture(); }
+        drag = -1; qDrag = false; repaint();
+    }
     void mouseWheelMove (const MouseEvent& e, const MouseWheelDetails& w) override
     {
         const int h = hit (e.position); if (h < 0) return;
@@ -1123,12 +1162,14 @@ public:
     {
         if (arrangeMods (e)) return;
         const int h = hit (e.position); if (h < 0) return;
-        setParam (fP[h], 1000.0f); setParam (gP[h], 0.0f); setParam (qP[h], 1.5f); if (tP[h]) setParam (tP[h], 0.0f);
+        if (h >= 4) { setParam (gP[h], 0.0f); uP[h]->beginChangeGesture(); uP[h]->setValueNotifyingHost (0.0f); uP[h]->endChangeGesture(); if (onShow) onShow ("Reverb EQ " + String (h + 1), "removed"); repaint(); return; }
+        setParam (fP[h], (float) Flexiverb480Processor::rqHome (h)); setParam (gP[h], 0.0f); setParam (qP[h], 1.5f); if (tP[h]) setParam (tP[h], 0.0f);
         show (h); repaint();
     }
 private:
-    const Theme& th; Flexiverb480Processor& proc; RangedAudioParameter* fP[4] {}; RangedAudioParameter* gP[4] {}; RangedAudioParameter* qP[4] {}; RangedAudioParameter* tP[4] {};
-    Rectangle<float> plot; int drag = -1, hover = -1;
+    const Theme& th; Flexiverb480Processor& proc; RangedAudioParameter* fP[N] {}; RangedAudioParameter* gP[N] {}; RangedAudioParameter* qP[N] {}; RangedAudioParameter* tP[N] {}; RangedAudioParameter* uP[N] {};
+    Rectangle<float> plot; int drag = -1, hover = -1; bool qDrag = false, moved = false; float qStart = 1.5f;
+    bool used (int b) const { return b < 4 || (uP[b] && uP[b]->getValue() > 0.5f); }
     static float value (RangedAudioParameter* p) { return p->convertFrom0to1 (p->getValue()); }
     static void setParam (RangedAudioParameter* p, float v) { p->beginChangeGesture(); p->setValueNotifyingHost (p->convertTo0to1 (p->getNormalisableRange().snapToLegalValue (v))); p->endChangeGesture(); }
     int type (int b) const { return tP[b] ? (int) value (tP[b]) : 0; }
@@ -1163,11 +1204,11 @@ private:
     float magDb (float f) const
     {
         double m = 0; pv::Biquad bq;
-        for (int b = 0; b < 4; ++b) { l480::designRevEq (bq, 96000.0, b, value (fP[b]), value (gP[b]), value (qP[b]), type (b)); m += l480::biquadMagDb (bq, 96000.0, f); }
+        for (int b = 0; b < N; ++b) if (used (b)) { l480::designRevEq (bq, 96000.0, b, value (fP[b]), value (gP[b]), value (qP[b]), type (b)); m += l480::biquadMagDb (bq, 96000.0, f); }
         return (float) m;
     }
     Point<float> pointOf (int b) const { const int t = type (b); return { xOf (value (fP[b])), yOf (b == 0 && t >= 2 ? -12.0f : value (gP[b])) }; }
-    int hit (Point<float> p) const { for (int b = 0; b < 4; ++b) if (pointOf (b).getDistanceFrom (p) < 9.0f) return b; return -1; }
+    int hit (Point<float> p) const { for (int b = N - 1; b >= 0; --b) if (used (b) && pointOf (b).getDistanceFrom (p) < 9.0f) return b; return -1; }
     float xOf (float f) const { return plot.getX() + plot.getWidth() * std::log (jmax (20.0f, f) / 20.0f) / std::log (1000.0f); }
     float fOf (float x) const { return 20.0f * std::pow (1000.0f, jlimit (0.0f, 1.0f, (x - plot.getX()) / plot.getWidth())); }
     float yOf (float db) const { return plot.getCentreY() - plot.getHeight() * 0.5f * jlimit (-1.1f, 1.1f, db / 14.0f); }
@@ -1472,6 +1513,21 @@ public:
     std::function<void (int what, float dx, float dy, bool twist, int phase)> onTurn;     // phase 0 begin, 1 move, 2 end
     std::function<void()> onTurnReset;
     std::function<void (int mode)> onOpenWindow;
+    // ---- shaping the sound on the waterfall: Shift + left-click and drag on any part of it. What you click decides
+    // what changes (the matching faders move with it, and moving a fader reshapes the picture):
+    //   the gap at the back (before the first sound) = PREDELAY, a reflection line = that reflection (time, level),
+    //   the build-up at the start = SPREAD (sideways) and SHAPE (up/down),
+    //   the tail by colour: red (lows) = BASS decay (up/down) and CROSSOVER (sideways), orange (mids) = DECAY (up/down)
+    //   and DIFFUSION (sideways), blue (highs) = TREBLE decay (up/down) and HIGH CUT (sideways),
+    //   the front edge of the tail = SPIN (sideways) and WANDER (up/down), the four floor corners = SIZE (out = bigger).
+    enum Zone { zNone = 0, zPredelay, zReflection, zBuild, zLow, zMid, zHigh, zSize, zMotion };
+    static String zoneName (int z)
+    {
+        static const char* n[] = { "", "Predelay", "Reflection", "Build-up", "Lows (red)", "Mids (orange)", "Highs (blue)", "Size (corner)", "Movement (front edge)" };
+        return n[jlimit (0, 8, z)];
+    }
+    std::function<void (int zone, float dx, float dy, int phase)> onSculpt;      // dx right, dy up, as a share of the graph; phase 0 begin, 1 move, 2 end
+    std::function<String (int zone)> describeZone;
     std::vector<std::pair<bool, int>> sel;                               // selected bars: (yours?, number)
     bool isSel (const Bar& b) const { for (auto& q : sel) if (q.first == b.own && q.second == b.idx) return true; return false; }
     Rectangle<float> graphArea() const { return decArea; }
@@ -1501,8 +1557,8 @@ public:
         erArea = mode == 2 ? Rectangle<float>() : erA.withTrimmedBottom (lh + 2).withTrimmedLeft (mode == 1 ? lh * 2.2f : 4.0f);
         decArea = mode == 1 ? Rectangle<float>() : r.withTrimmedBottom (lh + 2).withTrimmedLeft (lh * 2.4f).withTrimmedRight (lh * 3.2f).withTrimmedTop (4);
         g.setFont (ui (th.sz (9.0f), W::Bold, 0.05f)); g.setColour (col.withAlpha (0.7f));
-        g.drawText (mode == 1 ? "drag a reflection to move it, double-click adds or removes one" : mode == 2 ? "drag to turn, shift-drag to twist, double-click turns back"
-                              : "EARLY REFLECTIONS + TAIL ON ONE TIME LINE    (option-click either to open it big)", head, Justification::left, false);
+        g.drawText (mode == 1 ? "drag a reflection to move it, double-click adds or removes one" : mode == 2 ? "shift-drag = shape the sound,  drag = turn,  ctrl-drag = twist,  double-click turns back"
+                              : "EARLY REFLECTIONS + TAIL    shift-drag the waterfall = shape the sound,  drag = turn,  ctrl-drag = twist,  option-click = open big", head, Justification::left, false);
         // LINK / ER / TAIL: what turns
         {
             const auto f = ui (th.sz (9.5f), W::Bold, 0.05f); g.setFont (f);
@@ -1601,6 +1657,20 @@ public:
             if (erArea.expanded (4).contains (e.position)) { onOpenWindow (1); return; }
             if (decArea.contains (e.position)) { onOpenWindow (2); return; }
         }
+        if (e.mods.isShiftDown() && decArea.contains (e.position))
+        {   // shaping: a reflection line, or the part of the waterfall under the mouse
+            startPos = e.position;
+            const auto wb = hitWfBar (e.position);
+            if (wb.idx >= 0 && onDragBegin)
+            {
+                sel = { { wb.own, wb.idx } }; dragging = 6; onDragBegin ({ wb });
+                if (onShow) onShow ("Reflection", String (wb.ms, 1) + " ms   " + String (wb.db, 1) + " dB");
+                repaint(); return;
+            }
+            sculptZone = zoneAt (e.position);
+            if (sculptZone != zNone && onSculpt) { dragging = 7; onSculpt (sculptZone, 0, 0, 0); }
+            return;
+        }
         const float pd = getPredelayMs ? getPredelayMs() : -1.0f;
         const auto hb = hitBar (e.position);
         const bool more = e.mods.isShiftDown() || e.mods.isCommandDown();
@@ -1618,7 +1688,7 @@ public:
         else if (getBars && erArea.expanded (4).contains (e.position)) { grabKeyboardFocus(); if (! more) sel.clear(); dragging = 4; startPos = e.position; repaint(); return; }
         else if (decArea.contains (e.position))
         {   // turn the picture (and the sound with it)
-            dragging = 5; startPos = e.position; twisting = e.mods.isShiftDown();
+            dragging = 5; startPos = e.position; twisting = e.mods.isCtrlDown() || e.mods.isCommandDown();     // (Shift-drag shapes the sound now)
             const int what = linkOn ? 0 : turnWhat; startAngles[0] = yaw; startAngles[1] = pitch; startAngles[2] = erYaw; startAngles[3] = erPitch;
             if (onTurn) onTurn (what, 0, 0, twisting, 0);
             return;
@@ -1627,6 +1697,18 @@ public:
     }
     void mouseMove (const MouseEvent& e) override
     {
+        if (decArea.contains (e.position))
+        {   // what Shift-drag would change here, with its value
+            const auto wb = hitWfBar (e.position);
+            const int z = wb.idx >= 0 ? (int) zReflection : zoneAt (e.position);
+            if (z != hoverZone)
+            {
+                hoverZone = z;
+                if (onShow && z != zNone) onShow (zoneName (z), z == zReflection ? String (wb.ms, 1) + " ms   " + String (wb.db, 1) + " dB   (shift-drag)" : (describeZone ? describeZone (z) : String()) + "   (shift-drag)");
+            }
+            setMouseCursor (z != zNone && e.mods.isShiftDown() ? MouseCursor::UpDownLeftRightResizeCursor : MouseCursor::NormalCursor);
+        }
+        else { hoverZone = -1; setMouseCursor (MouseCursor::NormalCursor); }
         const bool in = erArea.contains (e.position);
         if (in && ! hinted && onShow) onShow ("Reflections:", "drag to move (sideways = time, up/down = level),  shift-click or drag a box to select more,  double-click to add or remove");
         hinted = in;
@@ -1670,6 +1752,23 @@ public:
             if (onTurn) onTurn (what, dx, dy, twisting, 1);
             repaint(); return;
         }
+        if (dragging == 6 && onDrag)
+        {   // a reflection line on the waterfall: sideways = time, up/down = level
+            const float dMs = (e.position.x - startPos.x) / jmax (1.0f, decArea.getWidth()) * tMax() * 1000.0f * 0.5f, dDb = -(e.position.y - startPos.y) / jmax (1.0f, decArea.getHeight()) * 60.0f;
+            onDrag (dMs, dDb); repaint(); return;
+        }
+        if (dragging == 7 && onSculpt)
+        {
+            float dx = (e.position.x - startPos.x) / jmax (1.0f, decArea.getWidth()), dy = -(e.position.y - startPos.y) / jmax (1.0f, decArea.getHeight());
+            if (sculptZone == zSize)
+            {   // a corner: out (away from the middle of the floor) = bigger
+                const auto c = cornerPos[jlimit (0, 3, cornerIdx)], m = (cornerPos[0] + cornerPos[1] + cornerPos[2] + cornerPos[3]) / 4.0f;
+                auto dir = c - m; const float len = jmax (1.0f, dir.getDistanceFromOrigin()); dir /= len;
+                const float out = ((e.position.x - startPos.x) * dir.x + (e.position.y - startPos.y) * dir.y) / jmax (1.0f, decArea.getWidth());
+                dx = out; dy = 0;
+            }
+            onSculpt (sculptZone, dx, dy, 1); repaint(); return;
+        }
         if (dragging == 3 && onDrag)
         {
             const float dMs = (e.position.x - startPos.x) / erArea.getWidth() * erRange, dDb = -(e.position.y - startPos.y) / erArea.getHeight() * 60.0f;
@@ -1689,7 +1788,8 @@ public:
     void mouseUp (const MouseEvent&) override
     {
         if (dragging == 5 && onTurn) onTurn (linkOn ? 0 : turnWhat, 0, 0, twisting, 2);
-        if (dragging == 3 && onDragEnd) onDragEnd();
+        if ((dragging == 3 || dragging == 6) && onDragEnd) onDragEnd();
+        if (dragging == 7 && onSculpt) onSculpt (sculptZone, 0, 0, 2);
         if ((dragging == 1 || dragging == 2) && gesture) gesture (false);
         dragging = 0; band = {}; repaint();
     }
@@ -1705,6 +1805,63 @@ private:
             const float x = erX (b.ms), y = b.off ? erArea.getBottom() - 3 : yOf (erArea, b.db);
             const float d = std::abs (p.x - x) + (p.y < y - 6 ? (y - 6 - p.y) : 0.0f);      // on the stem or its head
             if (d < bd && p.y <= erArea.getBottom() + 4) { bd = d; best = b; }
+        }
+        return best;
+    }
+    // ---- shaping: which part of the waterfall is under the mouse
+    int sculptZone = 0, hoverZone = -1; mutable int cornerIdx = 0; mutable Point<float> cornerPos[4];
+    float levelAt (float bf, int si, float t) const
+    {
+        const int nb = ResponseRenderer::kWfBands; const int i = jlimit (0, nb - 2, (int) bf); const float fr = bf - (float) i;
+        if (liveMode) return liveLevel (i, si) * (1.0f - fr) + liveLevel (i + 1, si) * fr;
+        return wfLevel (i, t) * (1.0f - fr) + wfLevel (i + 1, t) * fr;
+    }
+    float peakTime() const { const auto& e = shown.band[1]; size_t k = 0; for (size_t i = 1; i < e.size() && i < 80; ++i) if (e[i] > e[k]) k = i; return (float) k * 0.01f; }
+    int zoneAt (Point<float> p) const
+    {
+        if (decArea.isEmpty()) return zNone;
+        const int nb = ResponseRenderer::kWfBands, ns = 56; const float tm = tMax();
+        cornerPos[0] = P (0, 0, -60); cornerPos[1] = P ((float) nb - 1, 0, -60); cornerPos[2] = P (0, tm, -60); cornerPos[3] = P ((float) nb - 1, tm, -60);
+        for (int k = 0; k < 4; ++k) if (cornerPos[k].getDistanceFrom (p) < 16.0f) { cornerIdx = k; return zSize; }
+        // the front-most slice whose filled piece holds the point (or, just above the surface, the nearest one under it)
+        int bestSi = -1; float bestBf = 0, bestGap = 30.0f;
+        for (int si = ns - 1; si >= 0; --si)
+        {
+            const float t = tm * (float) si / (float) (ns - 1);
+            const float xa = P (0, t, -60).x, xb = P ((float) nb - 1, t, -60).x;
+            if (p.x < xa || p.x > xb || xb <= xa) continue;
+            const float bf = (p.x - xa) / (xb - xa) * (float) (nb - 1);
+            const float yTop = P (bf, t, levelAt (bf, si, t)).y, yFloor = P (bf, t, -60).y;
+            if (p.y >= yTop - 4.0f && p.y <= yFloor + 2.0f) { bestSi = si; bestBf = bf; break; }
+            if (p.y < yTop && yTop - p.y < bestGap) { bestGap = yTop - p.y; bestSi = si; bestBf = bf; }
+        }
+        if (bestSi < 0) return zNone;
+        const float t = tm * (float) bestSi / (float) (ns - 1);
+        if (! liveMode)
+        {
+            const float pd = getPredelayMs ? getPredelayMs() : -1.0f;
+            if (pd >= 0.0f && t * 1000.0f <= pd + 3.0f) return zPredelay;
+            if (t <= jmax (peakTime(), pd * 0.001f + 0.02f)) return zBuild;
+            if (bestSi >= ns - 5) return zMotion;
+        }
+        return bestBf < wfIndex (250.0f) ? zLow : bestBf < wfIndex (2500.0f) ? zMid : zHigh;
+    }
+    // a reflection's line across the waterfall
+    Bar hitWfBar (Point<float> p) const
+    {
+        Bar none { 0, 0, false, -1, false };
+        if (! getBars || liveMode || decArea.isEmpty()) return none;
+        const int nb = ResponseRenderer::kWfBands; const float tm = tMax();
+        const float ey = linkOn ? yaw : erYaw, ep = linkOn ? pitch : erPitch;
+        Bar best = none; float bd = 5.0f;
+        for (auto& b : getBars())
+        {
+            if (b.off) continue;
+            const float t = b.ms * 0.001f; if (t > tm) continue;
+            const float db = jlimit (-60.0f, 0.0f, b.db);
+            const Line<float> ln (Pv (0, t, db, ey, ep), Pv ((float) nb - 1, t, db, ey, ep));
+            Point<float> q; const float d = ln.getDistanceFromPoint (p, q);
+            if (d < bd) { bd = d; best = b; }
         }
         return best;
     }
@@ -1932,42 +2089,48 @@ private:
 // ============================================================================ SETUP: beside the plugin, so changes show live
 // ============================================================================ the compressor's VU meter: gain reduction, VU ballistics
 // the gate's own meter: the level it listens to (a vertical bar), its threshold (a line), and how far it has closed
+// the gate row has one meter at each side: INPUT (the level going into the channel strip, with the gate threshold)
+// at the left and GATE (how far the gate has closed) at the right. Their names sit on the same line as the knob names.
 class GateMeter : public Component
 {
 public:
-    explicit GateMeter (const Theme& t) : th (t) {}
+    GateMeter (const Theme& t, bool input) : th (t), isInput (input) {}
     float keyDb = -120, gainDb = 0, thrDb = -40; bool on = false;
+    String label() const { return isInput ? "INPUT" : "GATE"; }
     void paint (Graphics& g) override
     {
-        auto r = getLocalBounds().toFloat().reduced (2, 4);
-        const float gp = th.tpt ("knob:GATE", th.gatePt);
-        auto lab = r.removeFromBottom (gp + 5);
-        // two bars of the same size side by side: the level, and how far the gate has closed
-        const float bw = jmin (16.0f, r.getWidth() * 0.26f);
-        auto bar = r.withSizeKeepingCentre (bw, r.getHeight()).translated (-(bw + 6) * 0.5f, 0);
-        auto gr = bar.translated (bw + 6, 0);
-        g.setColour (Colours::black.withAlpha (0.65f)); g.fillRoundedRectangle (bar.expanded (2), 3); g.fillRoundedRectangle (gr.expanded (2), 2);
+        auto r = getLocalBounds().toFloat();
+        const String id = "knob:" + label();
+        const float gp = th.tpt (id, th.gatePt);
+        auto lab = r.removeFromBottom (th.tpt ("knob:THRESHOLD", th.stripPt) + 5);    // the same line as the knob names
+        r = r.reduced (2, 4);
+        const float bw = jmin (16.0f, r.getWidth() * 0.6f);
+        auto bar = r.withSizeKeepingCentre (bw, r.getHeight());
+        g.setColour (Colours::black.withAlpha (0.65f)); g.fillRoundedRectangle (bar.expanded (2), 3);
         auto yOf = [&bar] (float db) { return bar.getBottom() - bar.getHeight() * jlimit (0.0f, 1.0f, (db + 72.0f) / 72.0f); };
-        // the level: lit segments
-        const int n = 24;
-        for (int i = 0; i < n; ++i)
-        {
-            const float db = -72.0f + 72.0f * (i + 0.5f) / n;
-            auto s = Rectangle<float> (bar.getX() + 2, yOf (-72.0f + 72.0f * (i + 1) / n) + 1, bar.getWidth() - 4, bar.getHeight() / n - 2);
-            const Colour c = db > -6 ? Colour (0xffff4a2a) : db > -18 ? Colour (0xffffc03a) : Colour (0xff7fe07a);
-            g.setColour (keyDb >= db ? c : c.withAlpha (0.10f)); g.fillRect (s);
+        if (isInput)
+        {   // the level: lit segments, and the gate threshold across it
+            const int n = 24;
+            for (int i = 0; i < n; ++i)
+            {
+                const float db = -72.0f + 72.0f * (i + 0.5f) / n;
+                auto s = Rectangle<float> (bar.getX() + 2, yOf (-72.0f + 72.0f * (i + 1) / n) + 1, bar.getWidth() - 4, bar.getHeight() / n - 2);
+                const Colour c = db > -6 ? Colour (0xffff4a2a) : db > -18 ? Colour (0xffffc03a) : Colour (0xff7fe07a);
+                g.setColour (keyDb >= db ? c : c.withAlpha (0.10f)); g.fillRect (s);
+            }
+            const float ty = yOf (thrDb);
+            g.setColour (th.keyLight.withAlpha (on ? 1.0f : 0.4f)); g.fillRect (bar.getX() - 3, ty - 1, bar.getWidth() + 6, 2.0f);
         }
-        // the threshold
-        const float ty = yOf (thrDb);
-        g.setColour (th.keyLight); g.fillRect (bar.getX() - 3, ty - 1, gr.getRight() - bar.getX() + 6, 2.0f);
-        // how far it has closed: a red bar from the top
-        const float closed = jlimit (0.0f, 1.0f, -gainDb / 72.0f);
-        g.setColour (Colour (0xffff4a2a).withAlpha (on ? 0.9f : 0.25f)); g.fillRect (gr.withHeight (gr.getHeight() * closed));
-        drawLegend (g, "GATE", lab, ui (gp, W::Bold, 0.06f), th.tcol ("knob:GATE", th.panelText));
+        else
+        {   // how far the gate has closed: a red bar from the top
+            const float closed = jlimit (0.0f, 1.0f, -gainDb / 72.0f);
+            g.setColour (Colour (0xffff4a2a).withAlpha (on ? 0.9f : 0.25f)); g.fillRect (bar.reduced (2, 0).withHeight (bar.getHeight() * closed));
+        }
+        drawLegend (g, label(), lab.expanded (8, 0), ui (gp, W::Bold, 0.06f), th.tcol (id, th.panelText));
     }
-    void mouseDown (const MouseEvent& e) override { if (arrangeMods (e)) return; if (e.mods.isPopupMenu()) editText ("knob:GATE", "Gate meter text", th.gatePt, th.panelText, this, getLocalBounds()); }
+    void mouseDown (const MouseEvent& e) override { if (arrangeMods (e)) return; if (e.mods.isPopupMenu()) editText ("knob:" + label(), label() + " meter text", th.gatePt, th.panelText, this, getLocalBounds()); }
 private:
-    const Theme& th;
+    const Theme& th; bool isInput;
 };
 
 class VuMeter : public Component
@@ -2359,10 +2522,8 @@ public:
         noiseAtt = std::make_unique<AudioProcessorValueTreeState::ButtonAttachment> (s, "hwNoise", noise);
         engBox.onChange = [this] { auto* c = apvts.getParameter ("config"); const int v = engBox.getSelectedItemIndex() == 0 ? 0 : 2;
                                    if (((int) apvts.getRawParameterValue ("config")->load() != 0) != (v != 0)) { c->beginChangeGesture(); c->setValueNotifyingHost (c->convertTo0to1 ((float) v)); c->endChangeGesture(); } };
-        outKnob = std::make_unique<ScaleKnob> (th, s, "out", "OUTPUT", numberScale (-24, 12, 6, 2, true), &Theme::compKnob);
         depthKnob = std::make_unique<ScaleKnob> (th, s, "loopAmt", "180V DEPTH", std::vector<ScaleMark> { { 0, "0" }, { 0.5f, "50" }, { 1, "100" }, { 1.5f, "150" }, { 2, "200" } }, &Theme::compKnob);
-        outKnob->step = 2.0f;
-        for (auto* k : { outKnob.get(), depthKnob.get() }) { k->strip = true; addAndMakeVisible (*k); }
+        depthKnob->strip = true; addAndMakeVisible (*depthKnob);
     }
     void sync() { engBox.setSelectedItemIndex ((int) apvts.getRawParameterValue ("config")->load() == 0 ? 0 : 1, dontSendNotification); }
     float pt() const { return th.tpt ("setup text", th.setupPt) * 1.25f; }      // the text in SETUP: bigger than before (the titles are not)
@@ -2384,7 +2545,7 @@ public:
         rows.push_back (y); row (convBox, 220);
         y += 14; knobTop = y;
         const int kw = jmin (180, w / 2 - 10), kh = jmin (190, kw + 30);
-        outKnob->setBounds (x + 10, y + 30, kw - 20, kh - 40); depthKnob->setBounds (x + w / 2 + 10, y + 30, kw - 20, kh - 40);
+        depthKnob->setBounds (x + w / 2 + 10, y + 30, kw - 20, kh - 40);
         knobH = kh;
     }
     void paint (Graphics& g) override
@@ -2397,8 +2558,8 @@ public:
                           "with the transformer option or the digital I/O. No model, frequency or amount controls.",
                           Rectangle<int> (x, 14 + (int) p + 14, w, (int) (p * 3.2f)), Justification::topLeft, 3, 0.9f);
         // signal flow
-        const char* box[] = { "CLEAN", "180V IN", "180V", "180V OUT", "OUTPUT", "CHANNEL", "CLEAN" };
-        const char* sub[] = { "IN", "stage + A/D", "ENGINE + EQ", "D/A + stage", "", "STRIP *", "OUT" };
+        const char* box[] = { "IN", "180V IN", "180V", "180V OUT", "OUT", "CHANNEL", "OUT" };
+        const char* sub[] = { "", "stage + A/D", "ENGINE + EQ", "D/A + stage", "into strip *", "STRIP", "everything" };
         const bool hwb[] = { false, true, true, true, false, false, false };
         const int n = 7, gap = 12, bw = (w - gap * (n - 1)) / n, by = flowTop(), bh = flowH();
         for (int i = 0; i < n; ++i)
@@ -2417,12 +2578,12 @@ public:
             }
         }
         g.setColour (dim); g.setFont (ui (p * 0.82f, W::Medium));
-        g.drawFittedText ("* OUTPUT feeds the channel strip whenever the strip, or any of its modules, is on.  CLEAN OUT is always last and clean.",
+        g.drawFittedText ("* OUT sets everything - reverb and dry - going into the channel strip (all the way down = silence).  The strip's OUT is the output of everything, always last.",
                           Rectangle<int> (x, by + bh + 6, w, (int) (p * 2.6f)), Justification::topLeft, 2, 0.9f);
         const char* lab[] = { "Input stage", "Output stage", "Engine", "Oversampling", "Precision", "Classic converter" };
         for (int i = 0; i < (int) rows.size() && i < 6; ++i)
             drawLegend (g, lab[i], Rectangle<float> ((float) x, (float) rows[(size_t) i], 200, (float) rowH()), ui (p, W::Medium), tc, Justification::centredLeft);
-        for (int i = 0; i < 2; ++i)
+        for (int i = 1; i < 2; ++i)              // (the box at the left, LEVEL INTO THE STRIP, is gone: OUT does that now)
         {
             auto b = Rectangle<float> ((float) (x + i * (w / 2)), (float) knobTop, (float) (w / 2 - 10), (float) knobH);
             g.setColour (Colours::black.withAlpha (0.2f)); g.fillRoundedRectangle (b, 8);
@@ -2436,7 +2597,7 @@ private:
     Theme& th; AudioProcessorValueTreeState& apvts;
     ComboBox inBox, outBox, osBox, engBox, precBox, convBox; ToggleButton noise;
     std::unique_ptr<AudioProcessorValueTreeState::ComboBoxAttachment> inAtt, outAtt, osAtt, convAtt; std::unique_ptr<AudioProcessorValueTreeState::ButtonAttachment> noiseAtt;
-    std::unique_ptr<ScaleKnob> outKnob, depthKnob;
+    std::unique_ptr<ScaleKnob> depthKnob;
     std::vector<int> rows; int knobTop = 0, knobH = 0;
 };
 
@@ -2617,6 +2778,8 @@ public:
         reverbView.liveMode = (bool) proc.getUiProperty ("wfLive", true);
         reverbView.onLiveMode = [this] (bool b) { proc.setUiProperty ("wfLive", b); for (auto& w : viewWin) if (w != nullptr) { w->view->liveMode = b; w->view->repaint(); } };
         reverbView.onTurnReset = [this] { resetTurn(); };
+        reverbView.onSculpt = [this] (int z, float dx, float dy, int phase) { sculptSound (z, dx, dy, phase); };
+        reverbView.describeZone = [this] (int z) { return describeZone (z); };
         reverbView.onOpenWindow = [this] (int m) { openViewWindow (m); };
         reverbView.setWantsKeyboardFocus (true);
         holdRev.ed = this; holdRev.busy = [this] { return reverbView.busy(); }; reverbView.addMouseListener (&holdRev, false);
@@ -2706,7 +2869,7 @@ public:
         gtOnKey = pk ("gtOn", "GATE"); gtKeyKey = pk ("gtKey", "KEY: INPUT");
         orderKey = std::make_unique<LarcKey> (theme, "EQ > COMP"); orderKey->kc = &Theme::keyPanel; drawer.addAndMakeVisible (*orderKey);
         orderKey->onClick = [this] { auto* p = proc.apvts.getParameter ("stripOrder"); p->beginChangeGesture(); p->setValueNotifyingHost (stripOrder() == 1 ? 0.0f : 1.0f); p->endChangeGesture(); layoutDrawer(); drawer.repaint(); };
-        drawer.addAndMakeVisible (gateMeter);
+        drawer.addAndMakeVisible (gateMeter); drawer.addAndMakeVisible (inMeter); inMeter.setComponentID ("mv:inmeter");
         auto knob = [this, shower] (const String& id, const String& t, std::vector<ScaleMark> m, Colour Theme::* c)
         { auto k = std::make_unique<ScaleKnob> (theme, proc.apvts, id, t, std::move (m), c); k->onShow = shower; k->setComponentID ("mv:knob:" + id); drawer.addAndMakeVisible (*k); return k; };
         sysKnob[0] = knob ("out", "OUTPUT", numberScale (-24, 12, 6, 2, true), &Theme::compKnob);
@@ -2724,8 +2887,11 @@ public:
         eqKnob2[0] = knob ("eqModel", "EQ MODEL", { { 0, "CLEAN" }, { 1, "73" }, { 2, "73/84" }, { 3, "4K" }, { 4, "4K U" }, { 5, "TUBE" }, { 6, "550" } }, &Theme::eqKnob);
         eqKnob2[1] = knob ("eqDrive", "EQ COLOUR", { { 0, "0" }, { 0.2f, "20" }, { 0.4f, "40" }, { 0.6f, "60" }, { 0.8f, "80" }, { 1, "100" } }, &Theme::eqKnob);
         const char* bn[] = { "LOW", "LOW MID", "HIGH MID", "HIGH" };
-        const std::vector<ScaleMark> fAll { { 20, "20" }, { 50, "50" }, { 100, "100" }, { 200, "200" }, { 500, "500" }, { 1000, "1k" }, { 2000, "2k" }, { 5000, "5k" }, { 10000, "10k" }, { 20000, "20k" } };
-        const std::vector<ScaleMark> fm[4] = { fAll, fAll, fAll, fAll };     // every band is free over the whole range
+        // each band only over its own range (the 1081's)
+        const std::vector<ScaleMark> fm[4] = { { { 33, "33" }, { 50, "50" }, { 100, "100" }, { 200, "200" }, { 330, "330" } },
+                                               { { 220, "220" }, { 330, "330" }, { 500, "500" }, { 800, "800" }, { 1200, "1.2k" } },
+                                               { { 1500, "1.5k" }, { 2200, "2.2k" }, { 3300, "3.3k" }, { 5000, "5k" }, { 8200, "8.2k" } },
+                                               { { 3300, "3.3k" }, { 4700, "4.7k" }, { 6800, "6.8k" }, { 10000, "10k" }, { 15000, "15k" } } };
         for (int b = 0; b < 4; ++b) { eqKnob[b] = std::make_unique<DualKnob> (theme, proc.apvts, "eqF" + String (b), "eqG" + String (b), bn[b], fm[b]); eqKnob[b]->onShow = shower; eqKnob[b]->setComponentID ("mv:eq" + String (b)); drawer.addAndMakeVisible (*eqKnob[b]); }
         gtKnob[0] = knob ("gtThr", "THRESHOLD", numberScale (-80, 0, 20, 2), &Theme::compKnob);
         gtKnob[1] = knob ("gtRange", "RANGE", numberScale (0, 80, 20, 2), &Theme::compKnob);
@@ -2749,20 +2915,20 @@ public:
         for (LarcKey* k : std::initializer_list<LarcKey*> { gtOnKey.get(), gtKeyKey.get(), eqOnKey.get(), cpOnKey.get(), satKey.get(), duckKey.get(), orderKey.get() }) k->slim = true;
 
         cpKnob[1]->step = 2.0f; cpKnob[5]->step = 2.0f;
-        // CLEAN IN (first of all) and CLEAN OUT (last of all): plain gain, above the preset window
+        // IN (first of all) and OUT (everything - reverb and dry - into the channel strip), above the preset window
         for (int i = 0; i < 2; ++i)
         {
             auto& k = topClean[i];
-            k = std::make_unique<ScaleKnob> (theme, proc.apvts, i == 0 ? "cleanIn" : "cleanOut", i == 0 ? "CLEAN IN" : "CLEAN OUT", numberScale (-24, 12, 6, 2, true), &Theme::compKnob);
+            k = std::make_unique<ScaleKnob> (theme, proc.apvts, i == 0 ? "cleanIn" : "cleanOut", i == 0 ? "IN" : "OUT", numberScale (-24, 12, 6, 2, true), &Theme::compKnob);
             k->onShow = shower; k->strip = true; k->step = 2.0f; k->setComponentID (i == 0 ? "mv:knob:cleanIn" : "mv:knob:cleanOutTop"); content.addAndMakeVisible (*k);
         }
-        // the strip's CLEAN OUT: plain gain after the strip
-        cleanKnob = knob ("stripOut", "CLEAN OUT", numberScale (-24, 12, 6, 2, true), &Theme::compKnob); cleanKnob->strip = true; cleanKnob->step = 2.0f;
+        // the strip's OUT: the final output of everything
+        cleanKnob = knob ("stripOut", "OUT", numberScale (-24, 12, 6, 2, true), &Theme::compKnob); cleanKnob->strip = true; cleanKnob->step = 2.0f;
         // EQ MODEL: a menu; each model at its own hardware colour
         eqModelLab = dk ("EQ MODEL"); eqModelLab->textOnly = true; eqModelLab->setComponentID ("mv:label:eqmodel"); eqModelLab->setVisible (false);
-        {   // the EQ types: lit words stacked between the EQ knobs (no Clean)
-            const char* nm[] = { "73", "73/84", "4K", "4K U", "TUBE", "550" };
-            for (int i = 0; i < 6; ++i)
+        {   // the EQ types: lit words stacked between the EQ knobs (no Clean); the 1081 is model 7
+            const char* nm[] = { "73", "73/84", "4K", "4K U", "TUBE", "550", "1081" };
+            for (int i = 0; i < kEqTypes; ++i)
             {
                 eqTypeKey[i] = dk (nm[i]); eqTypeKey[i]->textOnly = true; eqTypeKey[i]->setComponentID ("mv:eqtype:" + String (i + 1));
                 eqTypeKey[i]->onClick = [this, i] { auto* p = proc.apvts.getParameter ("eqModel"); p->beginChangeGesture(); p->setValueNotifyingHost (p->convertTo0to1 ((float) (i + 1))); p->endChangeGesture();
@@ -2771,6 +2937,7 @@ public:
         }
         drawer.addAndMakeVisible (eqModelBox); eqModelBox.setComponentID ("mv:eqmodel");
         for (int i = 1; i < cs::kNumEqModels; ++i) eqModelBox.addItem ("EQ MODEL:   " + String (cs::eqModelName (i)), i + 1);
+        eqModelBox.addItem ("EQ MODEL:   Neve 1081 - 1081+", l480::kEqModel1081 + 1);
         eqModelBox.onChange = [this] { const int m = eqModelBox.getSelectedId() - 1; if (m < 1) return; auto* p = proc.apvts.getParameter ("eqModel");
                                        if ((int) proc.apvts.getRawParameterValue ("eqModel")->load() != m) { p->beginChangeGesture(); p->setValueNotifyingHost (p->convertTo0to1 ((float) m)); p->endChangeGesture(); } };
         // the gear wheels: PREFERENCES (always visible at the top, and on the strip)
@@ -3321,8 +3488,9 @@ private:
         stripGear.setBounds (drawerX.getX() - 12 - 28, A + 6, 28, 28); stripGear.setVisible (true);
         int y = A + titleH;
         words ({ gtOnKey.get(), gtKeyKey.get() }, x0 + 2, y, 14);
+        // (DUCK has moved beside the VU: EQ, COMP and SAT keep their places)
         const int wEq = (int) (eqOnKey->preferredWidth() + cpOnKey->preferredWidth() + satKey->preferredWidth() + duckKey->preferredWidth()) + 3 * 14;
-        words ({ eqOnKey.get(), cpOnKey.get(), satKey.get(), duckKey.get() }, x0 + wAll - wEq - 2, y, 14);
+        words ({ eqOnKey.get(), cpOnKey.get(), satKey.get() }, x0 + wAll - wEq - 2, y, 14);
         y += th + 4;
         // rows: gate, EQ (2 rows), the EQ model menu, the VU, the compressor (2 rows)
         const int menuH = kh + 6;
@@ -3333,14 +3501,20 @@ private:
             for (int r = 0; r < 6; ++r) { if (r == rVu) yy += menuH; top[r] = yy + roundToInt ((float) avail * acc / tot); acc += wtOf[r]; bot[r] = yy + roundToInt ((float) avail * acc / tot); } }
         auto cell = [&] (Component& c, int row, float col, float span, int cols) { const float w = (float) wAll / (float) cols;
             c.setBounds (x0 + roundToInt (col * w), top[row], roundToInt (span * w), bot[row] - top[row]); c.setVisible (true); };
-        cell (*gtKnob[0], rGate, 0, 1, 4); cell (*gtKnob[1], rGate, 1, 1, 4); cell (*gtKnob[2], rGate, 2, 1, 4);
-        { const int w = wAll / 4; gateMeter.setBounds (x0 + 3 * w + 4, top[rGate] + 2, w - 8, bot[rGate] - top[rGate] - 4); }
+        {   // the three gate knobs centred over the two EQ knobs (THRESHOLD over the left one, RELEASE over the right one,
+            // RANGE between), the INPUT meter at the left edge and the GATE meter at the right edge, mirrored
+            const float w = (float) wAll / 4.0f;
+            for (int k = 0; k < 3; ++k) cell (*gtKnob[k], rGate, 0.5f + (float) k, 1, 4);
+            const int mw = roundToInt (w * 0.5f) - 6, gy = top[rGate], gh = bot[rGate] - top[rGate];
+            inMeter.setBounds (x0 + 2, gy, mw, gh); inMeter.setVisible (true);
+            gateMeter.setBounds (x0 + wAll - 2 - mw, gy, mw, gh);
+        }
         cell (*eqKnob[0], rEq1, 0, 1, 2); cell (*eqKnob[1], rEq1, 1, 1, 2);
         cell (*eqKnob[2], rEq2, 0, 1, 2); cell (*eqKnob[3], rEq2, 1, 1, 2);
         {   // the EQ types: words stacked in the gap between the two knob columns (the knobs stay where they are)
             eqModelLab->setVisible (false);
             eqModelBox.setBounds (x0 + 2, bot[rEq2] + 3, wAll - 4, kh); eqModelBox.setVisible (true);     // the menu as well, full width (the label is inside it)
-            const int cx = x0 + wAll / 2, y0 = top[rEq1] + 6, y1 = bot[rEq2] - 6, n = 6;
+            const int cx = x0 + wAll / 2, y0 = top[rEq1] + 6, y1 = bot[rEq2] - 6, n = kEqTypes;
             for (int i = 0; i < n; ++i)
             {
                 auto& k = *eqTypeKey[i]; k.setVisible (true);
@@ -3348,7 +3522,13 @@ private:
                 k.setBounds (cx - w / 2, yc - th / 2, w, th);
             }
         }
-        vu.setBounds (x0 + 2, top[rVu] + 4, wAll - 4, bot[rVu] - top[rVu] - 8);
+        {   // the VU: half as wide and three quarters as tall as before, centred; DUCK right beside it
+            const int fullW = wAll - 4, fullH = bot[rVu] - top[rVu] - 8, w = fullW / 2, h = roundToInt (fullH * 0.75f);
+            const int vx = x0 + 2 + (fullW - w) / 2, vy = top[rVu] + 4 + (fullH - h) / 2;
+            vu.setBounds (vx, vy, w, h);
+            duckKey->setVisible (true); const int dw = (int) duckKey->preferredWidth();
+            duckKey->setBounds (vx + w + 14, vy + (h - th) / 2, dw, th);
+        }
         for (int k = 1; k <= 4; ++k) cell (*cpKnob[k], rCp1, (float) (k - 1), 1, 4);
         cell (*cpKnob[0], rCp2, 0, 1, 4); cell (*cpKnob[5], rCp2, 1, 1, 4); cell (*cpKnob[6], rCp2, 2, 1, 4); cell (*cleanKnob, rCp2, 3, 1, 4);
         drawer.setSize (kDrawer, mainH);
@@ -3826,7 +4006,7 @@ private:
             myKeys[k]->setLit (d.user.isNotEmpty() ? proc.userPresetName == d.user : (proc.userPresetName.isEmpty() && proc.programOf (machine) == d.program));
         }
         machAKey->setLit (config() != 0 && machine == 0); machBKey->setLit (config() != 0 && machine == 1);
-        { const int m = (int) proc.apvts.getRawParameterValue ("eqModel")->load(); for (int i = 0; i < 6; ++i) eqTypeKey[i]->setLit (m == i + 1); }
+        { const int m = (int) proc.apvts.getRawParameterValue ("eqModel")->load(); for (int i = 0; i < kEqTypes; ++i) eqTypeKey[i]->setLit (m == i + 1 || (m == 0 && i + 1 == l480::kEqModel1081)); }
         muteKey->setLit (proc.mute.load()); setupKey->setLit (prefs.isVisible()); topGear.lit = stripGear.lit = prefs.isVisible();
         { const int m = (int) proc.apvts.getRawParameterValue ("eqModel")->load(); if (m >= 1 && eqModelBox.getSelectedId() != m + 1) eqModelBox.setSelectedId (m + 1, dontSendNotification); } panelKey->setLit (drawerOpen);
         if (drawerOpen) vu.setGr (proc.compGr.load(), 1000.0f / 30.0f);
@@ -3834,7 +4014,9 @@ private:
         {
             for (auto* k : { ironKey.get(), anOnKey.get(), eqOnKey.get(), cpOnKey.get(), satKey.get(), duckKey.get(), gtOnKey.get(), gtKeyKey.get() }) k->sync();
             gateMeter.on = proc.apvts.getRawParameterValue ("gtOn")->load() > 0.5f; gateMeter.thrDb = proc.apvts.getRawParameterValue ("gtThr")->load();
-            gateMeter.keyDb = jmax (proc.gateKey.load(), gateMeter.keyDb - 2.0f); gateMeter.gainDb = proc.gateGain.load(); gateMeter.repaint();
+            gateMeter.gainDb = proc.gateGain.load(); gateMeter.repaint();
+            inMeter.on = gateMeter.on; inMeter.thrDb = gateMeter.thrDb;
+            inMeter.keyDb = jmax (proc.stripIn.load(), inMeter.keyDb - 2.0f); inMeter.repaint();
             if (orderKey->getText() != (stripOrder() == 1 ? "COMP > EQ" : "EQ > COMP")) { layoutDrawer(); drawer.repaint(); }
         }
     }
@@ -3895,6 +4077,55 @@ private:
         if (tHf.slot >= 0) t << "   " << proc.spec (machine, tHf.slot).name << " " << String (proc.slotValue (machine, tHf.slot), 0);
         showMessage ("Turning", t);
     }
+    // ---- shaping on the waterfall (Shift + drag): each part moves the reverb's own sliders, sideways (X) and up/down (Y)
+    TurnSlot scX, scY; int scZone = 0;
+    int mainRtSlotNow() const { const int a = proc.algoOf (machine); return l480::algoHasDecayCurve (a) ? l480::algoMainRtSlot (a) : findSlot ({ "RT", "RTM", "MID" }); }
+    void zoneSlots (int z, int& sx, int& sy) const
+    {
+        sx = sy = -1;
+        switch (z)
+        {
+            case ReverbView::zPredelay: sx = findSlot ({ "PDL", "RPD" }); sy = findSlot ({ "ELV" }); break;
+            case ReverbView::zBuild:    sx = findSlot ({ "SPR" }); sy = findSlot ({ "SHP" }); if (sx < 0) sx = findSlot ({ "DIF" }); if (sy < 0) sy = findSlot ({ "DEP" }); break;
+            case ReverbView::zLow:      sy = findSlot ({ "BAS", "LFB" }); sx = findSlot ({ "XOV" }); break;
+            case ReverbView::zMid:      sy = mainRtSlotNow(); sx = findSlot ({ "DIF" }); break;
+            case ReverbView::zHigh:     sy = findSlot ({ "RTC", "TDC", "TRB" }); sx = findSlot ({ "HFC", "ROL" }); if (sy < 0) sy = sx; break;
+            case ReverbView::zSize:     sx = findSlot ({ "SIZ", "SIZE" }); break;
+            case ReverbView::zMotion:   sx = findSlot ({ "SPN" }); sy = findSlot ({ "WAN", "CHO", "DEP" }); break;
+            default: break;
+        }
+        if (sx == sy) sx = -1;
+    }
+    String slotLine (int slot) const
+    {
+        if (slot < 0) return {};
+        return String (proc.spec (machine, slot).name) + " " + proc.slotText (machine, slot, proc.slotNorm (machine, slot));
+    }
+    String describeZone (int z) const
+    {
+        int sx, sy; zoneSlots (z, sx, sy);
+        String t;
+        if (sy >= 0) t << "up/down: " << slotLine (sy);
+        if (sx >= 0) t << (t.isEmpty() ? "" : "    ") << (z == ReverbView::zSize ? "out/in: " : "sideways: ") << slotLine (sx);
+        return t.isEmpty() ? String ("nothing to change here in this program") : t;
+    }
+    void sculptSound (int z, float dx, float dy, int phase)
+    {
+        if (phase == 0)
+        {
+            scZone = z; int sx, sy; zoneSlots (z, sx, sy); scX.slot = sx; scY.slot = sy;
+            for (auto* t : { &scX, &scY }) if (t->slot >= 0) { t->start = proc.slotNorm (machine, t->slot); proc.beginSlot (machine, t->slot); }
+            showMessage (ReverbView::zoneName (z), describeZone (z));
+            return;
+        }
+        if (phase == 2) { for (auto* t : { &scX, &scY }) if (t->slot >= 0) proc.endSlot (machine, t->slot); scX.slot = scY.slot = -1; refreshPage (false); return; }
+        if (scX.slot >= 0) proc.setSlot (machine, scX.slot, jlimit (0.0f, 1.0f, scX.start + dx * 0.8f));
+        if (scY.slot >= 0) proc.setSlot (machine, scY.slot, jlimit (0.0f, 1.0f, scY.start + dy * 0.8f));
+        String t;
+        if (scY.slot >= 0) t << slotLine (scY.slot);
+        if (scX.slot >= 0) t << (t.isEmpty() ? "" : "    ") << slotLine (scX.slot);
+        showMessage (ReverbView::zoneName (scZone), t);
+    }
     void resetTurn()
     {
         if (! turnHomeSet) return;
@@ -3949,7 +4180,7 @@ private:
         {
             v.onShow = src->onShow; v.getPredelayMs = src->getPredelayMs; v.setPredelayMs = src->setPredelayMs; v.getRt = src->getRt; v.setRt = src->setRt; v.gesture = src->gesture;
             v.getBars = src->getBars; v.onAdd = src->onAdd; v.onToggle = src->onToggle; v.onDragBegin = src->onDragBegin; v.onDrag = src->onDrag; v.onDragEnd = src->onDragEnd;
-            v.onTurn = src->onTurn; v.onTurnReset = src->onTurnReset; v.liveMode = src->liveMode; v.onLiveMode = src->onLiveMode; v.erRange = src->erRange; v.linkOn = src->linkOn; v.turnWhat = src->turnWhat;
+            v.onTurn = src->onTurn; v.onTurnReset = src->onTurnReset; v.onSculpt = src->onSculpt; v.describeZone = src->describeZone; v.liveMode = src->liveMode; v.onLiveMode = src->onLiveMode; v.erRange = src->erRange; v.linkOn = src->linkOn; v.turnWhat = src->turnWhat;
         }
         v.setResult (renderer.get());
         content.addAndMakeVisible (*w);
@@ -4088,12 +4319,12 @@ private:
     VuMeter vu { theme };
     Viewport setupView;
     std::unique_ptr<ParamKey> ironKey, anOnKey, eqOnKey, cpOnKey, satKey, duckKey, gtOnKey, gtKeyKey;
-    std::unique_ptr<LarcKey> orderKey; std::unique_ptr<ScaleKnob> gtKnob[3]; GateMeter gateMeter { theme };
+    std::unique_ptr<LarcKey> orderKey; std::unique_ptr<ScaleKnob> gtKnob[3]; GateMeter gateMeter { theme, false }, inMeter { theme, true };
     int stripOrder() const { return (int) proc.apvts.getRawParameterValue ("stripOrder")->load(); }
     std::unique_ptr<ScaleKnob> depthKnob, sysKnob[4], anKnob[5], eqKnob2[2], cpKnob[7];
     std::unique_ptr<DualKnob> eqKnob[4], cpDual[2];     // the compressor's Threshold + Ratio and Attack + Release, nested
     PresetBrowser browser; SetupPanel setup;
-    GearButton topGear { theme }, stripGear { theme }; MovBox eqModelBox; std::unique_ptr<LarcKey> eqModelLab, eqTypeKey[6]; std::unique_ptr<ScaleKnob> topClean[2]; std::unique_ptr<ScaleKnob> cleanKnob;
+    GearButton topGear { theme }, stripGear { theme }; MovBox eqModelBox; static constexpr int kEqTypes = 7; std::unique_ptr<LarcKey> eqModelLab, eqTypeKey[kEqTypes]; std::unique_ptr<ScaleKnob> topClean[2]; std::unique_ptr<ScaleKnob> cleanKnob;
     HwPage hwPage { theme, proc.apvts }; PrefsWindow prefs { theme, setup, hwPage };
     void openPrefs (int page = -1) { prefs.setBounds (0, 0, baseWidth(), mainH); prefs.open (page < 0 ? prefs.page() : page); }
 

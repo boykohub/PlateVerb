@@ -6,6 +6,7 @@ on:
     paths:
       - 'Source/**'
       - 'ChannelStrip/Source/CSEngine.h'
+      - 'N1081/Source/N1081Engine.h'
       - 'CMakeLists.txt'
       - '.github/workflows/build-PlateVerb.yml'
 permissions:

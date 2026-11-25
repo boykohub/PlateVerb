@@ -4,6 +4,7 @@
 #include "L480Dsp.h"
 #include "CSEngine.h"          // the ChannelStrip preamp (ANALOG)
 #include "L480Loops.h"        // the measured long recirculation per preset
+#include "N1081Engine.h"       // the 1081+ circuit: the strip EQ's 1081 model
 
 namespace l480 {
 
@@ -12,7 +13,10 @@ enum Cfg { kSingle = 0, kCascade, kStereoSplit, kMonoSplit };
 // ---------------------------------------------------------------- the reverb's own EQ: the Flexi 180V 4-band parametric
 // (modelled on the original's Mono Parametric EQ program): each band 30 Hz - 17 kHz, +-12 dB, Q from shelf to 7;
 // the low band can also be a notch (Q 16 or 32, -36 dB), the high band a high shelf. Digital filters, 64-bit.
-struct RevEqParams { double f[4] = { 1000, 1000, 1000, 1000 }, g[4] = {}, q[4] = { 1.5, 1.5, 1.5, 1.5 }; int t[4] = {}; double lvl = 0; };   // t: 0 peak, 1 shelf, 2 notch 16, 3 notch 32
+// Four bands always there (1-4, as on the original) and up to four more you add on the graph (5-8, plain peaks).
+static constexpr int kRevEqBands = 8;
+struct RevEqParams { double f[kRevEqBands] = { 100, 400, 2500, 8000, 1000, 1000, 1000, 1000 }, g[kRevEqBands] = {}, q[kRevEqBands] = { 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5 };
+                     int t[kRevEqBands] = {}; bool use[kRevEqBands] = { true, true, true, true, false, false, false, false }; double lvl = 0; };   // t: 0 peak, 1 shelf, 2 notch 16, 3 notch 32
 inline void designRevEq (pv::Biquad& bq, double fs, int b, double f, double g, double q, int t)
 {
     f = std::min (17000.0, std::max (30.0, f));
@@ -27,6 +31,45 @@ inline double biquadMagDb (const pv::Biquad& b, double fs, double f)
     const double nr = b.b0 + b.b1 * c1 + b.b2 * c2, ni = -(b.b1 * s1 + b.b2 * s2), dr = 1 + b.a1 * c1 + b.a2 * c2, di = -(b.a1 * s1 + b.a2 * s2);
     return 10.0 * std::log10 ((nr * nr + ni * ni) / std::max (1e-30, dr * dr + di * di) + 1e-30);
 }
+
+// ---------------------------------------------------------------- the strip EQ's 1081 model: the same circuit as the 1081+ plug-in
+// (input transformer, BA338 line amp, the four inductor/capacitor bands with their proportional Q, BA340 class A/B output,
+// output transformer), at its standard level and drive. Each band only covers its own range, with continuous frequency:
+// LOW 33-330 Hz shelf, LOW MID 220-1200 Hz and HIGH MID 1.5-8.2 kHz peaks, HIGH 3.3-15 kHz shelf - the 1081's own ranges.
+static constexpr int kEqModel1081 = 7;               // after the ChannelStrip models (0-6)
+static constexpr double kEqLo[4] = { 33, 220, 1500, 3300 }, kEqHi[4] = { 330, 1200, 8200, 15000 };
+inline n1081::BandSpec eq1081Spec (int b, double f, double g)
+{
+    using n1081::Kind; using n1081::Shape;
+    f = std::min (kEqHi[b], std::max (kEqLo[b], f));
+    switch (b) {
+        case 0:  return { Kind::LowShelf, f, g, Shape::shelfQ };
+        case 1:  return { Kind::Peak, f, g, Shape::propQ (Shape::midQ, g) };
+        case 2:  return { Kind::Peak, f, g, Shape::propQ (Shape::midQ, g) };
+        default: return { Kind::HighShelf, f, g, Shape::shelfQ };
+    }
+}
+struct Eq1081 {
+    n1081::Channel ch[2]; double fs = 0, curF[4] = { 100, 470, 3300, 10000 }, curG[4] = {}, tgtF[4] = { 100, 470, 3300, 10000 }, tgtG[4] = {}; bool first = true, dirty = true;
+    void prepare (double rate) { fs = rate; for (auto& c : ch) c.prepare (rate); first = true; dirty = true; }
+    void set (const double* f, const double* g) {
+        for (int b = 0; b < 4; ++b) if (f[b] != tgtF[b] || g[b] != tgtG[b]) { tgtF[b] = f[b]; tgtG[b] = g[b]; dirty = true; }
+    }
+    void design() { for (int b = 0; b < 4; ++b) { const auto s = eq1081Spec (b, curF[b], curG[b]); for (auto& c : ch) c.setBand (b, s, true); } }
+    void step() {      // every 16 samples: knob moves glide (no zipper), like the strip's other models
+        if (! dirty) return;
+        if (first) { for (int b = 0; b < 4; ++b) { curF[b] = tgtF[b]; curG[b] = tgtG[b]; } first = false; design(); dirty = false; return; }
+        const double a = 1.0 - std::exp (-16.0 / (0.025 * fs)); bool moving = false;
+        for (int b = 0; b < 4; ++b) {
+            const double nf = std::exp (std::log (curF[b]) + (std::log (tgtF[b]) - std::log (curF[b])) * a);
+            curF[b] = std::fabs (nf - tgtF[b]) < 0.0005 * tgtF[b] ? tgtF[b] : nf;
+            curG[b] = std::fabs (curG[b] - tgtG[b]) < 0.005 ? tgtG[b] : curG[b] + (tgtG[b] - curG[b]) * a;
+            moving |= curF[b] != tgtF[b] || curG[b] != tgtG[b];
+        }
+        design(); dirty = moving;
+    }
+    inline double process (int c, double x) { return ch[c].process (x, 1.0, 0, 0); }
+};
 
 // ---------------------------------------------------------------- oversampling for the ANALOG / EQ / compressor chain
 // Linear-phase polyphase FIR (Kaiser-windowed sinc, 24 taps per phase, pass band to 0.45 of the base rate, about
@@ -82,7 +125,7 @@ struct EngineParams {
     double val[2][kMaxParams] = {};          // LARC values per machine (units)
     int config = kSingle;
     int oversampling = 1; bool precision64 = false;      // ANALOG / EQ / compressor chain
-    int eqModel = 1; double eqDrive = 0.5;               // EQ character: the ChannelStrip models (0 = clean)
+    int eqModel = kEqModel1081; double eqDrive = 0.5;    // EQ character: the ChannelStrip models (1-6) or the 1081 (7); each at its own standard drive
     double erAtkMs = 0.0, dlAtkMs = 0.0;                // reflection attack, delay attack
     // ANALOG: the ChannelStrip preamp on the reverb, on the EQ, or both
     bool anOn = false; int anTarget = 0, anModel = 1, anColour = 1; double anDrive = 6.0, anOut = 0.0;   // anTarget 0 reverb, 1 EQ, 2 both
@@ -144,7 +187,7 @@ public:
         anVerb.prepare (fsOs); anEq.prepare (fsOs); anM = -1;
         for (auto& c : eq) for (auto& b : c) b.reset();
         for (auto& c : eqD) for (auto& b : c) b.reset();
-        eqBank.prepare (fsOs);
+        eqBank.prepare (fsOs); eq1081.prepare (fsOs);
         for (auto& u : up) u.design (os);
         for (auto& d : dn) d.design (os);
     }
@@ -158,6 +201,7 @@ public:
     double meterOut() const { return mOut; }
     double compGr() const { return comp.reductionDb(); }
     double gateKeyDb() const { return gate.keyLevelDb(); }
+    double stripInDb() const { return 20.0 * std::log10 (std::max (mStripIn, 1.0e-6)); }   // what goes into the channel strip (peak of the last block)
     double gateGainDb() const { return gate.gainLevelDb(); }
     int baseTaps (int m, double* ms, double* db, int max) const { return mach[m].baseTaps (ms, db, max); }
     const Machine& machine (int i) const { return mach[i]; }
@@ -183,18 +227,22 @@ public:
         {   // EQ with the analog character of the chosen model
             std::array<cs::BandSettings, 4> bs {};
             for (int b = 0; b < 4; ++b) { bs[(size_t) b].on = true; bs[(size_t) b].shelf = (b == 0 || b == 3); bs[(size_t) b].freq = p.eqF[b]; bs[(size_t) b].gain = p.eqG[b]; bs[(size_t) b].qScale = 1.0; }
-            eqBank.set (p.eqModel, bs, p.eqDrive);
+            if (p.eqModel == kEqModel1081) eq1081.set (p.eqF, p.eqG);
+            else eqBank.set (std::max (1, std::min (cs::kNumEqModels - 1, p.eqModel)), bs, p.eqDrive);
         }
         tr.set (p.trModel, p.trFreq, p.trAmt);
-        for (int c = 0; c < 2; ++c) for (int b = 0; b < 4; ++b) designRevEq (rqF[c][b], fs, b, p.rq.f[b], p.rq.g[b], p.rq.q[b], p.rq.t[b]);
+        for (int c = 0; c < 2; ++c) for (int b = 0; b < kRevEqBands; ++b) designRevEq (rqF[c][b], fs, b, p.rq.f[b], p.rq.g[b], p.rq.q[b], b == 0 || b == 3 ? p.rq.t[b] : 0);
+        int rqN = 0, rqIdx[kRevEqBands] = {}; for (int b = 0; b < kRevEqBands; ++b) if (p.rq.use[b] || b < 4) rqIdx[rqN++] = b;
         const double rqLvl = dbToGain (p.rq.lvl);
         const double tL = pv::clampf (p.dlMsL * 0.001 * fs, 1.0, pv::kMaxDelaySec * fs - 4), tR = pv::clampf (p.dlMsR * 0.001 * fs, 1.0, pv::kMaxDelaySec * fs - 4);
         if (firstBlock) { delay.curL = tL; delay.curR = tR; firstBlock = false; }
         delay.service();
         const double smA = 1.0 - std::exp (-1.0 / (0.02 * fs));
-        const double tgtOut = dbToGain (p.outDb), tgtClean = dbToGain (p.cleanDb), tgtIn = dbToGain (p.cleanInDb), tgtStrip = dbToGain (p.stripOutDb), tgtDl = p.dlOn ? p.dlMix : 0.0, tgtMute = p.mute ? 1.0 : 0.0;
+        // OUT (the old CLEAN OUT): the level of everything - reverb and dry - into the channel strip; 0 = silence.
+        // The strip's OUT (the old strip CLEAN OUT): the final output of everything, always last. OUTPUT is gone.
+        const double tgtOut = 1.0, tgtClean = dbToGain (p.cleanDb), tgtIn = dbToGain (p.cleanInDb), tgtStrip = dbToGain (p.stripOutDb), tgtDl = p.dlOn ? p.dlMix : 0.0, tgtMute = p.mute ? 1.0 : 0.0;
         const bool hwInOn = p.hw.on && p.hw.inAnalog, hwOutOn = p.hw.on && p.hw.outAnalog;
-        double pkIn = 0, pkOut = 0;
+        double pkIn = 0, pkOut = 0; mStripInBlk = 0;
         pv::ScopedLineQuant mem (p.hw.on ? 18 : 0);        // the 480L's 18-bit audio memory, set once per block
         // the dry signal stays out of the tone EQ, ANALOG and channel strip: those work on the reverb only
         // (cascade and "feeds" modes still pass the whole signal on, as the second machine needs it)
@@ -203,7 +251,8 @@ public:
         // with the channel strip (or any of its modules) on, OUTPUT drives the strip: it sits before it on the reverb
         const bool stripOn = p.gtOn || p.eqOn || p.comp.on;
         for (int i = 0; i < n; ++i) {
-            sOut += smA * (tgtOut - sOut); gOut[i] = sOut;
+            sOut += smA * (tgtOut - sOut); (void) sOut;
+            sClean += smA * (tgtClean - sClean); gOut[i] = sClean;          // OUT: everything into the strip
             sIn += smA * (tgtIn - sIn); L[i] *= sIn; R[i] *= sIn;           // CLEAN IN: plain gain, first of all
             const double xL = L[i], xR = R[i];
             pkIn = std::max (pkIn, std::max (std::fabs (xL), std::fabs (xR)));
@@ -253,15 +302,15 @@ public:
             }
             }
             // the reverb's own EQ (Flexi 180V parametric), on the reverb only
-            for (int b = 0; b < 4; ++b) { yL = rqF[0][b].process (yL); yR = rqF[1][b].process (yR); }
+            for (int k = 0; k < rqN; ++k) { const int b = rqIdx[k]; yL = rqF[0][b].process (yL); yR = rqF[1][b].process (yR); }
             yL *= rqLvl; yR *= rqLvl;
-            if (stripOn) { yL *= sOut; yR *= sOut; }
+            yL *= sClean; yR *= sClean;                                    // OUT: into the strip
             wL[i] = yL; wR[i] = yR;
             if (! splitDry) dryB[0][i] = dryB[1][i] = 0.0;
         }
         // ---- ANALOG on the reverb, the EQ (with ANALOG on the EQ) and the compressor, at fs * os
         const bool anyPost = anV || anE || p.eqOn || p.comp.on;
-        (void) anyPost;
+        (void) anyPost; (void) stripOn;
         if (os == 1) {                         // with oversampling the resamplers always run: the latency stays constant
             for (int i = 0; i < n; ++i) post (wL[i], wR[i], L[i], R[i], p, anV, anE);
         } else {
@@ -279,36 +328,40 @@ public:
             double yL = wL[i], yR = wR[i];
             const double g = gOut[i];
             sStrip += smA * (tgtStrip - sStrip);
-            if (stripOn) { yL *= sStrip; yR *= sStrip; }                       // the strip's CLEAN OUT: after the strip, on the reverb
-            {   // the untouched dry part back in, delayed as much as the oversampled chain delays the reverb
+            {   // the untouched dry part back in, delayed as much as the oversampled chain delays the reverb (OUT is on it too)
                 dryRing[0][dryPos] = dryB[0][i]; dryRing[1][dryPos] = dryB[1][i];
                 const int rp = (dryPos - lat + kDryRing) % kDryRing; dryPos = (dryPos + 1) % kDryRing;
-                if (stripOn) { yL += dryRing[0][rp] * g; yR += dryRing[1][rp] * g; }        // the reverb already has OUTPUT
-                else { yL = (yL + dryRing[0][rp]) * g; yR = (yR + dryRing[1][rp]) * g; }
+                yL += dryRing[0][rp] * g; yR += dryRing[1][rp] * g;
             }
-            sDl += smA * (tgtDl - sDl); sMute += smA * (tgtMute - sMute); sClean += smA * (tgtClean - sClean);
+            sDl += smA * (tgtDl - sDl); sMute += smA * (tgtMute - sMute);
             if (p.dlOn || sDl > 1e-4) {
                 double dL, dR; delay.process (xL, xR, tL, tR, p.dlFb, p.dlPing, smA * 0.2, dL, dR);
                 yL += dL * sDl * g; yR += dR * sDl * g;
             }
             // MUTE removes the processed audio while held: the dry input passes
             yL = yL * (1.0 - sMute) + xL * sMute; yR = yR * (1.0 - sMute) + xR * sMute;
-            // CLEAN OUT: plain gain, always last
-            L[i] = yL * sClean; R[i] = yR * sClean;
+            // the strip's OUT: the final output of everything, always last
+            L[i] = yL * sStrip; R[i] = yR * sStrip;
             pkOut = std::max (pkOut, std::max (std::fabs (L[i]), std::fabs (R[i])));
         }
-        mIn = pkIn; mOut = pkOut;
+        mIn = pkIn; mOut = pkOut; mStripIn = mStripInBlk;
     }
 
 private:
     inline void post (double& yL, double& yR, double kL, double kR, const EngineParams& p, bool anV, bool anE) {
         if (anV) { yL = anVerb.process (0, yL); yR = anVerb.process (1, yR); }
+        mStripInBlk = std::max (mStripInBlk, std::max (std::fabs (yL), std::fabs (yR)));
         if (p.gtOn) gate.process (yL, yR, p.gtKeyIn ? kL : yL, p.gtKeyIn ? kR : yR, p.gtThr, p.gtRange, p.gtRelMs);
         else gate.follow (yL, yR);
         auto eqStage = [&] {
             if (p.eqOn) {
-                if (++eqStep >= 16) { eqStep = 0; eqBank.step(); }
-                yL = eqBank.process (0, yL); yR = eqBank.process (1, yR);         // 64-bit filters with the model's analog colour
+                if (p.eqModel == kEqModel1081) {                                  // the 1081 circuit
+                    if (++eqStep >= 16) { eqStep = 0; eq1081.step(); }
+                    yL = eq1081.process (0, yL); yR = eq1081.process (1, yR);
+                } else {
+                    if (++eqStep >= 16) { eqStep = 0; eqBank.step(); }
+                    yL = eqBank.process (0, yL); yR = eqBank.process (1, yR);     // the model's filters with its analog colour
+                }
             }
             if (anE) { yL = anEq.process (0, yL); yR = anEq.process (1, yR); }
         };
@@ -318,12 +371,12 @@ private:
         };
         if (p.stripOrder == 1) { compStage(); eqStage(); } else { eqStage(); compStage(); }
     }
-    cs::EqBank eqBank; int eqStep = 0; Gate gate;
+    cs::EqBank eqBank; Eq1081 eq1081; int eqStep = 0; Gate gate; double mStripIn = 0, mStripInBlk = 0;
     int os = 1; double fsOs = 48000; Upsampler up[4]; Downsampler dn[2]; BiquadD eqD[2][4];
     double wL[512] = {}, wR[512] = {}, gOut[512] = {};
     double dryB[2][512] = {};                                        // the dry part of this block (split off in the machines)
     static constexpr int kDryRing = 2048; double dryRing[2][kDryRing] = {}; int dryPos = 0;
-    pv::Biquad rqF[2][4]; double sIn = 1, sStrip = 1;
+    pv::Biquad rqF[2][kRevEqBands]; double sIn = 1, sStrip = 1;
     double fs = 48000, sOut = 1, sClean = 1, sDl = 0, sMute = 0, mIn = 0, mOut = 0; bool firstBlock = true;
     Machine mach[2];
     cs::Preamp anVerb, anEq; int anM = -1, anC = -1; double anD = -1, anO = -99;

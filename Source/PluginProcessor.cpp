@@ -38,7 +38,8 @@ public:
         pCpAtk = P ("cpAtk"); pCpRel = P ("cpRel"); pCpMakeup = P ("cpMakeup"); pCpMix = P ("cpMix");
         pDlOn = P ("dlOn"); pDlSync = P ("dlSync"); pDlPing = P ("dlPing"); pDlTimeL = P ("dlTimeL"); pDlTimeR = P ("dlTimeR");
         pDlDivL = P ("dlDivL"); pDlDivR = P ("dlDivR"); pDlFb = P ("dlFb"); pDlMix = P ("dlMix"); pDlLow = P ("dlLow"); pDlHigh = P ("dlHigh");
-        for (int b = 0; b < 4; ++b) { pRqF[b] = apvts.getRawParameterValue ("rqF" + String (b)); pRqG[b] = apvts.getRawParameterValue ("rqG" + String (b)); pRqQ[b] = apvts.getRawParameterValue ("rqQ" + String (b)); }
+        for (int b = 0; b < l480::kRevEqBands; ++b) { pRqF[b] = apvts.getRawParameterValue ("rqF" + String (b)); pRqG[b] = apvts.getRawParameterValue ("rqG" + String (b)); pRqQ[b] = apvts.getRawParameterValue ("rqQ" + String (b));
+                                                      pRqU[b] = b < 4 ? nullptr : apvts.getRawParameterValue ("rqU" + String (b)); }
         pRqT0 = P ("rqT0"); pRqT3 = P ("rqT3"); pRqLvl = P ("rqLvl"); pCleanIn = P ("cleanIn"); pCleanOut = P ("cleanOut"); pStripOut = P ("stripOut");
         pHwOn = P ("hwOn"); pHwIn = P ("hwIn"); pHwOut = P ("hwOut"); pHwXfIn = P ("hwXfIn"); pHwXfOut = P ("hwXfOut"); pHwNoise = P ("hwNoise");
         pAnOn = P ("anOn"); pAnTarget = P ("anTarget"); pAnModel = P ("anModel"); pAnColour = P ("anColour"); pAnDrive = P ("anDrive"); pAnOut = P ("anOut");
@@ -112,14 +113,15 @@ public:
         l.add (cp ("conv", "Converter", StringArray { "24-bit", "12-bit", "15-bit ranging", "16-bit ranging" }, 0));
         // drawer: EQ
         l.add (bp ("eqOn", "EQ On", false));
-        { StringArray m; for (int i = 0; i < cs::kNumEqModels; ++i) m.add (cs::eqModelName (i)); l.add (cp ("eqModel", "EQ Model", m, 1)); }
+        { StringArray m; for (int i = 0; i < cs::kNumEqModels; ++i) m.add (cs::eqModelName (i)); m.add ("Neve 1081 - 1081+"); l.add (cp ("eqModel", "EQ Model", m, l480::kEqModel1081)); }
         l.add (fp ("eqDrive", "EQ Colour", 0.0f, 1.0f, 0.5f, false, "%"));
         l.add (fp ("erAtk", "Reflection Attack", 0.0f, 100.0f, 0.0f, false, "ms", 1));
         l.add (fp ("loopAmt", "180V Depth", 0.0f, 2.0f, 1.0f, false, "%"));      // the measured long recirculation (stone depth)
         l.add (cp ("addOn", "Add-On (Machine B)", StringArray { "Off", "Beside", "Before", "After" }, 0));   // delay / chorus with the reverb
         l.add (fp ("dlAtk", "Delay Attack", 0.0f, 500.0f, 0.0f, false, "ms", 0));
         const char* bn[] = { "Low", "Low Mid", "High Mid", "High" };
-        const float fLo[] = { 20, 20, 20, 20 }, fHi[] = { 20000, 20000, 20000, 20000 }, fDef[] = { 100, 400, 2500, 8000 };   // every band free over the whole range
+        // each band only over its own range (the 1081's): LOW 33-330 Hz, LOW MID 220-1200 Hz, HIGH MID 1.5-8.2 kHz, HIGH 3.3-15 kHz
+        const float fLo[] = { 33, 220, 1500, 3300 }, fHi[] = { 330, 1200, 8200, 15000 }, fDef[] = { 100, 470, 3900, 10000 };
         for (int b = 0; b < 4; ++b)
         {
             l.add (fp ("eqF" + String (b), String ("EQ ") + bn[b] + " Freq", fLo[b], fHi[b], fDef[b], true, "Hz"));
@@ -165,15 +167,17 @@ public:
         // its user-installable transformer option, or its digital I/O (no analog stage at all)
         l.add (cp ("hwInSt", "Flexi 180V Input Stage", StringArray { "Analog (standard)", "Analog + transformer option", "Digital I/O" }, 0));
         l.add (cp ("hwOutSt", "Flexi 180V Output Stage", StringArray { "Analog (standard)", "Analog + transformer option", "Digital I/O" }, 0));
-        l.add (fp ("cleanOut", "Clean Out", -24.0f, 12.0f, 0.0f, false, "dB", 1));
-        l.add (fp ("cleanIn", "Clean In", -24.0f, 12.0f, 0.0f, false, "dB", 1));
-        l.add (fp ("stripOut", "Strip Clean Out", -24.0f, 12.0f, 0.0f, false, "dB", 1));
-        // the reverb's own EQ: Flexi 180V 4-band parametric; the factory program has every band at 1.0 kHz, Q 1.5, 0 dB
-        for (int b = 0; b < 4; ++b)
+        l.add (fp ("cleanOut", "Out (into the strip)", -24.0f, 12.0f, 0.0f, false, "dB", 1));   // everything (reverb and dry) into the strip
+        l.add (fp ("cleanIn", "In", -24.0f, 12.0f, 0.0f, false, "dB", 1));
+        l.add (fp ("stripOut", "Out", -24.0f, 12.0f, 0.0f, false, "dB", 1));                    // the final output of everything
+        // the reverb's own EQ: the Flexi 180V 4-band parametric (bands 1-4, spread over the range so each one is seen),
+        // plus four more you add on the graph (5-8)
+        for (int b = 0; b < l480::kRevEqBands; ++b)
         {
-            l.add (fp ("rqF" + String (b), "Reverb EQ " + String (b + 1) + " Freq", 30.0f, 17000.0f, 1000.0f, true, "Hz"));
+            l.add (fp ("rqF" + String (b), "Reverb EQ " + String (b + 1) + " Freq", 30.0f, 17000.0f, (float) rqHome (b), true, "Hz"));
             l.add (fp ("rqG" + String (b), "Reverb EQ " + String (b + 1) + " Level", -12.0f, 12.0f, 0.0f, false, "dB", 1));
             l.add (fp ("rqQ" + String (b), "Reverb EQ " + String (b + 1) + " Q", 0.3f, 7.0f, 1.5f, true, "", 2));
+            if (b >= 4) l.add (bp ("rqU" + String (b), "Reverb EQ " + String (b + 1) + " In Use", false));
         }
         l.add (cp ("rqT0", "Reverb EQ 1 Type", StringArray { "Peak", "Low Shelf", "Notch Q16", "Notch Q32" }, 0));
         l.add (cp ("rqT3", "Reverb EQ 4 Type", StringArray { "Peak", "High Shelf" }, 0));
@@ -184,6 +188,16 @@ public:
         l.add (fp ("trAmt", "Transformer Amount", 0.0f, 1.0f, 0.3f, false, "%"));
         return l;
     }
+
+    static double rqHome (int b) { static const double h[] = { 100, 400, 2500, 8000 }; return b < 4 ? h[b] : 1000.0; }   // where bands 1-4 sit at 0 dB
+    // the channel strip (gate, EQ, compressor): back to its defaults and off - a preset that was not saved with it
+    void resetStrip()
+    {
+        for (auto* id : { "gtOn", "gtKey", "gtThr", "gtRange", "gtRel", "stripOrder", "eqOn", "eqModel", "eqF0", "eqF1", "eqF2", "eqF3", "eqG0", "eqG1", "eqG2", "eqG3",
+                          "cpOn", "cpType", "cpColor", "cpDuck", "cpThr", "cpRatio", "cpAtk", "cpRel", "cpMakeup", "cpMix" })
+            if (auto* q = apvts.getParameter (id)) if (q->getValue() != q->getDefaultValue()) { q->beginChangeGesture(); q->setValueNotifyingHost (q->getDefaultValue()); q->endChangeGesture(); }
+    }
+    bool stripInPreset() const { return apvts.getRawParameterValue ("gtOn")->load() > 0.5f || apvts.getRawParameterValue ("eqOn")->load() > 0.5f || apvts.getRawParameterValue ("cpOn")->load() > 0.5f; }
 
     // ------------------------------------------------------------------ programs and LARC values
     int programOf (int m) const { return jlimit (0, l480::numPrograms() - 1, (int) pProg[m]->load()); }
@@ -219,6 +233,7 @@ public:
         setRefl (m, {});                            // so are your own reflections
         setTapEdits (m, {});
         userPresetName = {};
+        resetStrip();                               // a program does not hold the channel strip: it goes back to its defaults, off
         lastProg[m] = index;
         programLoaded.store (true);
     }
@@ -433,6 +448,7 @@ public:
         if (xml == nullptr || ! xml->hasTagName (apvts.state.getType())) return false;
         auto keep = apvts.state.createCopy();                       // the window's own settings stay
         applyState (ValueTree::fromXml (*xml));
+        if (! stripInPreset()) resetStrip();                          // saved without the channel strip: defaults, off
         for (int i = 0; i < keep.getNumProperties(); ++i) if (isUiProperty (keep.getPropertyName (i))) apvts.state.setProperty (keep.getPropertyName (i), keep.getProperty (keep.getPropertyName (i)), nullptr);
         userPresetName = name;
         return true;
@@ -495,7 +511,7 @@ public:
         if (engine.latency() != getLatencySamples()) setLatencySamples (engine.latency());
         meterIn.store (jmax (meterIn.load() * 0.85f, (float) engine.meterIn()));
         meterOut.store (jmax (meterOut.load() * 0.85f, (float) engine.meterOut()));
-        gateKey.store (engine.gateKeyDb()); gateGain.store (engine.gateGainDb());
+        gateKey.store (engine.gateKeyDb()); gateGain.store (engine.gateGainDb()); stripIn.store ((float) engine.stripInDb());
         compGr.store (prm.comp.on ? (float) engine.compGr() : 0.0f);
     }
     void fillParams (l480::EngineParams& p)
@@ -520,7 +536,8 @@ public:
         p.anTarget = jlimit (0, 2, (int) f (pAnTarget)); p.anModel = jlimit (0, 4, (int) f (pAnModel));
         p.anColour = jlimit (0, 3, (int) f (pAnColour)); p.anDrive = f (pAnDrive); p.anOut = f (pAnOut);
         p.eqOn = on (pEqOn);
-        p.eqModel = jlimit (0, cs::kNumEqModels - 1, (int) apvts.getRawParameterValue ("eqModel")->load()); p.eqDrive = 0.5f;   // each EQ model at its own hardware colour
+        p.eqModel = jlimit (0, l480::kEqModel1081, (int) apvts.getRawParameterValue ("eqModel")->load()); p.eqDrive = 0.5f;   // each EQ model at its own standard drive (no drive control)
+        if (p.eqModel == 0) p.eqModel = l480::kEqModel1081;                                  // no clean EQ
         p.loopAmt = apvts.getRawParameterValue ("loopAmt")->load();
         p.addOn = jlimit (0, 3, (int) apvts.getRawParameterValue ("addOn")->load());
         for (int m = 0; m < 2; ++m)
@@ -555,7 +572,7 @@ public:
         p.trOn = false; (void) pTrOn; (void) pTrModel; (void) pTrFreq; (void) pTrAmt;     // IRON is gone: the 180V stages replace it
         p.outDb = f (pOut);
         p.cleanInDb = f (pCleanIn); p.stripOutDb = f (pStripOut); p.cleanDb = f (pCleanOut);
-        for (int b = 0; b < 4; ++b) { p.rq.f[b] = f (pRqF[b]); p.rq.g[b] = f (pRqG[b]); p.rq.q[b] = f (pRqQ[b]); p.rq.t[b] = 0; }
+        for (int b = 0; b < l480::kRevEqBands; ++b) { p.rq.f[b] = f (pRqF[b]); p.rq.g[b] = f (pRqG[b]); p.rq.q[b] = f (pRqQ[b]); p.rq.t[b] = 0; p.rq.use[b] = b < 4 || on (pRqU[b]); }
         p.rq.t[0] = (int) f (pRqT0); p.rq.t[3] = (int) f (pRqT3); p.rq.lvl = f (pRqLvl);
     }
 
@@ -606,6 +623,11 @@ public:
         setRefl (0, reflFromString (apvts.state.getProperty ("reflA").toString())); setRefl (1, reflFromString (apvts.state.getProperty ("reflB").toString()));
         setTapEdits (0, tapsFromString (apvts.state.getProperty ("tapsA").toString())); setTapEdits (1, tapsFromString (apvts.state.getProperty ("tapsB").toString()));
         for (int m = 0; m < 2; ++m) lastProg[m] = programOf (m);
+        // reverb EQ bands 1-4 left as the factory program has them (all at 1 kHz, 0 dB): spread out, so each one is seen
+        // (at 0 dB a band's frequency changes nothing you hear)
+        for (int b = 0; b < 4; ++b)
+            if (std::abs (pRqG[b]->load()) < 0.01f && std::abs (pRqF[b]->load() - 1000.0f) < 0.5f && (b == 1 || b == 2 || (int) (b == 0 ? pRqT0 : pRqT3)->load() == 0))
+                if (auto* q = apvts.getParameter ("rqF" + String (b))) q->setValueNotifyingHost (q->convertTo0to1 ((float) rqHome (b)));
         programLoaded.store (true);
     }
     void setUiProperty (const Identifier& id, const var& v) { apvts.state.setProperty (id, v, nullptr); }
@@ -620,9 +642,9 @@ public:
 
     APVTS apvts;
     std::atomic<bool> mute { false }, programLoaded { true };
-    std::atomic<float> meterIn { 0 }, meterOut { 0 }, compGr { 0 }, gateKey { -120 }, gateGain { 0 };
+    std::atomic<float> meterIn { 0 }, meterOut { 0 }, compGr { 0 }, gateKey { -120 }, gateGain { 0 }, stripIn { -120 };
     std::atomic<double> sampleRateUi { 48000.0 };
-    std::atomic<float>* pRqF[4] {}; std::atomic<float>* pRqG[4] {}; std::atomic<float>* pRqQ[4] {}; std::atomic<float> *pRqT0 = nullptr, *pRqT3 = nullptr, *pRqLvl = nullptr, *pCleanIn = nullptr, *pCleanOut = nullptr, *pStripOut = nullptr;
+    std::atomic<float>* pRqF[l480::kRevEqBands] {}; std::atomic<float>* pRqG[l480::kRevEqBands] {}; std::atomic<float>* pRqQ[l480::kRevEqBands] {}; std::atomic<float>* pRqU[l480::kRevEqBands] {}; std::atomic<float> *pRqT0 = nullptr, *pRqT3 = nullptr, *pRqLvl = nullptr, *pCleanIn = nullptr, *pCleanOut = nullptr, *pStripOut = nullptr;
     static constexpr int kScopeSize = 8192;
     std::array<float, kScopeSize> scope {};
     std::atomic<int> scopeWrite { 0 };

@@ -315,6 +315,10 @@ struct RandLfo {
 // ---------------------------------------------------------------- plate (Dattorro tank, true-stereo input)
 // Diffusion sets the input/tank allpass gains: higher = smoother, denser onset (less grain), lower = more open and "zingy".
 inline double& TankAlgo_wanderMsRef() { static double v = 1.5; return v; }
+// how much of the full wander a decay gets: the 480L's delays never stand still, so from 0.6 s on it grows to the full
+// amount at 3 s (it used to start at 1.5 s and reach it only at 9.5 s - medium and long halls kept fixed resonances that
+// rang on in the high mids like a synth fading out, instead of one smooth wash)
+inline double wanderShare (double rt) { return clampf ((rt - 0.6) / 2.4, 0.0, 1.0); }
 inline double TankAlgo_wanderMs() { return TankAlgo_wanderMsRef(); }
 struct PlateAlgo {
     static constexpr int kEarly = 6;
@@ -374,7 +378,7 @@ struct PlateAlgo {
         lfo[0].setRate (fs, 0.83); lfo[1].setRate (fs, 1.07);
         for (int k = 0; k < 4; ++k) wl[k].setRate (fs, 0.21 + 0.067 * (double) k);
         double rtLong = std::max (rtB[0], std::max (rtB[1], rtB[2])); if (curveT) for (int b = 0; b < DecayEq::N; ++b) rtLong = std::max (rtLong, curveT[b]);
-        wanderS = clampf ((rtLong - 1.5) / 8.0, 0.0, 1.0) * TankAlgo_wanderMs() * 0.001 * fs;
+        wanderS = wanderShare (rtLong) * TankAlgo_wanderMs() * 0.001 * fs;
     }
     inline void process (double inL, double inR, double dampA, double mod, double early, double& oL, double& oR) {
         const double exc = mod * 14.0 * s;
@@ -443,7 +447,7 @@ struct TankAlgo {
     static constexpr double kD2[S]  = { 29.7, 33.1, 27.3, 35.9 };
     static constexpr double kDif[4] = { 1.31, 2.03, 3.71, 5.63 };
     Line ap1[S], d1[S], ap2[S], ap3[S], d2[S], difL[4], difR[4], erL, erR, lateL, lateR;
-    OnePole damp[S]; BandDecay band[S]; RandLfo lfo[S], lfo2[S];
+    OnePole damp[S]; BandDecay band[S]; RandLfo lfo[S], lfo2[S], lfo3[S], lfo4[S];
     double fb[S] = {};
     // long tails: the second delay of each section wanders slowly and randomly, more the longer the decay, so the
     // loop's resonances keep moving and smear into a smooth tail instead of ringing (0 for short decays)
@@ -460,8 +464,8 @@ struct TankAlgo {
         const double km = maxFs * 0.001 * c.scale * kMaxSize, modS = (c.modMs * 2 + 1) * maxFs * 0.001;
         for (int i = 0; i < S; ++i) {
             ap1[i].init ((int) (kAp1[i] * km + modS) + 16); d1[i].init ((int) (kD1[i] * km + 0.008 * maxFs) + 16);
-            ap2[i].init ((int) (kAp2[i] * km) + 16); ap3[i].init ((int) (kAp3[i] * km) + 16); d2[i].init ((int) (kD2[i] * km + 0.008 * maxFs) + 16);
-            lfo[i].init ((uint32_t) (a * 17 + i * 5 + 3)); lfo2[i].init ((uint32_t) (a * 29 + i * 11 + 7));
+            ap2[i].init ((int) (kAp2[i] * km + 0.002 * maxFs) + 16); ap3[i].init ((int) (kAp3[i] * km) + 16); d2[i].init ((int) (kD2[i] * km + 0.008 * maxFs) + 16);
+            lfo[i].init ((uint32_t) (a * 17 + i * 5 + 3)); lfo2[i].init ((uint32_t) (a * 29 + i * 11 + 7)); lfo3[i].init ((uint32_t) (a * 37 + i * 13 + 5)); lfo4[i].init ((uint32_t) (a * 43 + i * 19 + 11));
         }
         for (int i = 0; i < 4; ++i) { difL[i].init ((int) (kDif[i] * 1.1 * km) + 16); difR[i].init ((int) (kDif[i] * 1.1 * km) + 16); }
         tapMs.clear(); tapGL.clear(); tapGR.clear(); tapS.reserve (kDense);
@@ -488,7 +492,7 @@ struct TankAlgo {
         const double km = fs * 0.001 * c.scale * kMaxSize, modS = (c.modMs * 2 + 1) * fs * 0.001;
         for (int i = 0; i < S; ++i) {
             ap1[i].clearRecent ((int) (kAp1[i] * km + modS) + 16); d1[i].clearRecent ((int) (kD1[i] * km + 0.008 * fs) + 16);
-            ap2[i].clearRecent ((int) (kAp2[i] * km) + 16); ap3[i].clearRecent ((int) (kAp3[i] * km) + 16); d2[i].clearRecent ((int) (kD2[i] * km + 0.008 * fs) + 16);
+            ap2[i].clearRecent ((int) (kAp2[i] * km + 0.002 * fs) + 16); ap3[i].clearRecent ((int) (kAp3[i] * km) + 16); d2[i].clearRecent ((int) (kD2[i] * km + 0.008 * fs) + 16);
             damp[i].reset(); band[i].reset(); fb[i] = 0;
         }
         for (int i = 0; i < 4; ++i) { difL[i].clearRecent ((int) (kDif[i] * 1.1 * km) + 16); difR[i].clearRecent ((int) (kDif[i] * 1.1 * km) + 16); }
@@ -524,9 +528,11 @@ struct TankAlgo {
             else band[i].curveOff();
             lfo[i].setRate (fs, (spinHz > 0.0 ? spinHz : c.modHz) * (0.8 + 0.13 * (double) i));
             lfo2[i].setRate (fs, 0.23 + 0.071 * (double) i);
+            lfo3[i].setRate (fs, 0.19 + 0.083 * (double) i);          // the first delay of each section: a wander of its own
+            lfo4[i].setRate (fs, 0.37 + 0.059 * (double) i);
         }
         { double rtLong = rtA; if (curveT) for (int b = 0; b < DecayEq::N; ++b) rtLong = std::max (rtLong, curveT[b] * c.rtMul);
-          wanderS = clampf ((rtLong - 1.5) / 8.0, 0.0, 1.0) * TankAlgo_wanderMs() * 0.001 * fs * std::sqrt (std::max (0.5, size)); }
+          wanderS = wanderShare (rtLong) * TankAlgo_wanderMs() * 0.001 * fs * std::sqrt (std::max (0.5, size)); }
         lateS = std::max (1.0, c.lateOnsetMs * size * fs * 0.001);
         if (c.denseER) {           // reflections every ~1.8 ms for 'build' ms: quick rise, gentle sag, short fade
             const double L = clampf (buildMs, 3.0, 230.0), att = std::min (12.0, L * 0.3), spacing = 1.8 * (0.8 + 0.2 * size);
@@ -607,10 +613,11 @@ struct TankAlgo {
             double x = fb[(i + S - 1) % S];
             if (i == 0) x += xL; else if (i == 2) x += xR;
             x = allpassM (ap1[i], lenA1[i] + md * (1.0 + lfo[i].next()) + 1.0, gT, x, cubicW);
-            double y = wanderS > 0.0 ? d1[i].readC (len1[i] + wanderS * (1.0 - lfo2[(i + 2) % S].next())) : d1[i].read (len1[i]); d1[i].push (x);
+            double y = wanderS > 0.0 ? d1[i].readC (len1[i] + wanderS * (1.0 + lfo3[i].next())) : d1[i].read (len1[i]); d1[i].push (x);
             if (dampOn && (i & 1) == 0) y = damp[i].lp (y);
             y = band[i].process (y);
-            y = allpass (ap2[i], lenA2[i], -gT * 0.85, y);
+            // the long inner allpass moves a little too (a tenth of the wander): its own resonances smear as well
+            y = wanderS > 0.0 ? allpassM (ap2[i], lenA2[i] + 0.1 * wanderS * (1.0 + lfo4[i].next()), -gT * 0.85, y, 1.0) : allpass (ap2[i], lenA2[i], -gT * 0.85, y);
             y = allpass (ap3[i], lenA3[i], gT * 0.7, y);
             o[i] = wanderS > 0.0 ? d2[i].readC (len2[i] + wanderS * (1.0 + lfo2[i].next())) : d2[i].read (len2[i]); d2[i].push (y);
         }

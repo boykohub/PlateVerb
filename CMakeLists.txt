@@ -16,7 +16,7 @@ juce_add_plugin(PlateVerb
   PRODUCT_NAME "Flexiverb")
 
 target_sources(PlateVerb PRIVATE Source/PluginProcessor.cpp)
-target_include_directories(PlateVerb PRIVATE Source ChannelStrip/Source)   # ANALOG uses the ChannelStrip preamp
+target_include_directories(PlateVerb PRIVATE Source ChannelStrip/Source N1081/Source)   # ANALOG uses the ChannelStrip preamp, the strip EQ the 1081 circuit
 target_compile_features(PlateVerb PRIVATE cxx_std_17)
 target_compile_definitions(PlateVerb PUBLIC
   JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0 JUCE_PLUGINHOST_VST3=1)
