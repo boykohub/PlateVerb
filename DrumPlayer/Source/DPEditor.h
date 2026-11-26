@@ -613,7 +613,7 @@ public:
             else if (c == &songLane) t = 0;
             else if (c == &strip || c == &grid || c == &headers || c == &vel || c == &ruler) t = 1;
             if (t != playTarget) { playTarget = t; showPlays(); }
-            if (c == &strip) MessageManager::callAsync ([sp = Component::SafePointer<DrumPlayerEditor> (this)] { if (sp) sp->setEditorOpen (true); });
+            if (c == &strip) { DrumPlayerEditor* self = this; Component::SafePointer<DrumPlayerEditor> sp (self); MessageManager::callAsync ([sp] { if (sp != nullptr) sp->setEditorOpen (true); }); }
         };
         for (Component* c : { (Component*) &chainStrip, (Component*) &songLane, (Component*) &strip, (Component*) &grid, (Component*) &headers, (Component*) &vel, (Component*) &ruler })
             c->addMouseListener (&targetWatch, true);
