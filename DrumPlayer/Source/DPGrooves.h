@@ -17,6 +17,7 @@ class GrooveLibrary
 public:
     std::vector<GrooveInfo> items;
     StringArray folders;
+    bool autoPlay = false;                  // a groove plays as soon as you click it
 
     static File indexFile() { return dataFolder().getChildFile ("GrooveInfo.xml"); }
     static File defaultFolder() { auto d = dataFolder().getChildFile ("Grooves"); d.createDirectory(); return d; }
@@ -25,6 +26,7 @@ public:
     {
         folders.clear(); stored.clear();
         if (auto x = XmlDocument::parse (indexFile())) {
+            autoPlay = x->getBoolAttribute ("autoplay", false);
             for (auto* f : x->getChildWithTagNameIterator ("Folder")) folders.addIfNotAlreadyThere (f->getStringAttribute ("path"));
             for (auto* e : x->getChildWithTagNameIterator ("Groove")) {
                 GrooveInfo g; g.file = File (e->getStringAttribute ("path"));
@@ -41,6 +43,7 @@ public:
     void save() const
     {
         XmlElement x ("DrumPlayerGrooves");
+        x.setAttribute ("autoplay", autoPlay);
         for (auto& f : folders) x.createNewChildElement ("Folder")->setAttribute ("path", f);
         for (auto& g : items) {
             auto* e = x.createNewChildElement ("Groove");
@@ -91,7 +94,7 @@ private:
     std::map<String, GrooveInfo> stored;
 };
 
-class GroovePage : public Page, private TableListBoxModel
+class GroovePage : public Page, private TableListBoxModel, public DragAndDropTarget
 {
 public:
     GroovePage (EditState& e) : Page ("GROOVES"), st (e)
@@ -118,17 +121,68 @@ public:
         h.setColour (TableHeaderComponent::outlineColourId, th::line);
         setupButton (*this, play, "Play"); play.getProperties().set ("lit", (int) 0xff6fe08f); play.onClick = [this] { preview(); };
         setupButton (*this, stop, "Stop"); stop.onClick = [this] { st.proc.uiStop(); };
+        setupButton (*this, autoBtn, "Auto-play", true, "A groove plays as soon as you click it");
+        autoBtn.onClick = [this] { lib.autoPlay = autoBtn.getToggleState(); lib.save(); };
+        setupButton (*this, saveKey, "Save key as groove...", false, "Save the key you're editing into your groove library (a MIDI file in Documents, kept when Drum Player is removed). You can also drag a key here");
+        saveKey.onClick = [this] { saveKeyAsGroove (st.song().editKey); };
         setupButton (*this, toKey, "Put on the edited key"); toKey.onClick = [this] { if (auto* g = selected()) if (onLoad) onLoad (g->file, st.song().editKey); };
         setupButton (*this, info, "Edit info..."); info.onClick = [this] { editInfo(); };
         setupButton (*this, addFolder, "Add folder..."); addFolder.onClick = [this] { chooseFolder(); };
         setupButton (*this, rescan, "Rescan"); rescan.onClick = [this] { lib.scan(); lib.save(); rebuild(); };
         setupButton (*this, openFolder, "Groove folder"); openFolder.onClick = [] { GrooveLibrary::defaultFolder().revealToUser(); };
-        setupLabel (*this, help, "Double-click to listen, drag a groove onto a key. Put your MIDI grooves in the Groove folder (subfolders become styles), or add EZdrummer's or any other folder.", 10.5f, th::faint);
+        setupLabel (*this, help, "Double-click to listen, drag a groove onto a key. Drag a key here (or Save key as groove) to keep it in your library. Every groove is a MIDI file in Documents/BD Plugins/Drum Player/Grooves, so it stays when Drum Player is removed.", 10.5f, th::faint);
         help.setJustificationType (Justification::topLeft);
         lib.load();
+        autoBtn.setToggleState (lib.autoPlay, dontSendNotification);
     }
     std::function<void (const File&, int key)> onLoad;
     void refresh() override { rebuild(); }
+
+    // drag a key onto the library to save it
+    bool isInterestedInDragSource (const SourceDetails& d) override { return d.description.toString().startsWith ("key:"); }
+    void itemDragEnter (const SourceDetails&) override { dropGlow = true; repaint(); }
+    void itemDragExit (const SourceDetails&) override { dropGlow = false; repaint(); }
+    void itemDropped (const SourceDetails& d) override { dropGlow = false; repaint(); saveKeyAsGroove (d.description.toString().fromFirstOccurrenceOf ("key:", false, false).getIntValue()); }
+    void paintOverChildren (Graphics& g) override
+    {
+        if (! dropGlow) return;
+        g.setColour (th::amber.withAlpha (0.8f)); g.drawRoundedRectangle (getLocalBounds().toFloat().reduced (3), 10, 2.0f);
+        g.setFont (font (13.0f, 2)); g.drawText ("Drop to save this key in your grooves", getLocalBounds().removeFromBottom (36), Justification::centred);
+    }
+
+    // a key's pattern becomes a MIDI file in the groove folder (style = subfolder), with its info in the library
+    void saveKeyAsGroove (int key)
+    {
+        if (key < 0 || key >= 128 || st.song().keys[(size_t) key].notes.empty()) { if (st.toast) st.toast ("That key is empty"); return; }
+        const auto& p = st.song().keys[(size_t) key];
+        static const char* types[] = { "Groove", "Fill", "Intro", "Ending" };
+        auto* aw = new AlertWindow ("Save as groove", "Key " + keyName (key) + " goes into your groove library", MessageBoxIconType::NoIcon);
+        aw->addTextEditor ("name", p.name.isNotEmpty() ? p.name : "Groove " + keyName (key), "Name");
+        StringArray styleList; for (int i = 1; i < styleNames.size(); ++i) if (styleNames[i] != "Unsorted") styleList.add (styleNames[i]);
+        aw->addTextEditor ("style", styleSel > 0 ? styleNames[styleSel] : String ("My grooves"), "Style (folder)");
+        aw->addComboBox ("type", { "Groove", "Fill", "Intro", "Ending" }, "Type");
+        if (auto* cb = aw->getComboBoxComponent ("type")) cb->setSelectedItemIndex (jlimit (0, 3, (int) p.type), dontSendNotification);
+        aw->addTextEditor ("inspired", "", "Sounds like / inspired by");
+        aw->addTextEditor ("programmer", "", "Programmed by");
+        aw->addButton ("Save", 1, KeyPress (KeyPress::returnKey)); aw->addButton ("Cancel", 0, KeyPress (KeyPress::escapeKey));
+        aw->enterModalState (true, ModalCallbackFunction::create ([this, aw, key] (int r) {
+            if (r != 1) return;
+            const auto& pat = st.song().keys[(size_t) key];
+            auto name = aw->getTextEditorContents ("name").trim(); if (name.isEmpty()) name = "Groove";
+            auto style = aw->getTextEditorContents ("style").trim(); if (style.isEmpty()) style = "My grooves";
+            auto dir = GrooveLibrary::defaultFolder().getChildFile (File::createLegalFileName (style)); dir.createDirectory();
+            auto f = dir.getChildFile (File::createLegalFileName (name) + ".mid");
+            for (int i = 2; f.existsAsFile() && i < 999; ++i) f = dir.getChildFile (File::createLegalFileName (name) + " " + String (i) + ".mid");
+            const double bpm = st.proc.lastBpm.load();
+            writeMidiFile ({ &pat }, f, st.song().settings.outChannel, bpm);
+            GrooveInfo gi; gi.file = f; gi.name = name; gi.style = style;
+            if (auto* cb = aw->getComboBoxComponent ("type")) gi.type = cb->getText(); else gi.type = types[0];
+            gi.inspired = aw->getTextEditorContents ("inspired"); gi.programmer = aw->getTextEditorContents ("programmer");
+            gi.bars = pat.bars; gi.beatsPerBar = pat.beatsPerBar; gi.bpm = bpm > 0 ? std::round (bpm * 10.0) / 10.0 : 0; gi.scanned = true;
+            lib.items.push_back (gi); lib.save(); lib.load(); rebuild();
+            if (st.toast) st.toast ("Saved " + name + " in " + style);
+        }), true);
+    }
     void resized() override
     {
         auto a = content();
@@ -140,7 +194,7 @@ public:
         styles.setBounds (a.removeFromLeft (150)); a.removeFromLeft (8);
         table.setBounds (a);
         auto b1 = bottom.withTrimmedTop (6).removeFromTop (26);
-        for (Component* c : { (Component*) &play, (Component*) &stop, (Component*) &toKey, (Component*) &info, (Component*) &addFolder, (Component*) &rescan, (Component*) &openFolder }) {
+        for (Component* c : { (Component*) &play, (Component*) &stop, (Component*) &autoBtn, (Component*) &saveKey, (Component*) &toKey, (Component*) &info, (Component*) &addFolder, (Component*) &rescan, (Component*) &openFolder }) {
             c->setBounds (b1.removeFromLeft (c->getWidth()).reduced (0, 2)); b1.removeFromLeft (5);
         }
         help.setBounds (bottom.withTrimmedTop (34));
@@ -153,9 +207,10 @@ private:
     StringArray styleNames; int styleSel = 0;
     TextEditor search; OwnedArray<TextButton> typeBtns;
     TableListBox table; ListBox styles;
-    TextButton play, stop, toKey, info, addFolder, rescan, openFolder;
+    TextButton play, stop, autoBtn, saveKey, toKey, info, addFolder, rescan, openFolder;
     Label help;
     std::unique_ptr<FileChooser> chooser;
+    bool dropGlow = false;
 
     struct StyleModel : public ListBoxModel
     {
@@ -237,6 +292,7 @@ private:
         table.updateContent(); table.repaint();
     }
     void cellDoubleClicked (int, int, const MouseEvent&) override { preview(); }
+    void selectedRowsChanged (int) override { if (lib.autoPlay) preview(); }
     void cellClicked (int row, int col, const MouseEvent& e) override
     {
         if (e.mods.isPopupMenu()) { table.selectRow (row); rowMenu(); return; }
@@ -324,6 +380,192 @@ private:
             if (st.toast) st.toast ("Added " + d.getFileName() + ": " + String ((int) lib.items.size()) + " grooves in the library");
         });
     }
+};
+
+
+// ---------------------------------------------------------------- groove sets: folders of grooves (Style / Tempo / Feel / Tune / Part / Variation),
+// shown as columns you click through. A folder with MIDI files (or part folders with MIDI files) is a set you can load onto the keys.
+class GrooveSetsPage : public Page
+{
+public:
+    explicit GrooveSetsPage (EditState& e) : Page ("GROOVE SETS"), st (e)
+    {
+        setupLabel (*this, lRoot, "Library");
+        setupCombo (*this, root, {}, 1, "The top folder of your sets. Add more with Add library...");
+        root.onChange = [this] { path.clear(); if (File::isAbsolutePath (root.getText())) path.add (File (root.getText())); rebuildColumns(); };
+        for (int i = 0; i < maxCols; ++i) {
+            auto* c = cols.add (new Column (*this, i));
+            addAndMakeVisible (c->list);
+        }
+        setupButton (*this, play, "Play"); play.getProperties().set ("lit", (int) 0xff6fe08f); play.onClick = [this] { preview(); };
+        setupButton (*this, stop, "Stop"); stop.onClick = [this] { st.proc.uiStop(); };
+        setupButton (*this, autoBtn, "Auto-play", true, "A groove plays as soon as you click it");
+        autoBtn.onClick = [this] { savePrefs(); };
+        setupButton (*this, loadSet, "Load this set onto the keys", false, "Every groove in the selected folder goes onto the keys from C-1 up: grooves on white keys, fills on black keys, each part folder as a key colour group. Ctrl+Z undoes it");
+        loadSet.onClick = [this] { if (onLoadSet) onLoadSet (selectedFolder()); };
+        setupButton (*this, toKey, "Put on the edited key"); toKey.onClick = [this] { if (selFile.existsAsFile() && onLoadFile) onLoadFile (selFile, st.song().editKey); };
+        setupButton (*this, saveSet, "Save keys as a set...", false, "Write every key into folders like these (Style / Tempo / Feel / Tune / Part)");
+        saveSet.onClick = [this] { if (onSaveSet) onSaveSet(); };
+        setupButton (*this, addRoot, "Add library..."); addRoot.onClick = [this] { chooseRoot(); };
+        setupButton (*this, showBtn, "Show folder"); showBtn.onClick = [this] { (selFile.existsAsFile() ? selFile : selectedFolder()).revealToUser(); };
+        setupLabel (*this, help, "A set is a folder: Style / Tempo / Feel / Tune / Part / Variation, the way Save keys as a set writes it, and the way other drum programs keep their MIDI. "
+                                 "Any folder of MIDI files works. Click through the columns, drag a groove onto a key, or load a whole set.", 10.5f, th::faint);
+        help.setJustificationType (Justification::topLeft);
+    }
+    std::function<void (const File&)> onLoadSet;
+    std::function<void (const File&, int)> onLoadFile;
+    std::function<void()> onSaveSet;
+    std::function<StringArray()> knownRoots;           // folders you exported sets to
+    std::function<void (const File&)> onPreview;
+
+    void refresh() override
+    {
+        StringArray roots;
+        auto prefs = prefsFile();
+        if (auto x = XmlDocument::parse (prefs)) for (auto* r : x->getChildWithTagNameIterator ("Root")) roots.addIfNotAlreadyThere (r->getStringAttribute ("path"));
+        if (knownRoots) for (auto& r : knownRoots()) roots.addIfNotAlreadyThere (r);
+        roots.addIfNotAlreadyThere (GrooveLibrary::defaultFolder().getFullPathName());
+        StringArray existing; for (auto& r : roots) if (File (r).isDirectory()) existing.add (r);
+        const auto keep = root.getText();
+        root.clear (dontSendNotification);
+        for (int i = 0; i < existing.size(); ++i) root.addItem (existing[i], i + 1);
+        root.setText (existing.contains (keep) ? keep : existing[0], dontSendNotification);
+        if (! File::isAbsolutePath (root.getText())) { path.clear(); rebuildColumns(); return; }
+        if (path.isEmpty() || path[0] != File (root.getText())) { path.clear(); path.add (File (root.getText())); }
+        if (auto x = XmlDocument::parse (prefs)) {
+            autoBtn.setToggleState (x->getBoolAttribute ("autoplay", false), dontSendNotification);
+            if (path.size() <= 1) { const File last (x->getStringAttribute ("last")); if (last.isDirectory()) { openPath (last); return; } }
+        }
+        rebuildColumns();
+    }
+    // open the columns down to this folder (it must be inside the library shown)
+    void openPath (const File& d)
+    {
+        const File r (File::isAbsolutePath (root.getText()) ? File (root.getText()) : File());
+        const auto rp = r.getFullPathName(), dp = d.getFullPathName();
+        if (rp.isEmpty() || ! (dp == rp || dp.startsWith (rp + File::getSeparatorString()))) { rebuildColumns(); return; }
+        Array<File> chain; for (File f = d; f != r && f.exists() && chain.size() < 64; f = f.getParentDirectory()) chain.insert (0, f);
+        path.clear(); path.add (r); path.addArray (chain); selFile = File();
+        rebuildColumns();
+    }
+    void resized() override
+    {
+        auto a = content();
+        auto top = a.removeFromTop (28);
+        lRoot.setBounds (top.removeFromLeft (56)); root.setBounds (top.removeFromLeft (jmin (520, top.getWidth())).reduced (0, 3));
+        a.removeFromTop (6);
+        auto bottom = a.removeFromBottom (64);
+        const int n = maxCols, w = (a.getWidth() - (n - 1) * 4) / n;
+        for (int i = 0; i < n; ++i) { cols[i]->list.setBounds (a.removeFromLeft (w)); a.removeFromLeft (4); }
+        auto b1 = bottom.withTrimmedTop (6).removeFromTop (26);
+        for (Component* c : { (Component*) &play, (Component*) &stop, (Component*) &autoBtn, (Component*) &loadSet, (Component*) &toKey, (Component*) &saveSet, (Component*) &addRoot, (Component*) &showBtn }) {
+            c->setBounds (b1.removeFromLeft (c->getWidth()).reduced (0, 2)); b1.removeFromLeft (5);
+        }
+        help.setBounds (bottom.withTrimmedTop (34));
+    }
+    File selectedFolder() const { return path.isEmpty() ? File() : path.getLast(); }
+
+private:
+    static constexpr int maxCols = 6;
+    EditState& st;
+    Label lRoot, help; ComboBox root;
+    TextButton play, stop, autoBtn, loadSet, toKey, saveSet, addRoot, showBtn;
+    Array<File> path;              // the folders clicked, from the library down
+    File selFile;                  // the groove clicked
+    std::unique_ptr<FileChooser> chooser;
+
+    static File prefsFile() { return dataFolder().getChildFile ("GrooveSets.xml"); }
+    void savePrefs (const String& addRootPath = {})
+    {
+        auto x = XmlDocument::parse (prefsFile()); if (x == nullptr) x = std::make_unique<XmlElement> ("GrooveSets");
+        if (addRootPath.isNotEmpty()) x->createNewChildElement ("Root")->setAttribute ("path", addRootPath);
+        x->setAttribute ("autoplay", autoBtn.getToggleState());
+        x->setAttribute ("last", path.isEmpty() ? String() : path.getLast().getFullPathName());
+        x->writeTo (prefsFile());
+    }
+
+    // one column: the folders and grooves in one folder
+    struct Column : public ListBoxModel
+    {
+        Column (GrooveSetsPage& o, int i) : owner (o), index (i)
+        {
+            list.setModel (this); list.setRowHeight (22);
+            list.setColour (ListBox::backgroundColourId, Colours::black.withAlpha (0.2f));
+            list.setColour (ListBox::outlineColourId, Colours::white.withAlpha (0.05f)); list.setOutlineThickness (1);
+        }
+        GrooveSetsPage& owner; int index; ListBox list; File dir; Array<File> items;
+        void fill (const File& d)
+        {
+            dir = d; items.clear();
+            if (d.isDirectory()) {
+                Array<File> dirs = d.findChildFiles (File::findDirectories, false), files = d.findChildFiles (File::findFiles, false, "*.mid;*.midi");
+                auto byName = [] (const File& a, const File& b) { return a.getFileName().compareNatural (b.getFileName()) < 0; };
+                std::sort (dirs.begin(), dirs.end(), byName); std::sort (files.begin(), files.end(), byName);
+                items.addArray (dirs); items.addArray (files);
+            }
+            list.updateContent(); list.deselectAllRows(); list.repaint();
+        }
+        int getNumRows() override { return items.size(); }
+        void paintListBoxItem (int r, Graphics& g, int w, int h, bool sel) override
+        {
+            if (r >= items.size()) return;
+            const auto& f = items[r];
+            const bool onPath = owner.path.contains (f) || f == owner.selFile;
+            if (sel || onPath) { g.setColour (th::blue.withAlpha (sel ? 0.28f : 0.16f)); g.fillRoundedRectangle (2, 1, w - 4.0f, h - 2.0f, 4); }
+            const bool isDir = f.isDirectory();
+            const auto low = f.getFileName().toLowerCase();
+            g.setColour (isDir ? th::text : (low.contains ("fill") ? th::amber : th::blue));
+            g.setFont (font (12.0f, isDir ? 2 : 1));
+            g.drawText (isDir ? f.getFileName() : f.getFileNameWithoutExtension(), 8, 0, w - 22, h, Justification::centredLeft, true);
+            if (isDir) { g.setColour (th::faint); g.drawText (">", w - 16, 0, 12, h, Justification::centred); }
+        }
+        void listBoxItemClicked (int r, const MouseEvent&) override { owner.clicked (index, r); }
+        void listBoxItemDoubleClicked (int r, const MouseEvent&) override
+        {
+            if (r < items.size() && items[r].existsAsFile() && owner.onLoadFile) owner.onLoadFile (items[r], owner.st.song().editKey);
+        }
+        var getDragSourceDescription (const SparseSet<int>& s) override
+        {
+            if (s.isEmpty() || s[0] >= items.size() || ! items[s[0]].existsAsFile()) return {};
+            return "groove:" + items[s[0]].getFullPathName();
+        }
+    };
+    OwnedArray<Column> cols;
+
+    void clicked (int col, int row)
+    {
+        auto* c = cols[col];
+        if (row >= c->items.size()) return;
+        const auto f = c->items[row];
+        // the path shown: the columns scroll when the folders go deeper than six
+        const int depthOfCol = firstShown() + col;                       // index in path of the folder this column shows
+        while (path.size() > depthOfCol + 1) path.removeLast();
+        if (f.isDirectory()) { path.add (f); selFile = File(); savePrefs(); }
+        else { selFile = f; if (autoBtn.getToggleState()) preview(); }
+        rebuildColumns();
+    }
+    int firstShown() const { return jmax (0, path.size() - maxCols); }
+    void rebuildColumns()
+    {
+        const int first = firstShown();
+        for (int i = 0; i < maxCols; ++i) {
+            const int pi = first + i;
+            if (pi < path.size()) cols[i]->fill (path[pi]); else cols[i]->fill (File());
+        }
+        loadSet.setEnabled (path.size() > 1);
+        repaint();
+    }
+    void preview() { if (selFile.existsAsFile() && onPreview) onPreview (selFile); }
+    void chooseRoot()
+    {
+        chooser = std::make_unique<FileChooser> ("Add a library of groove sets", File::getSpecialLocation (File::userDocumentsDirectory));
+        chooser->launchAsync (FileBrowserComponent::openMode | FileBrowserComponent::canSelectDirectories, [this] (const FileChooser& fc) {
+            auto d = fc.getResult(); if (! d.isDirectory()) return;
+            savePrefs (d.getFullPathName()); refresh(); root.setText (d.getFullPathName(), sendNotification);
+        });
+    }
+public:
+    void autoChanged() { savePrefs(); }
 };
 
 } // namespace dp

@@ -82,9 +82,17 @@ struct Note
 enum class PatternType { Groove = 0, Fill, Intro, Ending };
 inline const char* typeName (PatternType t) { static const char* n[] = { "Groove", "Fill", "Intro", "Ending" }; return n[(int) t]; }
 
+inline uint32 newPatternUid() { static std::atomic<uint32> c { (uint32) Random::getSystemRandom().nextInt() }; return ++c; }
+
 struct Pattern
 {
     String name;
+    uint32 uid = newPatternUid();        // stays the same through every edit, move and swap (so an edit can be told from a new pattern)
+    // the version you started from is never lost: the first edit keeps it here, and you can switch back and forth
+    std::shared_ptr<const Pattern> original;     // the pattern as it came onto the key
+    std::shared_ptr<const Pattern> edited;       // your edited version, kept while the key plays the original
+    bool showingOriginal = false;
+    bool hasOriginal() const { return original != nullptr; }
     PatternType type = PatternType::Groove;
     int group = -1;                      // your own group (Intro, Verse...), shown as the key's colour
     int bars = 1, beatsPerBar = 4;
@@ -170,7 +178,8 @@ struct Settings
     bool stopWithHost = true;
     bool passThrough = true;
     bool fillsToBlack = false;                     // multi-file import: names containing "fill" go to black keys
-    bool rememberLast = true;
+    bool rememberLast = false;                     // off: a new Drum Player never picks up edits you didn't save
+    bool loopSelected = true;                      // clicking a chunk in the song lane loops it
     int stopNote = 24, stopNote2 = 108;            // two STOP keys (C0 and C7), any key or -1 for none
     bool loopJumpAtOnce = true;                    // editor loops: jump at once, or when the current loop is over
     bool followHost = true;                        // tempo: follow Studio One; off = your own tempo while Studio One is stopped
@@ -227,6 +236,7 @@ struct Song
     std::vector<Clip> clips;                       // the song lane
     std::vector<Group> groups = defaultGroups();
     bool songMode = false;                         // the song lane plays (with Studio One's transport, or its own Play)
+    bool loopOn = false; double loopStart = 0, loopEnd = 4;   // the song lane's loop (its own playback; Studio One loops with its own)
     std::vector<Lane> lanes;
     std::vector<Chain> chains { Chain { "Chain 1", {}, -1, true } };      // as many as you like
     std::array<Pattern, 8> park;
@@ -703,6 +713,42 @@ inline void writeSongMidi (const Song& s, const File& f, int channel, bool selec
 }
 
 // ------------------------------------------------------------------ XML state
+// ------------------------------------------------------------------ original and edited versions of a key's pattern
+inline bool sameMusic (const Pattern& a, const Pattern& b)
+{
+    if (a.bars != b.bars || a.beatsPerBar != b.beatsPerBar || a.notes.size() != b.notes.size() || a.laneLength != b.laneLength || a.laneMute != b.laneMute) return false;
+    for (size_t i = 0; i < a.notes.size(); ++i) {
+        const auto& x = a.notes[i]; const auto& y = b.notes[i];
+        if (x.tick != y.tick || x.length != y.length || x.note != y.note || x.velocity != y.velocity || x.probability != y.probability) return false;
+    }
+    return true;
+}
+inline Pattern versionOnly (const Pattern& p) { Pattern c = p; c.original.reset(); c.edited.reset(); c.showingOriginal = false; for (auto& n : c.notes) n.selected = false; return c; }
+// after any change: a key whose pattern was edited keeps the version it started from
+inline void keepOriginals (const Song& before, Song& after)
+{
+    for (size_t k = 0; k < 128; ++k) {
+        const auto& b = before.keys[k]; auto& a = after.keys[k];
+        if (b.notes.empty() || a.uid != b.uid || sameMusic (a, b)) continue;     // a new pattern or a move is not an edit
+        if (a.showingOriginal != b.showingOriginal) continue;                       // switching between original and edit
+        if (a.original == nullptr) a.original = std::make_shared<const Pattern> (versionOnly (b));
+        if (a.showingOriginal) { a.showingOriginal = false; a.edited.reset(); }  // editing the original makes a new edit; the original stays
+    }
+}
+// switch a key between the original and your edit (neither is ever lost)
+inline void playOriginal (Pattern& p, bool orig)
+{
+    if (orig == p.showingOriginal) return;
+    if (orig && p.original != nullptr) {
+        auto mine = std::make_shared<const Pattern> (versionOnly (p));
+        auto o = p.original; const auto uid = p.uid; const int grp = p.group; const bool fav = p.fav;
+        p = versionOnly (*o); p.original = o; p.edited = mine; p.showingOriginal = true; p.uid = uid; p.group = grp; p.fav = fav;
+    } else if (! orig && p.edited != nullptr) {
+        auto e = p.edited; auto o = p.original; const auto uid = p.uid; const int grp = p.group; const bool fav = p.fav;
+        p = versionOnly (*e); p.original = o; p.showingOriginal = false; p.uid = uid; p.group = grp; p.fav = fav;
+    }
+}
+
 inline std::unique_ptr<XmlElement> patternToXml (const Pattern& p, const String& tag = "P")
 {
     auto x = std::make_unique<XmlElement> (tag);
@@ -723,6 +769,10 @@ inline std::unique_ptr<XmlElement> patternToXml (const Pattern& p, const String&
         x->createNewChildElement ("Layer")->setAttribute ("notes", t);
     }
     if (! p.comp.empty()) { String c; for (auto& seg : p.comp) c << seg.from << ':' << seg.to << ':' << seg.layer << ';'; x->setAttribute ("comp", c); }
+    x->setAttribute ("uid", (int) p.uid);
+    if (p.showingOriginal) x->setAttribute ("showOrig", true);
+    if (p.original != nullptr) x->addChildElement (patternToXml (*p.original, "Original").release());
+    if (p.edited != nullptr) x->addChildElement (patternToXml (*p.edited, "Edited").release());
     return x;
 }
 inline Pattern patternFromXml (const XmlElement& x)
@@ -748,6 +798,10 @@ inline Pattern patternFromXml (const XmlElement& x)
     }
     for (auto& tok : StringArray::fromTokens (x.getStringAttribute ("lanemute"), ";", "")) if (tok.isNotEmpty()) p.laneMute.insert (tok.getIntValue());
     p.fav = x.getBoolAttribute ("fav", false); p.source = x.getStringAttribute ("src");
+    if (x.hasAttribute ("uid")) p.uid = (uint32) x.getIntAttribute ("uid");
+    p.showingOriginal = x.getBoolAttribute ("showOrig", false);
+    if (auto* o = x.getChildByName ("Original")) p.original = std::make_shared<const Pattern> (patternFromXml (*o));
+    if (auto* o = x.getChildByName ("Edited")) p.edited = std::make_shared<const Pattern> (patternFromXml (*o));
     for (auto* l : x.getChildWithTagNameIterator ("Layer")) {
         std::vector<Note> v;
         for (auto& tok : StringArray::fromTokens (l->getStringAttribute ("notes"), ";", "")) {
@@ -795,7 +849,7 @@ inline std::unique_ptr<XmlElement> songToXml (const Song& s)
         ex->setAttribute ("folder", e.folder); ex->setAttribute ("style", e.style); ex->setAttribute ("tempotype", e.tempoType);
         ex->setAttribute ("feel", e.feel); ex->setAttribute ("tune", e.tune); ex->setAttribute ("addbpm", e.addBpm); ex->setAttribute ("naming", e.naming); }
     auto* sg = x->createNewChildElement ("SongLane");
-    sg->setAttribute ("on", s.songMode);
+    sg->setAttribute ("on", s.songMode); sg->setAttribute ("loopOn", s.loopOn); sg->setAttribute ("loopA", s.loopStart); sg->setAttribute ("loopB", s.loopEnd);
     for (auto& c : s.clips) {
         auto* e = sg->createNewChildElement ("Clip");
         e->setAttribute ("start", c.start); e->setAttribute ("len", c.length); e->setAttribute ("off", c.offset);
@@ -805,7 +859,7 @@ inline std::unique_ptr<XmlElement> songToXml (const Song& s)
     const auto& o = s.settings;
     st->setAttribute ("out", o.outChannel); st->setAttribute ("zlo", o.zoneLow); st->setAttribute ("zhi", o.zoneHigh);
     st->setAttribute ("sq", (int) o.startQuant); st->setAttribute ("latch", o.latch); st->setAttribute ("hoststop", o.stopWithHost);
-    st->setAttribute ("thru", o.passThrough); st->setAttribute ("fillsblack", o.fillsToBlack); st->setAttribute ("remember", o.rememberLast);
+    st->setAttribute ("thru", o.passThrough); st->setAttribute ("fillsblack", o.fillsToBlack); st->setAttribute ("remember2", o.rememberLast); st->setAttribute ("loopsel", o.loopSelected);
     st->setAttribute ("stopA", o.stopNote); st->setAttribute ("stopB", o.stopNote2);
     st->setAttribute ("loopjump", o.loopJumpAtOnce); st->setAttribute ("follow", o.followHost); st->setAttribute ("bpm", o.ownBpm); st->setAttribute ("recq", o.recQuantize); st->setAttribute ("split", o.splitBars);
     st->setAttribute ("trigch", o.triggerChannel); st->setAttribute ("playch", o.playChannel); st->setAttribute ("mirror", o.mirrorOctaves);
@@ -878,6 +932,7 @@ inline Song songFromXml (const XmlElement& x)
     }
     if (auto* sg = x.getChildByName ("SongLane")) {
         s.songMode = sg->getBoolAttribute ("on", false);
+        s.loopOn = sg->getBoolAttribute ("loopOn", false); s.loopStart = jmax (0.0, sg->getDoubleAttribute ("loopA", 0)); s.loopEnd = jmax (s.loopStart + 0.25, sg->getDoubleAttribute ("loopB", 4));
         for (auto* e : sg->getChildIterator()) {
             Clip c; c.start = jmax (0.0, e->getDoubleAttribute ("start")); c.length = jmax (0.25, e->getDoubleAttribute ("len", 4));
             c.offset = jmax (0.0, e->getDoubleAttribute ("off")); c.key = jlimit (0, 127, e->getIntAttribute ("key", 12)); c.muted = e->getBoolAttribute ("muted");
@@ -894,7 +949,7 @@ inline Song songFromXml (const XmlElement& x)
         o.startQuant = (StartQuant) jlimit (0, 4, st->getIntAttribute ("sq", 4));
         o.latch = st->getBoolAttribute ("latch", true); o.stopWithHost = st->getBoolAttribute ("hoststop", true);
         o.passThrough = st->getBoolAttribute ("thru", true); o.fillsToBlack = st->getBoolAttribute ("fillsblack", false);
-        o.rememberLast = st->getBoolAttribute ("remember", true); 
+        o.rememberLast = st->getBoolAttribute ("remember2", false); o.loopSelected = st->getBoolAttribute ("loopsel", true); 
         o.loopJumpAtOnce = st->getBoolAttribute ("loopjump", true); o.followHost = st->getBoolAttribute ("follow", true); o.ownBpm = jlimit (20.0, 400.0, st->getDoubleAttribute ("bpm", 120.0));
         if (st->hasAttribute ("stopA")) { o.stopNote = jlimit (-1, 127, st->getIntAttribute ("stopA", 24)); o.stopNote2 = jlimit (-1, 127, st->getIntAttribute ("stopB", 108)); }
         else { o.stopNote = 24; o.stopNote2 = 108; movePatternsOffStops = true; }      // the STOP keys moved to C0 and C7

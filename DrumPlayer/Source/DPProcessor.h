@@ -130,7 +130,7 @@ public:
         auto* ui = x->createNewChildElement ("UI");
         String pn; { const ScopedLock l (uiLock); pn = presetName; }
         ui->setAttribute ("scale", uiScale); ui->setAttribute ("preset", pn); ui->setAttribute ("grid", uiGrid);
-        ui->setAttribute ("zoomX", uiZoomX); ui->setAttribute ("strip", uiStripTools); ui->setAttribute ("headW", uiHeadW);
+        ui->setAttribute ("zoomX", uiZoomX); ui->setAttribute ("strip", uiStripTools); ui->setAttribute ("shelf", uiShelfTools); ui->setAttribute ("headW", uiHeadW); ui->setAttribute ("editOpen", uiEditOpen);
         ui->setAttribute ("stopkey", uiStopKey); ui->setAttribute ("project", uiProjectPath);
         return x;
     }
@@ -141,7 +141,7 @@ public:
             { const ScopedLock l (uiLock); presetName = ui->getStringAttribute ("preset"); }
             uiGrid = jlimit (0, numNoteValues - 1, ui->getIntAttribute ("grid", 3));
             uiZoomX = (float) jlimit (0.25, 8.0, ui->getDoubleAttribute ("zoomX", 1.0));
-            uiStripTools = ui->getStringAttribute ("strip", uiStripTools); uiHeadW = jlimit (70, 360, ui->getIntAttribute ("headW", 200));
+            uiStripTools = ui->getStringAttribute ("strip", uiStripTools); uiShelfTools = ui->getStringAttribute ("shelf", uiShelfTools); uiHeadW = jlimit (70, 360, ui->getIntAttribute ("headW", 200)); uiEditOpen = ui->getBoolAttribute ("editOpen", true);
             uiStopKey = ui->getIntAttribute ("stopkey", KeyPress::spaceKey);
             uiProjectPath = ui->getStringAttribute ("project");
         }
@@ -179,12 +179,13 @@ public:
     Song edit;                         // the editor's working copy
     UndoManager undo { 1000, 100 };
     String presetName; CriticalSection uiLock;
-    float uiScale = 1.0f, uiZoomX = 1.0f; int uiGrid = 3, uiHeadW = 200;
+    float uiScale = 1.0f, uiZoomX = 1.0f; int uiGrid = 3, uiHeadW = 200; bool uiEditOpen = true;
     std::atomic<int> loopReqKey { -1 }, loopReqFrom { 0 }, loopReqTo { 0 };   // editor loops (set by the editor)
     String uiProjectPath;                        // the project file Save writes to (Save As picks a new one)
     int uiStopKey = KeyPress::spaceKey;          // the computer key that stops (0 = none)
     bool uiLearnStopKey = false;                 // the next key you press becomes the stop key
-    String uiStripTools = "fit,grid,tools,play,stop,rec,quantize,undo,redo";   // the Option-key strip: what you put on it
+    String uiStripTools = "fit,grid,tools,play,stop,rec,quantize";
+    String uiShelfTools = "humanize,functions";          // the buttons you put next to the pattern's length   // the Option-key strip: what you put on it
     std::atomic<int> stateVersion { 0 };
 
     void publish()
@@ -209,17 +210,22 @@ public:
     // replace the whole song as one undo step
     void commit (Song s, const String& name)
     {
+        keepOriginals (edit, s);
         undo.beginNewTransaction (name);
         undo.perform (new SongAction (*this, edit, std::move (s)));
+        ++editSerial;
     }
+    std::atomic<int> editSerial { 0 };          // goes up with every change you make (for "save changes?")
     // live edits (dragging): remember the start, edit `edit` freely with publish(), then endEdit()
     void beginEdit() { editStart = std::make_unique<Song> (edit); }
     void endEdit (const String& name)
     {
         if (editStart == nullptr) return;
         auto before = std::move (*editStart); editStart.reset();
+        keepOriginals (before, edit);
         undo.beginNewTransaction (name);
         undo.perform (new SongAction (*this, std::move (before), edit));
+        ++editSerial;
     }
     void setEditFromUndo (const Song& s) { edit = s; publish(); stateVersion++; }
 
@@ -711,7 +717,9 @@ private:
             const int nn = m.getNoteNumber();
             for (int c = 0; c < (int) S->chains.size(); ++c)
                 if (S->chains[(size_t) c].triggerNote == nn) { if (m.isNoteOn()) { lastTrigger = 5; lastInNote = nn; lastInKey = -1; lastInSerial++; startChain (c, ppq); } return; }
-            const int key = st.keyForNote (nn, m.getChannel());
+            int key = st.keyForNote (nn, m.getChannel());
+            // Pattern mode: an empty key plays its drum, so you can play hits along with the grooves
+            if (key >= 0 && ! keyHasPattern (key) && key != cur.key && ! (queued.active && key == queued.key)) key = -1;
             if (m.isNoteOn()) { lastInNote = nn; lastInKey = key; lastInSerial++; }
             if (st.isStop (nn) && st.keyMode != 1 && (st.triggerChannel == 0 || m.getChannel() == st.triggerChannel)) {
                 if (m.isNoteOn()) { stopNow (out, sample); chain = -1; lastTrigger = 4; }
@@ -825,7 +833,15 @@ private:
 
     void renderTo (double a, double b)
     {
-        if (songOn() && cur.key < 0 && ! queued.active) { flushOffs (out, a, false); renderSong (a, b); return; }   // a pressed key takes over from the song
+        if (songOn() && cur.key < 0 && ! queued.active) {              // a pressed key takes over from the song
+            flushOffs (out, a, false);
+            // the lane's own loop, when it plays by itself (with Studio One playing, Studio One's loop rules)
+            if (! wasPlaying && S->loopOn && S->loopEnd > S->loopStart + 0.01) {
+                const double le = songOrigin + S->loopEnd;
+                if (a < le && b > le) { renderSong (a, le); flushOffs (out, le, true); songOrigin += S->loopEnd - S->loopStart; renderSong (le, b); return; }
+            }
+            renderSong (a, b); return;
+        }
         while (true) {
             flushOffs (out, a, false);
             if (queued.active && queued.ppq < b) {

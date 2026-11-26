@@ -55,6 +55,70 @@ private:
     int start = 0;
 };
 
+// a button that also answers a right-click (Rec: right-click for the recording options)
+struct RightClickButton : public TextButton
+{
+    std::function<void()> onRight;
+    void mouseDown (const MouseEvent& e) override { if (e.mods.isPopupMenu()) { if (onRight) onRight(); return; } TextButton::mouseDown (e); }
+    void mouseUp (const MouseEvent& e) override { if (e.mods.isPopupMenu()) return; TextButton::mouseUp (e); }
+};
+
+// the settings button: a cog wheel
+struct GearButton : public TextButton
+{
+    void paintButton (Graphics& g, bool over, bool down) override
+    {
+        getLookAndFeel().drawButtonBackground (g, *this, {}, over, down);
+        const auto c = getLocalBounds().toFloat().getCentre();
+        const float R = jmin (getWidth(), getHeight()) * 0.36f, r = R * 0.72f;
+        Path p; const int teeth = 8;
+        for (int i = 0; i < teeth * 2; ++i) {
+            const float a0 = MathConstants<float>::twoPi * (float) i / (teeth * 2) - 0.2f, a1 = a0 + MathConstants<float>::twoPi / (teeth * 2);
+            const float rad = (i % 2 == 0) ? R : r;
+            const float x0 = c.x + rad * std::sin (a0), y0 = c.y - rad * std::cos (a0), x1 = c.x + rad * std::sin (a1), y1 = c.y - rad * std::cos (a1);
+            if (i == 0) p.startNewSubPath (x0, y0); else p.lineTo (x0, y0);
+            p.lineTo (x1, y1);
+        }
+        p.closeSubPath();
+        p.addEllipse (c.x - R * 0.34f, c.y - R * 0.34f, R * 0.68f, R * 0.68f); p.setUsingNonZeroWinding (false);
+        g.setColour (getToggleState() ? th::ink : th::text); g.fillPath (p);
+    }
+};
+
+// the window size: type a number, or right-click for quick sizes
+struct ZoomBox : public Label
+{
+    std::function<void()> onRight;
+    ZoomBox() { setEditable (true, true, false); setJustificationType (Justification::centred); }
+    void mouseDown (const MouseEvent& e) override { if (e.mods.isPopupMenu()) { if (onRight) onRight(); return; } Label::mouseDown (e); }
+    void mouseUp (const MouseEvent& e) override { if (e.mods.isPopupMenu()) return; Label::mouseUp (e); }
+    void paint (Graphics& g) override
+    {
+        auto r = getLocalBounds().toFloat().reduced (0.5f);
+        g.setColour (Colours::black.withAlpha (0.28f)); g.fillRoundedRectangle (r, 5);
+        g.setColour (Colours::white.withAlpha (0.08f)); g.drawRoundedRectangle (r, 5, 0.8f);
+        if (! isBeingEdited()) { g.setFont (dp::font (12.0f, 2)); g.setColour (th::text); g.drawText (getText(), getLocalBounds(), Justification::centred); }
+    }
+};
+
+// the tempo: drag up or down to change it, double-click to type, right-click for Studio One's tempo
+struct TempoLabel : public Label
+{
+    std::function<double()> get; std::function<void (double)> set; std::function<void()> onRight;
+    TempoLabel() { setMouseCursor (MouseCursor::UpDownResizeCursor); }
+    void mouseDown (const MouseEvent& e) override { if (e.mods.isPopupMenu()) { if (onRight) onRight(); return; } start = get ? get() : 120.0; dragged = false; Label::mouseDown (e); }
+    void mouseDrag (const MouseEvent& e) override
+    {
+        const int dy = -e.getDistanceFromDragStartY();
+        if (std::abs (dy) < 2 && ! dragged) return;
+        dragged = true;
+        const double step = e.mods.isShiftDown() ? 0.1 : 0.5;                 // half a BPM per pixel, Shift for fine
+        if (set) set (std::round ((start + dy * step) * 10.0) / 10.0);
+    }
+    void mouseUp (const MouseEvent& e) override { if (e.mods.isPopupMenu()) return; if (! dragged) Label::mouseUp (e); }
+    double start = 120.0; bool dragged = false;
+};
+
 // the Option-key strip: a long bar of the tools you pick (right-click it to choose)
 class ToolStrip : public Component
 {
@@ -62,6 +126,8 @@ public:
     struct Feature { String id, label, tip; std::function<void (Component*)> run; };
     std::vector<Feature> all; StringArray on;
     std::function<void()> onChanged;
+    String hint = "Right-click here to choose the tools for this strip (Option / Alt shows and hides it)";
+    bool compact = false;                         // no hint text (the tool shelf in the toolbar)
     void rebuild()
     {
         btns.clear();
@@ -73,6 +139,7 @@ public:
                     auto run = f.run; auto* bp = b;
                     b->onClick = [run, bp] { if (run) run (bp); };
                     b->onRight = [this] { chooseMenu(); };
+                    b->onMoved = [this, id = f.id] (int x) { moveTool (id, x); };
                 }
         resized(); repaint();
     }
@@ -83,12 +150,24 @@ public:
     }
     void paint (Graphics& g) override
     {
-        if (btns.isEmpty()) {
-            g.setFont (font (12.0f, 1)); g.setColour (th::faint);
-            g.drawText ("Right-click here to choose the tools for this strip (Option / Alt shows and hides it)", getLocalBounds().reduced (10, 0), Justification::centredLeft);
+        if (btns.isEmpty() || compact) {
+            g.setFont (font (11.0f, 1)); g.setColour (th::faint.withAlpha (btns.isEmpty() ? 1.0f : 0.6f));
+            auto r = getLocalBounds().reduced (10, 0);
+            if (! btns.isEmpty()) r.setLeft (btns.getLast()->getRight() + 12);
+            g.drawText (hint, r, Justification::centredLeft, true);
         }
     }
     void mouseDown (const MouseEvent& e) override { if (e.mods.isPopupMenu()) chooseMenu(); }
+    void mouseDoubleClick (const MouseEvent&) override { chooseMenu(); }
+    // Alt+Shift drag: put a tool somewhere else on the strip
+    void moveTool (const String& id, int x)
+    {
+        int idx = 0; for (auto* b : btns) if (b->getBounds().getCentreX() < x) ++idx;
+        StringArray next; for (auto& t : on) if (t != id) next.add (t);
+        int pos = 0, seen = 0; for (; pos < next.size(); ++pos) { if (seen >= idx) break; ++seen; }
+        next.insert (jmin (pos, next.size()), id);
+        on = next; rebuild(); if (onChanged) onChanged();
+    }
     void chooseMenu()
     {
         PopupMenu m; m.addSectionHeader ("Tools on the strip");
@@ -112,9 +191,25 @@ public:
 private:
     struct StripButton : public TextButton
     {
-        std::function<void()> onRight;
-        void mouseDown (const MouseEvent& e) override { if (e.mods.isPopupMenu()) { if (onRight) onRight(); return; } TextButton::mouseDown (e); }
-        void mouseUp (const MouseEvent& e) override { if (e.mods.isPopupMenu()) return; TextButton::mouseUp (e); }
+        std::function<void()> onRight; std::function<void (int)> onMoved; bool moving = false;
+        void mouseDown (const MouseEvent& e) override
+        {
+            if (e.mods.isPopupMenu()) { if (onRight) onRight(); return; }
+            if (e.mods.isAltDown() && e.mods.isShiftDown()) { moving = true; setMouseCursor (MouseCursor::DraggingHandCursor); toFront (false); return; }
+            TextButton::mouseDown (e);
+        }
+        void mouseDrag (const MouseEvent& e) override
+        {
+            if (moving) { setTopLeftPosition (getX() + e.getDistanceFromDragStartX() - (getX() - startX), getY()); return; }
+            TextButton::mouseDrag (e);
+        }
+        void mouseUp (const MouseEvent& e) override
+        {
+            if (moving) { moving = false; setMouseCursor (MouseCursor::NormalCursor); if (onMoved) onMoved (getBounds().getCentreX()); return; }
+            if (e.mods.isPopupMenu()) return; TextButton::mouseUp (e);
+        }
+        void moved() override { if (! moving) startX = getX(); }
+        int startX = 0;
     };
     OwnedArray<StripButton> btns;
 };
@@ -301,6 +396,12 @@ private:
                 } else f = dir.getChildFile ("Variation " + String (num++).paddedLeft ('0', 2) + ".mid");
                 writeMidiFile ({ &p }, f, s.settings.outChannel, bpm);
                 writtenNow.push_back (f); ++written;
+                // the other version goes next to it, so the original is never lost
+                const Pattern* other = p.showingOriginal ? p.edited.get() : p.original.get();
+                if (other != nullptr) {
+                    auto f2 = f.getSiblingFile (f.getFileNameWithoutExtension() + (p.showingOriginal ? " (edited)" : " (original)") + ".mid");
+                    writeMidiFile ({ other }, f2, s.settings.outChannel, bpm); writtenNow.push_back (f2);
+                }
             }
         }
         writtenNow.clear();
@@ -371,7 +472,7 @@ public:
     explicit DrumPlayerEditor (DrumPlayerProcessor& p)
         : AudioProcessorEditor (p), proc (p), st (p),
           strip (st, false), bigStrip (st, true), tray (st), bigTray (st), chainStrip (st), ruler (st), headers (st), grid (st), vel (st), songLane (st), songHeader (st, songLane),
-          quantPage (st), humPage (st), chainPage (st), setPage (st), presetPage (st), mapPage (st), recPage (st), groovePage (st), mixerPage (st), exportPage (st)
+          quantPage (st), humPage (st), chainPage (st), setPage (st), presetPage (st), mapPage (st), recPage (st), groovePage (st), mixerPage (st), exportPage (st), setsPage (st)
     {
         setLookAndFeel (&lnf);
         LookAndFeel::setDefaultLookAndFeel (&lnf);
@@ -394,10 +495,9 @@ public:
         setupButton (body, prevPreset, "<", false, "Previous preset");
         setupButton (body, nextPreset, ">", false, "Next preset");
         setupButton (body, presetName, "Presets", true, "Preset browser");
-        setupButton (body, saveBtn, "Save", false, "Save the current preset (or name a new one in the browser)");
         setupButton (body, exchangeBtn, "Exchange", true, "Big keyboard for moving patterns between keys");
-        setupButton (body, keysBtn, "Pattern mode", true, "Your keyboard plays patterns: one per key from C-1 up. The stop key sits below C-1");
-        setupButton (body, playModeBtn, "Play mode", true, "Your keyboard plays the drums, for playing live and recording");
+        setupButton (body, keysBtn, "Pattern mode", true, "Keys play and arrange patterns: one per key from C-1 up (the stop key sits below C-1). Empty keys play their drum, so you can add hits live");
+        setupButton (body, playModeBtn, "Drum kit mode", true, "Every key plays one drum: for finger drumming, playing live and recording");
         keysBtn.setRadioGroupId (61); playModeBtn.setRadioGroupId (61);
         keysBtn.onClick = [this] { setKeyMode (0); };
         playModeBtn.onClick = [this] { setKeyMode (1); };
@@ -408,20 +508,22 @@ public:
         setupButton (body, mixerBtn, "Mixer", true, "Pan and meters per drum (View > Mixer)");
         mixerBtn.onClick = [this] { togglePage (mixerPage, mixerBtn); };
         groovesBtn.onClick = [this] { togglePage (groovePage, groovesBtn); };
-        setupButton (body, mapBtn, "Drum Map", true, "Which drum plugin you're playing, and where dropped MIDI comes from");
-        mapBtn.onClick = [this] { togglePage (mapPage, mapBtn); };
-        setupButton (body, settingsBtn, "Settings", true);
-        setupButton (body, zoomOut, "-", false, "Smaller"); setupButton (body, zoomPct, "100%", false, "Window size"); setupButton (body, zoomIn, "+", false, "Bigger");
+        setupButton (body, setsBtn, "Groove sets", true, "Your groove sets: folders of grooves (Style / Tempo / Feel / Tune / Part), to load onto the keys or save your keys as");
+        setsBtn.onClick = [this] { togglePage (setsPage, setsBtn); };
+        setupButton (body, settingsBtn, "Settings", true, "Settings: general, drum map, inner workings and look");
+        settingsBtn.setButtonText ({}); settingsBtn.setSize (btnH + 8, btnH);
+        body.addAndMakeVisible (zoomPct); zoomPct.setComponentID ("Window size"); zoomPct.setFont (font (12.0f, 2));
+        zoomPct.setTooltip ("Window size: click and type a number (like 120), or right-click for quick sizes. You can also drag the window's corner");
+        zoomPct.onTextChange = [this] { const int v = zoomPct.getText().retainCharacters ("0123456789").getIntValue(); if (v >= 50) setScale (v / 100.0f); else refreshControls(); };
         prevPreset.onClick = [this] { presetPage.step (-1); refreshAll(); };
         nextPreset.onClick = [this] { presetPage.step (1); refreshAll(); };
-        saveBtn.onClick = [this] { quickSave(); };
         presetName.onClick = [this] { togglePage (presetPage, presetName); };
         exchangeBtn.onClick = [this] { toggleExchange(); };
         chainsBtn.onClick = [this] { togglePage (chainPage, chainsBtn); };
         settingsBtn.onClick = [this] { togglePage (setPage, settingsBtn); };
         zoomOut.onClick = [this] { setScale (scale - 0.1f); };
         zoomIn.onClick = [this] { setScale (scale + 0.1f); };
-        zoomPct.onClick = [this] { zoomMenu(); };
+        zoomPct.onRight = [this] { zoomMenu(); };
 
         // ---------------- keyboard strip
         body.addAndMakeVisible (strip); body.addAndMakeVisible (tray); body.addAndMakeVisible (chainStrip);
@@ -456,9 +558,6 @@ public:
             b->onClick = [this, i] { st.tool = (Tool) i; st.stamping = false; grid.repaint(); };
         }
         toolBtns[0]->setToggleState (true, dontSendNotification);
-        setupButton (body, undoBtn, "Undo", false, "Ctrl+Z"); setupButton (body, redoBtn, "Redo", false, "Ctrl+Shift+Z");
-        undoBtn.onClick = [this] { proc.undo.undo(); refreshAll(); };
-        redoBtn.onClick = [this] { proc.undo.redo(); refreshAll(); };
 
         // ---------------- feel toolbar
         setupLabel (body, lSwing, "Swing");
@@ -480,31 +579,50 @@ public:
         setupButton (body, quantBtn, "Quantize", true); quantBtn.onClick = [this] { togglePage (quantPage, quantBtn); };
         setupButton (body, humBtn, "Humanize & Feel", true); humBtn.onClick = [this] { togglePage (humPage, humBtn); };
         setupButton (body, funcBtn, "Functions", false, "Every editing function"); funcBtn.onClick = [this] { functionsMenu(); };
-        setupLabel (body, lVel, "Vel");
-        StringArray vels; for (int v : { 127, 120, 110, 100, 90, 80, 70, 60, 50, 40, 30, 20 }) vels.add (String (v));
-        setupCombo (body, velBox, vels, 1, "Velocity for new notes");
+        StringArray vels; for (int v : { 127, 120, 110, 100, 90, 80, 70, 60, 50, 40, 30, 20 }) vels.add ("New notes: " + String (v));
+        setupCombo (body, velBox, vels, 1, "Velocity for the notes you draw");
         velBox.setSelectedItemIndex (3, dontSendNotification);
-        velBox.onChange = [this] { st.defaultVel = velBox.getText().getIntValue(); };
-        setupButton (body, recBtn, "Rec", false, "Record into the key you're editing (it starts playing, after a count-in). Press again to stop recording");
+        velBox.onChange = [this] { st.defaultVel = velBox.getText().retainCharacters ("0123456789").getIntValue(); };
+        setupButton (body, recBtn, "Rec", false, "Drum kit mode: record your drumming into the pattern (added to its notes). Pattern mode: record the patterns you play onto the song lane. Right-click: recording options");
         recBtn.onClick = [this] {
-            const bool start = proc.recStateUi.load() == 0;
-            const auto& o = st.song().settings;
-            // recording needs keys that play drums: switch to Play mode unless a pad has its own channel
-            if (start && o.keyMode == 0 && ! (o.playChannel != 0 && o.playChannel != o.triggerChannel)) { setKeyMode (1); showToast ("Play mode on: your keys now play drums for recording"); }
+            if (st.song().settings.keyMode == 0) {                  // Pattern mode: your key presses go onto the song lane
+                const bool on = ! proc.songRecArmed.load();
+                if (on) { proc.songRecCursor = songLane.cursorBeat; proc.publish(); }
+                proc.setSongRecord (on);
+                showToast (on ? "Recording: play your pattern keys, they go onto the song lane" : "Recording finished");
+                return;
+            }
+            const bool start = proc.recStateUi.load() == 0;         // Drum kit mode: your hits go into the pattern
             proc.uiRecord (start, st.song().editKey);
         };
-        setupButton (body, recOptBtn, "Record...", true, "Count-in, click, overdub or replace, quantize and more");
-        recOptBtn.onClick = [this] { togglePage (recPage, recOptBtn); };
-        StringArray guides { "Lines: off", "Lines every 8", "Lines every 16", "Lines every 20", "Lines every 32" };
+        recBtn.onRight = [this] { recPage.showMenu (&recBtn); };
+        setupButton (body, editBtn, "Edit pattern", true, "Open the pattern editor under the song lane (notes, grid, length, velocities)");
+        editBtn.onClick = [this] { proc.uiEditOpen = editBtn.getToggleState(); layout(); refreshAll(); };
+        StringArray guides { "Guides: off", "Guides: 8", "Guides: 16", "Guides: 20", "Guides: 32" };
         setupCombo (body, guideBox, guides, 1, "Guide lines in the velocity lane. Bars click onto them; hold Alt to move freely");
         guideBox.setSelectedItemIndex (2, dontSendNotification);
         guideBox.onChange = [this] { static const int g[] = { 0, 8, 16, 20, 32 }; st.velGuide = g[jlimit (0, 4, guideBox.getSelectedItemIndex())]; vel.repaint(); };
-        setupButton (body, playBtn, "Play", false, "Play the pattern being edited");
-        playBtn.onClick = [this] { proc.uiTrigger (st.song().editKey); };
+        setupButton (body, playBtn, "Play", false, "Plays what you clicked last: the song lane, a pattern (a key or the editor) or the chain strip");
+        playBtn.onClick = [this] { transportPlay(); };
+        body.addAndMakeVisible (playsWhat); playsWhat.setFont (font (11.0f, 2)); playsWhat.setColour (Label::textColourId, th::dim);
+        playsWhat.setComponentID ("Plays");
+        // what Play plays follows where you click
+        targetWatch.f = [this] (Component* c) {
+            int t = playTarget;
+            if (c == &chainStrip || chainStrip.isParentOf (c)) t = 2;
+            else if (c == &songLane) t = 0;
+            else if (c == &strip || c == &grid || c == &headers || c == &vel || c == &ruler) t = 1;
+            if (t != playTarget) { playTarget = t; showPlays(); }
+            if (c == &strip) MessageManager::callAsync ([sp = Component::SafePointer<DrumPlayerEditor> (this)] { if (sp) sp->setEditorOpen (true); });
+        };
+        for (Component* c : { (Component*) &chainStrip, (Component*) &songLane, (Component*) &strip, (Component*) &grid, (Component*) &headers, (Component*) &vel, (Component*) &ruler })
+            c->addMouseListener (&targetWatch, true);
         setupButton (body, stopBtn, "Stop"); stopBtn.onClick = [this] { stopAll(); };
-        playBtn.getProperties().set ("lit", (int) 0xff6fe08f);           // Play glows green while playing
-        stopBtn.getProperties().set ("lit", (int) 0xffff5a5a);           // Stop flashes red
-        recBtn.getProperties().set ("lit", (int) 0xffff5a5a);            // Rec blinks red on the count-in, stays red while recording
+        // transport lamps: Rec and Play are green, Rec turns red (redder while recording), Play lights up bright green, Stop is blue
+        playBtn.getProperties().set ("idle", (int) 0xff2f7a4c); playBtn.getProperties().set ("lit", (int) 0xff5cff8f);
+        recBtn.getProperties().set ("idle", (int) 0xff2f7a4c);  recBtn.getProperties().set ("lit", (int) 0xffc8463f);
+        stopBtn.getProperties().set ("idle", (int) 0xff2b5f7e); stopBtn.getProperties().set ("lit", (int) 0xff7fd1ff);
+        for (TextButton* b : { (TextButton*) &recBtn, &playBtn, &stopBtn }) b->setSize (jmax (58, b->getWidth() + 14), btnH);
         dragBtn.setButtonText ("Drag MIDI"); dragBtn.setSize (fitW ("Drag MIDI"), btnH); body.addAndMakeVisible (dragBtn);
         dragBtn.getParts = [this] { return std::vector<const Pattern*> { &st.pat() }; };
         dragBtn.getChannel = [this] { return st.song().settings.outChannel; };
@@ -565,9 +683,9 @@ public:
         // what the lower lane shows: velocity or the chance that a note plays (random occurrence)
         setupButton (body, velShow, "Velocity", true, "The lane shows velocities"); setupButton (body, chanceShow, "Chance", true, "The lane shows each note's chance to play (100% always, 50% every other time at random)");
         velShow.setRadioGroupId (81); chanceShow.setRadioGroupId (81); velShow.setToggleState (true, dontSendNotification);
-        velShow.onClick = [this] { st.probMode = false; vel.repaint(); };
-        chanceShow.onClick = [this] { st.probMode = true; vel.repaint(); };
-        setupButton (body, randBtn, "Randomize", false, "Randomize the velocities or the chances of the selected notes (or the lane shown)");
+        velShow.onClick = [this] { st.probMode = false; vel.repaint(); refreshControls(); showToast ("The lane shows velocities: drag the bars to change them"); };
+        chanceShow.onClick = [this] { st.probMode = true; vel.repaint(); refreshControls(); showToast ("The lane shows each note's chance to play (100% = always): drag the bars"); };
+        setupButton (body, randBtn, "Randomize velocity", false, "Randomize the velocities (or the chances, when the lane shows Chance) of the selected notes, or of every note shown");
         randBtn.onClick = [this] {
             PopupMenu m;
             m.addSectionHeader (st.probMode ? "CHANCE TO PLAY" : "VELOCITY");
@@ -592,9 +710,11 @@ public:
                     else if (r == 202) { std::uniform_int_distribution<int> d (0, 2); for (auto& n : p.notes) if (n.selected && d (rng) == 0) n.probability = 50; }
                     if (! anySel) selectAll (p, false);
                 });
+                int n = 0; for (auto& nn : st.pat().notes) n += (focus < 0 || nn.note == focus) ? 1 : 0;
+                showToast (String (st.probMode ? "Randomized the chance of " : "Randomized the velocity of ") + (anySelected (st.pat()) ? String ("the selected notes") : String (n) + " notes"));
             });
         };
-        body.addAndMakeVisible (velMode); setupButton (body, velMode, "Shapes...", false, "Velocity / chance shapes and actions");
+        body.addAndMakeVisible (velMode); setupButton (body, velMode, "Velocity shapes", false, "Ramps, accents, curves, louder, softer: on the selected notes, or every note shown");
         velMode.onClick = [this] {
             PopupMenu m;
             m.addItem (3, "Curve (sine, triangle, ramps)...");
@@ -605,22 +725,43 @@ public:
             m.addSubMenu ("All to", fx);
             m.showMenuAsync (PopupMenu::Options().withTargetComponent (&velMode), [this] (int r) {
                 if (r == 3) openCurve();
-                else if (r >= 10000) runFunction (r - 10000);
+                else if (r >= 10000) { runFunction (r - 10000); if (proc.undo.canUndo()) showToast (proc.undo.getUndoDescription() + ": done  (Ctrl+Z undoes it)"); }
             });
         };
 
         // ---------------- pages
-        for (Page* pg : { (Page*) &quantPage, (Page*) &humPage, (Page*) &chainPage, (Page*) &setPage, (Page*) &presetPage, (Page*) &mapPage, (Page*) &recPage, (Page*) &groovePage, (Page*) &mixerPage, (Page*) &exportPage }) body.addChildComponent (pg);
+        for (Page* pg : { (Page*) &quantPage, (Page*) &humPage, (Page*) &chainPage, (Page*) &setPage, (Page*) &presetPage, (Page*) &mapPage, (Page*) &recPage, (Page*) &groovePage, (Page*) &mixerPage, (Page*) &exportPage, (Page*) &setsPage }) body.addChildComponent (pg);
+        setsPage.onLoadSet = [this] (const File& d) { loadGrooveSet (d); };
+        setsPage.onLoadFile = [this] (const File& f, int k) { importFiles ({ f.getFullPathName() }, k); };
+        setsPage.onSaveSet = [this] { togglePage (exportPage, exportDummy); };
+        setsPage.onPreview = [this] (const File& f) { previewFile (f); };
+        setsPage.knownRoots = [] {
+            StringArray r;
+            if (auto x = XmlDocument::parse (exportListsFile())) if (auto* e = x->getChildByName ("Folders")) for (auto* it : e->getChildIterator()) r.add (it->getStringAttribute ("v"));
+            return r;
+        };
         exportPage.defaultTune = [this] { return File (proc.uiProjectPath).existsAsFile() ? File (proc.uiProjectPath).getFileNameWithoutExtension() : presetName.getButtonText() != "Presets" ? presetName.getButtonText() : String(); };
         exportPage.currentBpm = [this] { return effectiveTempo(); };
         exportPage.toast = [this] (const String& t) { showToast (t); };
         {   // tempo
-            setupLabel (body, lTempo, "Tempo");
+            setupLabel (body, lTempo, "TEMPO"); lTempo.setJustificationType (Justification::centredRight);
             setupButton (body, tempoDown, "-", false, "Slower (Shift: 0.1 BPM)"); setupButton (body, tempoUp, "+", false, "Faster (Shift: 0.1 BPM)");
             tempoDown.onClick = [this] { setOwnTempo (std::round (effectiveTempo()) - (ModifierKeys::currentModifiers.isShiftDown() ? 0.1 : 1.0)); };
             tempoUp.onClick = [this] { setOwnTempo (std::round (effectiveTempo()) + (ModifierKeys::currentModifiers.isShiftDown() ? 0.1 : 1.0)); };
             body.addAndMakeVisible (tempoLbl); tempoLbl.setEditable (false, true, false); tempoLbl.setJustificationType (Justification::centred);
-            tempoLbl.setFont (font (13.0f, 3)); tempoLbl.setTooltip ("Double-click to type a tempo. It's used when Studio One is stopped; while Studio One plays, its tempo rules");
+            tempoLbl.setFont (font (20.0f, 3)); tempoLbl.setTooltip ("Drag up or down to change the tempo (Shift: fine), double-click to type. Locked: Studio One's tempo");
+            tempoLbl.get = [this] { return effectiveTempo(); }; tempoLbl.set = [this] (double b) { setOwnTempo (b); };
+            tempoLbl.onRight = [this] {
+                PopupMenu m; const double hb = proc.hostBpm.load();
+                m.addItem (1, "Take Studio One's tempo now (" + String (hb, std::abs (hb - std::round (hb)) < 0.05 ? 0 : 1) + " BPM)");
+                m.addItem (2, "Lock to Studio One", true, st.song().settings.followHost);
+                m.addSeparator(); for (int b : { 80, 90, 100, 110, 120, 130, 140 }) m.addItem (100 + b, String (b) + " BPM");
+                m.showMenuAsync (PopupMenu::Options().withTargetComponent (&tempoLbl), [this, hb] (int r) {
+                    if (r == 1) { setOwnTempo (hb); showToast ("Tempo from Studio One: " + String (hb, 1) + " BPM"); }
+                    else if (r == 2) { const bool on = ! st.song().settings.followHost; st.applySong ("Follow tempo", [on] (Song& s2) { s2.settings.followHost = on; }); showTempo(); }
+                    else if (r > 100) setOwnTempo (r - 100);
+                });
+            };
             tempoLbl.setColour (Label::backgroundColourId, Colours::black.withAlpha (0.25f));
             tempoLbl.onTextChange = [this] { const double b = tempoLbl.getText().getDoubleValue(); if (b >= 20.0) setOwnTempo (b); else showTempo(); };
             setupButton (body, tapBtn, "Tap", false, "Tap the tempo (4 taps or more)");
@@ -630,7 +771,7 @@ public:
                 taps.push_back (now); if (taps.size() > 8) taps.erase (taps.begin());
                 if (taps.size() >= 2) setOwnTempo (60000.0 / ((taps.back() - taps.front()) / (double) (taps.size() - 1)));
             };
-            setupButton (body, followBtn, "Follow Studio One", true, "On: Studio One's tempo always. Off: your tempo here while Studio One is stopped (while it plays, its tempo rules)");
+            setupButton (body, followBtn, "Lock to Studio One", true, "On: always Studio One's tempo. Off: your tempo here while Studio One is stopped (while it plays, its tempo rules)");
             followBtn.onClick = [this] { const bool on = followBtn.getToggleState(); st.applySong ("Follow tempo", [on] (Song& s) { s.settings.followHost = on; }); showTempo(); };
         }
         groovePage.onLoad = [this] (const File& f, int k) { importFiles ({ f.getFullPathName() }, k); };
@@ -665,6 +806,8 @@ public:
         setResizeLimits (900, 560, 3200, 2000);
         setSize ((int) (1240 * scale), (int) (800 * scale));
         setupToolStrip();
+        showPlays();
+        savedSerial = proc.editSerial.load();
         refreshAll();
         startTimerHz (30);
     }
@@ -740,6 +883,7 @@ public:
         if (m.isCommandDown() && code == 'Z') { if (m.isShiftDown()) proc.undo.redo(); else proc.undo.undo(); refreshAll(); return true; }
         if (m.isCommandDown() && code == 'Y') { proc.undo.redo(); refreshAll(); return true; }
         if (m.isCommandDown() && m.isShiftDown() && code == 'F') { zoomToFit(); return true; }
+        if (m.isCommandDown() && ! m.isShiftDown() && (code == 'E' || code == 'e')) { setEditorOpen (! proc.uiEditOpen); return true; }
 
         if (songLane.hasKeyboardFocus (false)) {                    // the song lane has the keys
             if (m.isCommandDown() && code == 'A') { songLane.selectAll(); return true; }
@@ -765,7 +909,11 @@ public:
         if (plain && ch == 'M') { st.apply ("Mute / unmute", [] (Pattern& q) { for (auto& n : q.notes) if (n.selected) n.probability = n.probability == 0 ? 100 : 0; }); return true; }
         if (code == KeyPress::deleteKey || code == KeyPress::backspaceKey) { st.apply ("Delete", [] (Pattern& q) { deleteSelected (q); }); return true; }
         if (code == KeyPress::escapeKey && st.stamping) { st.stamping = false; showToast ("Stopped"); return true; }
-        if (code == KeyPress::escapeKey) { if (openPage != nullptr || exchange.isVisible()) closePages(); else { selectAll (p, false); st.publish(); } return true; }
+        if (code == KeyPress::escapeKey) {
+            if (openPage != nullptr || exchange.isVisible()) closePages();
+            else if (anySelected (p)) { selectAll (p, false); st.publish(); }
+            else setEditorOpen (false);
+            return true; }
         if (plain && ch >= '1' && ch <= '7') {
             static const Tool map[] = { Tool::Select, Tool::Line, Tool::Split, Tool::Erase, Tool::Draw, Tool::Mute, Tool::Paint };
             setTool (map[ch - '1']); return true;
@@ -819,7 +967,8 @@ public:
                 m.addSeparator(); m.addItem (7, "Drum map..."); m.addItem (8, "Settings..."); m.addItem (9, "Look...");
                 break;
             case 1:
-                m.addItem (101, "Undo  (Ctrl+Z)", proc.undo.canUndo()); m.addItem (102, "Redo  (Ctrl+Y)", proc.undo.canRedo());
+                m.addItem (101, proc.undo.canUndo() ? "Undo " + proc.undo.getUndoDescription() + "  (Ctrl+Z)" : String ("Undo  (Ctrl+Z)"), proc.undo.canUndo());
+                m.addItem (102, proc.undo.canRedo() ? "Redo " + proc.undo.getRedoDescription() + "  (Ctrl+Y)" : String ("Redo  (Ctrl+Y)"), proc.undo.canRedo());
                 m.addSeparator(); m.addItem (103, "Cut  (Ctrl+X)", sel); m.addItem (104, "Copy  (Ctrl+C)", sel); m.addItem (105, "Paste  (Ctrl+V)", ! st.clipboard.empty());
                 m.addItem (106, "Duplicate  (D)", sel); m.addItem (107, "Delete  (Del)", sel);
                 m.addSeparator(); m.addItem (108, "Select all  (Ctrl+A)"); m.addItem (109, "Select none  (Esc)", sel); m.addItem (110, "Invert selection");
@@ -859,6 +1008,7 @@ public:
                 m.addItem (507, "Delete chunks"); m.addItem (508, "Make unique"); m.addItem (509, "Select all chunks");
                 break;
             case 5:
+                m.addItem (620, "Pattern editor  (Ctrl+E)", true, proc.uiEditOpen); m.addSeparator();
                 m.addItem (601, "Wider  (Ctrl+wheel)"); m.addItem (602, "Narrower"); m.addItem (603, "Taller lanes  (Alt+wheel)"); m.addItem (604, "Lower lanes");
                 m.addItem (605, "Fit the pattern  (Ctrl+Shift+F)");
                 m.addItem (606, "Bigger velocity area"); m.addItem (607, "Smaller velocity area"); m.addItem (608, "Bigger song lane"); m.addItem (609, "Smaller song lane");
@@ -880,8 +1030,8 @@ public:
         auto& p = st.pat();
         if (id >= 10000) { runFunction (id - 10000); return; }
         switch (id) {
-            case 1: AlertWindow::showOkCancelBox (MessageBoxIconType::QuestionIcon, "New", "Clear every pattern, chain and the song lane?", "Clear", "Cancel", this,
-                        ModalCallbackFunction::create ([this] (int r) { if (r == 1) { auto s2 = Song::makeDefault(); s2.settings = st.song().settings; s2.playMap = st.song().playMap; proc.commit (s2, "New"); refreshAll(); } })); break;
+            case 1: askSaveThen ([this] { auto s2 = Song::makeDefault(); s2.settings = st.song().settings; s2.playMap = st.song().playMap; proc.commit (s2, "New");
+                                          proc.uiProjectPath = {}; savedSerial = proc.editSerial.load(); refreshAll(); showToast ("New: everything cleared (Ctrl+Z brings it back)"); }); break;
             case 2: togglePage (presetPage, presetName); break;
             case 12: openProject(); break;
             case 13: if (File (proc.uiProjectPath).existsAsFile()) saveProject (File (proc.uiProjectPath)); else saveProjectAs(); break;
@@ -895,7 +1045,7 @@ public:
                     [this] (const FileChooser& fc) { auto f = fc.getResult(); if (f != File()) { writeSongMidi (st.song(), f.withFileExtension ("mid"), st.song().settings.outChannel); showToast ("Exported " + f.getFileName()); } });
                 break;
             }
-            case 7: togglePage (mapPage, mapBtn); break;
+            case 7: openSettings (1); break;
             case 8: togglePage (setPage, settingsBtn); break;
             case 9: togglePage (setPage, settingsBtn); setPage.showTab (true); break;
             case 101: proc.undo.undo(); refreshAll(); break;
@@ -916,7 +1066,7 @@ public:
             case 301: proc.uiTrigger (st.song().editKey); break;
             case 302: proc.uiStop(); break;
             case 303: recBtn.triggerClick(); break;
-            case 304: togglePage (mapPage, mapBtn); break;
+            case 304: openSettings (1); break;
             case 501: { const bool on = ! st.song().songMode; st.applySong ("Song mode", [on] (Song& s2) { s2.songMode = on; }); break; }
             case 502: if (! st.song().songMode) st.applySong ("Song mode", [] (Song& s2) { s2.songMode = true; }); proc.uiSongPlay (true, songLane.cursorBeat); break;
             case 503: proc.uiSongPlay (false, 0); break;
@@ -926,6 +1076,7 @@ public:
             case 507: songLane.deleteSelected(); break;
             case 508: songLane.makeUnique(); break;
             case 509: songLane.selectAll(); break;
+            case 620: setEditorOpen (! proc.uiEditOpen); break;
             case 601: zoomX (1.25f); break;
             case 602: zoomX (0.8f); break;
             case 603: zoomY (3); break;
@@ -938,7 +1089,7 @@ public:
             case 610: st.usedOnly = ! st.usedOnly; refreshAll(); break;
             case 611: toggleExchange(); break;
             case 612: togglePage (chainPage, chainsBtn); break;
-            case 613: togglePage (recPage, recOptBtn); break;
+            case 613: recPage.showMenu (&recBtn); break;
             case 614: togglePage (mixerPage, mixerBtn); break;
             case 15: togglePage (exportPage, exportDummy); break;
             case 615: toggleStrip(); break;
@@ -956,7 +1107,7 @@ public:
     File projectsFolder() const { auto d = dataFolder().getChildFile ("Projects"); d.createDirectory(); return d; }
     void saveProject (const File& f)
     {
-        if (auto x = proc.stateXml(); x != nullptr && x->writeTo (f)) { proc.uiProjectPath = f.getFullPathName(); showToast ("Saved project " + f.getFileNameWithoutExtension()); }
+        if (auto x = proc.stateXml(); x != nullptr && x->writeTo (f)) { proc.uiProjectPath = f.getFullPathName(); savedSerial = proc.editSerial.load(); showToast ("Saved project " + f.getFileNameWithoutExtension()); }
         else showToast ("Couldn't save there");
     }
     void saveProjectAs()
@@ -965,7 +1116,8 @@ public:
         chooser->launchAsync (FileBrowserComponent::saveMode | FileBrowserComponent::canSelectFiles | FileBrowserComponent::warnAboutOverwriting,
             [this] (const FileChooser& fc) { auto f = fc.getResult(); if (f != File()) saveProject (f.withFileExtension ("dpproject")); });
     }
-    void openProject()
+    void openProject() { askSaveThen ([this] { openProjectNow(); }); }
+    void openProjectNow()
     {
         chooser = std::make_unique<FileChooser> ("Open project", projectsFolder(), "*.dpproject");
         chooser->launchAsync (FileBrowserComponent::openMode | FileBrowserComponent::canSelectFiles, [this] (const FileChooser& fc) {
@@ -974,7 +1126,7 @@ public:
             auto x = XmlDocument::parse (f);
             if (x == nullptr || ! x->hasTagName ("DrumPlayerState")) { showToast ("That isn't a Drum Player project"); return; }
             proc.applyState (*x);
-            proc.uiProjectPath = f.getFullPathName(); refreshAll(); showToast ("Opened " + f.getFileNameWithoutExtension());
+            proc.uiProjectPath = f.getFullPathName(); savedSerial = proc.editSerial.load(); refreshAll(); showToast ("Opened " + f.getFileNameWithoutExtension());
         });
     }
 
@@ -1025,7 +1177,7 @@ private:
     float scale = 1.0f;
 
     TextButton groovesBtn;
-    TextButton prevPreset, nextPreset, presetName, saveBtn, exchangeBtn, chainsBtn, mapBtn, settingsBtn, zoomOut, zoomPct, zoomIn, keysBtn, playModeBtn;
+    TextButton prevPreset, nextPreset, presetName, saveBtn, exchangeBtn, chainsBtn, mapBtn, zoomOut, zoomIn, keysBtn, playModeBtn, editBtn, setsBtn; GearButton settingsBtn; ZoomBox zoomPct;
     Label keyInfo; int lastInSerialSeen = -1;
     KeyStrip strip, bigStrip;
     ParkTray tray, bigTray;
@@ -1033,7 +1185,7 @@ private:
     TextEditor nameEd, barsEd;
     ComboBox typeBox, bpbBox, gridBox, swingPreset, swingValue, velBox;
     Label lLen, lGrid, lSwing, lVel, exchangeHelp, status;
-    TextButton lenMenuBtn, undoBtn, redoBtn, quantBtn, humBtn, funcBtn, recBtn, recOptBtn, playBtn, stopBtn, velMode, velShow, chanceShow, randBtn;
+    TextButton lenMenuBtn, undoBtn, redoBtn, quantBtn, humBtn, funcBtn, recOptBtn, playBtn, stopBtn, velMode, velShow, chanceShow, randBtn; RightClickButton recBtn;
     ComboBox guideBox;
     OwnedArray<TextButton> toolBtns;
     FineSlider swingSlider;
@@ -1069,8 +1221,42 @@ private:
         std::vector<Component::SafePointer<Button>> sp; for (auto* b : bs) sp.push_back (b);
         m.showMenuAsync (PopupMenu::Options().withTargetComponent (t), [sp] (int r) { if (r > 0 && sp[(size_t) r - 1] != nullptr) sp[(size_t) r - 1]->triggerClick(); });
     }
+    Component* menuAnchor = nullptr;         // the shelf button a menu opens under
+    ToolStrip shelf;                         // the buttons next to the pattern's length: double-click to choose, Alt+Shift drag to arrange
+    void setupShelf()
+    {
+        auto fn = [this] (int id) { return [this, id] (Component* t) { menuAnchor = t; runFunction (id); }; };
+        shelf.all = {
+            { "humanize", "Humanize & Feel", "Humanize, feel and vintage timing", [this] (Component*) { togglePage (humPage, humBtn); } },
+            { "functions", "Functions", "Every editing function", [this] (Component* t) { menuAnchor = t; functionsMenu(); } },
+            { "quantnow", "Quantize now", "Quantize with the settings on the Quantize page (Q)", fn (10) },
+            { "ghosts", "Ghost notes", "Add ghost notes to the drums you pick", fn (34) },
+            { "curve", "Velocity curve", "Sine, triangle and ramps over the velocities", [this] (Component*) { openCurve(); } },
+            { "humnotes", "Humanize notes", "Humanize timing and velocity into the notes", fn (11) },
+            { "randvel", "Randomize velocity", "Small random changes to the velocities", fn (30) },
+            { "randtime", "Randomize timing", "Small random timing changes", fn (31) },
+            { "thin", "Thin out", "Remove a quarter of the notes at random", fn (33) },
+            { "reverse", "Reverse", "Play the notes backwards", fn (12) },
+            { "double", "Double speed", "Twice as fast", fn (13) },
+            { "half", "Half speed", "Half as fast", fn (14) },
+            { "accent", "Accents", "Accent the beats", fn (22) },
+            { "louder", "Louder", "Velocities +10", fn (23) },
+            { "softer", "Softer", "Velocities -10", fn (24) },
+            { "doubles", "Remove doubles", "Remove notes that sit on top of each other", fn (18) },
+            { "split", "Split", "Split the pattern at the edit cursor", fn (43) },
+            { "export", "Export MIDI", "Save this pattern as a MIDI file", fn (44) },
+            { "import", "Import MIDI", "Bring MIDI files onto keys", fn (50) },
+        };
+        shelf.hint = String::fromUTF8 ("double-click: add buttons here  \xc2\xb7  Alt+Shift drag: arrange");
+        shelf.compact = true;
+        shelf.on = StringArray::fromTokens (proc.uiShelfTools, ",", ""); shelf.on.removeEmptyStrings();
+        shelf.onChanged = [this] { proc.uiShelfTools = shelf.on.joinIntoString (","); };
+        body.addAndMakeVisible (shelf);
+        shelf.rebuild();
+    }
     void setupToolStrip()
     {
+        setupShelf();
         auto click = [] (Button& b) { auto* p = &b; return [p] (Component*) { p->triggerClick(); }; };
         toolStrip.all = {
             { "fit", "Bars", "Show this many bars across the editor", [this] (Component* t) { comboMenu (fitBars, t); } },
@@ -1081,8 +1267,6 @@ private:
             { "rec", "Rec", "Record", click (recBtn) },
             { "quantize", "Quantize", "Quantize page", click (quantBtn) },
             { "humanize", "Humanize", "Humanize page", click (humBtn) },
-            { "undo", "Undo", "Undo", click (undoBtn) },
-            { "redo", "Redo", "Redo", click (redoBtn) },
             { "functions", "Functions", "Functions menu", click (funcBtn) },
             { "mixer", "Mixer", "Pan and meters", click (mixerBtn) },
             { "zoom", "Zoom", "Wider, narrower, taller, lower, fit", [this] (Component* t) { buttonsMenu ({ &zH2, &zH1, &zV2, &zV1, &zFit }, t); } },
@@ -1163,10 +1347,10 @@ private:
             owner->repaintRoll();
         }
     } scrollRelay;
-    QuantizePage quantPage; HumanizePage humPage; ChainPage chainPage; SettingsPage setPage; PresetPage presetPage; MapPage mapPage; RecordPage recPage; GroovePage groovePage; MixerPage mixerPage; ExportPage exportPage;
+    QuantizePage quantPage; HumanizePage humPage; ChainPage chainPage; SettingsPage setPage; PresetPage presetPage; MapPage mapPage; RecordPage recPage; GroovePage groovePage; MixerPage mixerPage; ExportPage exportPage; GrooveSetsPage setsPage;
     TextButton mixerBtn, exportDummy;
     // tempo: your own when Studio One is stopped, or follow Studio One
-    TextButton tempoDown, tempoUp, tapBtn, followBtn; Label tempoLbl, lTempo;
+    TextButton tempoDown, tempoUp, tapBtn, followBtn; TempoLabel tempoLbl; Label lTempo;
     std::vector<double> taps;
     double ownTempo() { return st.song().settings.ownBpm; }
     void setOwnTempo (double b)
@@ -1189,6 +1373,35 @@ private:
     bool anythingPlaying()
     {
         return proc.playingKey.load() >= 0 || proc.queuedKey.load() >= 0 || proc.chainPlaying.load() >= 0 || proc.songBeatUi.load() >= 0;
+    }
+    // ---- the transport: Play plays what you clicked last (0 song lane, 1 a pattern, 2 the chain strip)
+    struct TargetWatch : public MouseListener { std::function<void (Component*)> f; void mouseDown (const MouseEvent& e) override { if (f) f (e.eventComponent); } } targetWatch;
+    int playTarget = 1; Label playsWhat;
+    void showPlays()
+    {
+        static const char* t[] = { "Play: song", "Play: pattern", "Play: chain" };
+        playsWhat.setText (t[jlimit (0, 2, playTarget)], dontSendNotification);
+        songLane.repaint(); chainStrip.repaint();
+    }
+    void transportPlay()
+    {
+        if (playTarget == 2) { proc.uiPlayChain (st.currentChain); return; }
+        if (playTarget == 0) { const auto& sg = st.song(); proc.uiSongPlay (true, sg.loopOn && (songLane.cursorBeat < sg.loopStart || songLane.cursorBeat >= sg.loopEnd) ? sg.loopStart : songLane.cursorBeat); return; }
+        proc.uiTrigger (st.song().editKey);
+    }
+    // ---- unsaved changes: ask before they'd be lost
+    int savedSerial = 0;
+    bool unsaved() const { return proc.editSerial.load() != savedSerial; }
+    void askSaveThen (std::function<void()> next)
+    {
+        if (! unsaved()) { next(); return; }
+        auto* aw = new AlertWindow ("Save changes?", "You have changes that aren't saved in a Drum Player project. Save them first?", MessageBoxIconType::QuestionIcon, this);
+        aw->addButton ("Save", 1); aw->addButton ("Don't save", 2); aw->addButton ("Cancel", 0, KeyPress (KeyPress::escapeKey));
+        aw->enterModalState (true, ModalCallbackFunction::create ([this, next] (int r) {
+            if (r == 0) return;
+            if (r == 1) { if (File (proc.uiProjectPath).existsAsFile()) saveProject (File (proc.uiProjectPath)); else { saveProjectAs(); return; } }
+            next();
+        }), true);
     }
     void stopAll()
     {
@@ -1222,11 +1435,16 @@ private:
         headerArea = h;
         headerTitle = h.removeFromLeft (170);
         RowPlacer hp (h, 5);
-        hp.place (prevPreset, 24); hp.place (presetName, 200); hp.place (nextPreset, 24); hp.skip (4); hp.place (saveBtn); hp.skip (12);
-        hp.place (keysBtn); hp.place (playModeBtn); hp.skip (6); hp.place (keyInfo, jmax (0, h.getRight() - 545 - mixerBtn.getWidth() - hp.x));
-        RowPlacer hr (h.withTrimmedLeft (h.getWidth() - 520 - mixerBtn.getWidth() - 5), 5);
-        hr.place (mixerBtn); hr.place (groovesBtn); hr.place (exchangeBtn); hr.place (chainsBtn); hr.place (mapBtn); hr.place (settingsBtn); hr.skip (8);
-        hr.place (zoomOut, 24); hr.place (zoomPct, 48); hr.place (zoomIn, 24);
+        hp.place (prevPreset, 24); hp.place (presetName, 200); hp.place (nextPreset, 24); hp.skip (16);
+        hp.place (keysBtn); hp.place (playModeBtn); hp.skip (10);
+        const int rightW = mixerBtn.getWidth() + groovesBtn.getWidth() + setsBtn.getWidth() + exchangeBtn.getWidth() + chainsBtn.getWidth() + settingsBtn.getWidth() + 52 + 8 * 6 + 20;
+        hp.place (keyInfo, jmax (0, h.getRight() - rightW - hp.x - 10));
+        RowPlacer hr (h.withTrimmedLeft (h.getWidth() - rightW), 5);
+        hr.place (mixerBtn); hr.place (groovesBtn); hr.place (setsBtn); hr.place (exchangeBtn); hr.place (chainsBtn); hr.skip (8);
+        hr.place (zoomPct, 52); hr.skip (6); hr.place (settingsBtn);
+        zoomOut.setVisible (false); zoomIn.setVisible (false);
+        for (auto* b : { &saveBtn, &mapBtn, &undoBtn, &redoBtn, &recOptBtn, (TextButton*) &dragBtn }) b->setVisible (false);
+        lVel.setVisible (false);
         a.removeFromTop (6);
         // keyboard + tray
         auto ks = a.removeFromTop ((int) jlimit (56.0f, 170.0f, 72.0f * std::sqrt (Theme::get().keyScale)));
@@ -1234,58 +1452,90 @@ private:
         ks.removeFromRight (8);
         strip.setBounds (ks);
         a.removeFromTop (5);
-        // the pattern player (song lane) right under the keys, with its own scroll bar
-        {   songH = jlimit (40, jmax (40, a.getHeight() - 260), songH);
-            auto songRow = a.removeFromTop (songH);
+        belowKeys = a;
+        // bottom: status line, then the transport and tempo bar (always there, under the velocities)
+        status.setBounds (a.removeFromBottom (18));
+        a.removeFromBottom (2);
+        {   auto tb = a.removeFromBottom (jmax (36, (int) btnH + 14));
+            transportArea = tb;
+            tb.reduce (8, 0);
+            RowPlacer tp (tb, 6);
+            editBtn.setVisible (false);
+            tp.place (recBtn); tp.place (playBtn); tp.place (stopBtn); tp.skip (6); tp.place (playsWhat, 110);
+            // tempo, big, at the right end: label, - number + right next to each other, tap, lock
+            const int tH = jmax ((int) btnH + 6, 30);
+            auto tr = tb;
+            followBtn.setBounds (tr.removeFromRight (followBtn.getWidth()).withSizeKeepingCentre (followBtn.getWidth(), btnH)); tr.removeFromRight (6);
+            tapBtn.setBounds (tr.removeFromRight (tapBtn.getWidth()).withSizeKeepingCentre (tapBtn.getWidth(), btnH)); tr.removeFromRight (10);
+            tempoUp.setBounds (tr.removeFromRight (24).withSizeKeepingCentre (24, tH)); tr.removeFromRight (1);
+            tempoLbl.setBounds (tr.removeFromRight (76).withSizeKeepingCentre (76, tH)); tr.removeFromRight (1);
+            tempoDown.setBounds (tr.removeFromRight (24).withSizeKeepingCentre (24, tH)); tr.removeFromRight (6);
+            lTempo.setBounds (tr.removeFromRight (56).withSizeKeepingCentre (56, tH));
+            a.removeFromBottom (6); }
+        const bool editing = proc.uiEditOpen;
+        // the pattern player (song lane) right under the keys, with its own scroll bar; it takes the room when the editor is closed
+        {   const int chainH = jmax (32, (int) btnH + 10);
+            songH = jlimit (40, jmax (40, a.getHeight() - 260), songH);
+            const int h2 = editing ? songH : jmax (60, a.getHeight() - chainH - 12);
+            auto songRow = a.removeFromTop (h2);
             songHeader.setBounds (songRow.removeFromLeft (200));
             songRow.removeFromRight (10);
             songScroll.setBounds (songRow.removeFromBottom (10));
             songLane.setBounds (songRow);
-            songDiv.setBounds (a.removeFromTop (10)); }
-        chainStrip.setBounds (a.removeFromTop (jmax (32, (int) btnH + 10)));
+            songDiv.setVisible (editing);
+            if (editing) songDiv.setBounds (a.removeFromTop (10)); else a.removeFromTop (8);
+            chainStrip.setBounds (a.removeFromTop (chainH)); }
         a.removeFromTop (7);
-        // toolbar 1
-        auto t1 = a.removeFromTop (jmax (28, (int) btnH + 6));
-        toolArea = t1;
-        RowPlacer r1 (t1, 5);
-        r1.place (nameEd, 150); r1.place (typeBox, 84); r1.skip (6);
-        r1.place (lLen, 44); r1.place (barsEd, 40); r1.place (lenMenuBtn); r1.place (bpbBox, 58); r1.skip (6);
-        r1.place (lGrid, 30); r1.place (gridBox, 70); r1.skip (10);
-        for (auto* b : toolBtns) b->setVisible (false);     // tools live in the right-click menu, the Tools menu and keys 1-7
-        r1.place (undoBtn); r1.place (redoBtn); r1.skip (14);
-        r1.place (lTempo, 44); r1.place (tempoDown, 24); r1.place (tempoLbl, 58); r1.place (tempoUp, 24); r1.place (tapBtn); r1.place (followBtn);
-        a.removeFromTop (4);
-        // toolbar 2
-        auto t2 = a.removeFromTop (jmax (28, (int) btnH + 6));
-        toolArea = toolArea.getUnion (t2);
-        RowPlacer r2 (t2, 5);
-        r2.place (lSwing, 40); r2.place (swingPreset, 104); r2.place (swingSlider, 190); r2.place (swingValue, 66); r2.skip (10);
-        r2.place (quantBtn); r2.place (humBtn); r2.place (funcBtn); r2.skip (10);
-        r2.place (lVel, 24); r2.place (velBox, 56); r2.skip (10);
-        r2.place (recBtn); r2.place (recOptBtn); r2.place (playBtn); r2.place (stopBtn); dragBtn.setVisible (false);
-        a.removeFromTop (8);
-        // status line
-        status.setBounds (a.removeFromBottom (18));
-        a.removeFromBottom (2);
-        bodyRest = a;
-        if (detached == nullptr) { backBtn.setVisible (false); detachedNote.setVisible (false); layoutRoll (a); }
-        else {
-            rollArea = velLabelArea = {};
-            detachedNote.setBounds (a.withSizeKeepingCentre (jmin (a.getWidth(), 520), 40).translated (0, -24)); detachedNote.setVisible (true);
-            backBtn.setBounds (a.withSizeKeepingCentre (backBtn.getWidth(), btnH).translated (0, 16)); backBtn.setVisible (true);
-            detached->content.inner.resized(); detached->content.inner.repaint();
+        std::vector<Component*> editParts { &nameEd, &typeBox, &lLen, &barsEd, &lenMenuBtn, &bpbBox, &lGrid, &gridBox, &lSwing, &swingPreset, &swingSlider, &swingValue,
+                                           &quantBtn, &velBox, &shelf };
+        for (auto* c : rollParts()) editParts.push_back (c);
+        {   const auto rp = rollParts();
+            for (auto* c : editParts) {
+                const bool isRoll = std::find (rp.begin(), rp.end(), c) != rp.end();
+                if (isRoll && (detached != nullptr || c == &toolStrip)) continue;      // the detached window keeps its own
+                c->setVisible (editing);
+            } }
+        toolStrip.setVisible (editing && stripOn);
+        if (! editing) {
+            toolArea = {}; rollArea = velLabelArea = {}; bodyRest = {};
+            backBtn.setVisible (false); detachedNote.setVisible (false);
+        } else {
+            // toolbar 1: the pattern itself, and what you do to it
+            auto t1 = a.removeFromTop (jmax (28, (int) btnH + 6));
+            toolArea = t1;
+            RowPlacer r1 (t1, 5);
+            r1.place (nameEd, 100); r1.place (typeBox, 84); r1.skip (6);
+            r1.place (lLen, 44); r1.place (barsEd, 40); r1.place (lenMenuBtn); r1.place (bpbBox, 58); r1.skip (10);
+            shelf.setBounds (t1.withLeft (r1.x).withRight (t1.getRight()));          // your buttons: double-click to add, Alt+Shift drag to arrange
+            humBtn.setVisible (false); funcBtn.setVisible (false);
+            for (auto* b : toolBtns) b->setVisible (false);     // tools live in the right-click menu, the Tools menu and keys 1-7
+            a.removeFromTop (4);
+            // toolbar 2: timing - grid, quantize and swing together
+            auto t2 = a.removeFromTop (jmax (28, (int) btnH + 6));
+            toolArea = toolArea.getUnion (t2);
+            RowPlacer r2 (t2, 5);
+            r2.place (lGrid, 30); r2.place (gridBox, 70); r2.place (quantBtn); r2.skip (14);
+            r2.place (lSwing, 40); r2.place (swingPreset, 104); r2.place (swingSlider, 190); r2.place (swingValue, 66);
+            a.removeFromTop (8);
+            bodyRest = a;
+            if (detached == nullptr) { backBtn.setVisible (false); detachedNote.setVisible (false); layoutRoll (a); }
+            else {
+                rollArea = velLabelArea = {};
+                detachedNote.setBounds (a.withSizeKeepingCentre (jmin (a.getWidth(), 520), 40).translated (0, -24)); detachedNote.setVisible (true);
+                backBtn.setBounds (a.withSizeKeepingCentre (backBtn.getWidth(), btnH).translated (0, 16)); backBtn.setVisible (true);
+                detached->content.inner.resized(); detached->content.inner.repaint();
+            }
         }
-        // pages float over the roll's right side (over the main window's lower part)
-        const auto ra = bodyRest;
-        auto pageArea = ra.withTrimmedLeft (jmax (0, ra.getWidth() - 520)).withTrimmedBottom (velH / 2);
-        for (Page* pg : { (Page*) &quantPage, (Page*) &humPage, (Page*) &chainPage, (Page*) &setPage, (Page*) &recPage }) pg->setBounds (pageArea);
-        setPage.setBounds (pageArea.withBottom (ra.getBottom()));
-        mapPage.setBounds (ra.withTrimmedLeft (jmax (0, ra.getWidth() - 520)));
+        // pages float over the right side of everything under the keys
+        const auto ra = belowKeys.withTrimmedBottom (20);
+        auto pageArea = ra.withTrimmedLeft (jmax (0, ra.getWidth() - 520));
+        for (Page* pg : { (Page*) &quantPage, (Page*) &humPage, (Page*) &chainPage, (Page*) &setPage, (Page*) &recPage, (Page*) &mapPage }) pg->setBounds (pageArea);
         presetPage.setBounds (ra.withTrimmedLeft (jmax (0, ra.getWidth() - 600)));
-        groovePage.setBounds (ra.withTrimmedLeft (jmax (0, ra.getWidth() - 900)));
+        groovePage.setBounds (ra.withHeight (jmin (ra.getHeight(), 380)));      // the grooves open right under the keys, the full width
+        setsPage.setBounds (groovePage.getBounds());
         mixerPage.setBounds (ra);
         exportPage.setBounds (ra.withTrimmedLeft (jmax (0, ra.getWidth() - 760)));
-        exchange.setBounds (ra.withTrimmedTop (-90));
+        exchange.setBounds (ra);
         auto ex = exchange.getLocalBounds().reduced (12);
         exchangeHelp.setBounds (ex.removeFromTop (24));
         bigTray.setBounds (ex.removeFromBottom (120).removeFromLeft (420));
@@ -1295,7 +1545,8 @@ private:
         if (openPage != nullptr) placeClose (openPage->getBounds()); else if (exchange.isVisible()) placeClose (exchange.getBounds());
         body.repaint();
     }
-    Rectangle<int> headerTitle, rollArea, velLabelArea, headerArea, toolArea, bodyRest;
+    static int smallH() { return jmax (16, (int) btnH - 5); }
+    Rectangle<int> headerTitle, rollArea, velLabelArea, headerArea, toolArea, bodyRest, belowKeys, transportArea;
     void layoutRoll (Rectangle<int> a)
     {
         // the Option-key strip, as tall as the song lane, above it
@@ -1304,7 +1555,7 @@ private:
         // roll
         rollArea = a;
         const int rulerH = 22, sb = 10;
-        velH = jlimit (50, jmax (50, a.getHeight() - 120), velH);
+        velH = jlimit (4 * (smallH() + 3) + 14, jmax (4 * (smallH() + 3) + 14, a.getHeight() - 120), velH);
         auto velRow = a.removeFromBottom (velH);
         velDiv.setBounds (a.removeFromBottom (10));
         auto top = a.removeFromTop (rulerH);
@@ -1318,12 +1569,14 @@ private:
         headDiv.setBounds (headers.getRight() - 3, headers.getY(), 6, headers.getHeight()); headDiv.toFront (false);
         grid.setBounds (a); ruler.setBounds (top);
         {   // the velocity area's buttons, stacked in the space under the drum list
-            const int bx = velRow.getX() + 8, bw = jmax (40, headW - 16), gap = 4;
+            // small and plain: what the lane shows, then what you can do to it
+            const int bx = velRow.getX() + 8, bw = jmax (40, headW - 16), gap = 3, h = smallH();
             int by = velRow.getY() + 6;
             const int half = (bw - gap) / 2;
-            velShow.setBounds (bx, by, half, btnH); chanceShow.setBounds (bx + half + gap, by, half, btnH); by += btnH + gap;
-            randBtn.setBounds (bx, by, half, btnH); velMode.setBounds (bx + half + gap, by, half, btnH); by += btnH + gap;
-            guideBox.setBounds (bx, by, jmin (bw, 130), btnH);
+            velShow.setBounds (bx, by, half, h); chanceShow.setBounds (bx + half + gap, by, half, h); by += h + gap;
+            randBtn.setBounds (bx, by, bw, h); by += h + gap;
+            velMode.setBounds (bx, by, bw, h); by += h + gap;
+            guideBox.setBounds (bx, by, half, h); velBox.setBounds (bx + half + gap, by, half, h);
         }
         velLabelArea = velRow.removeFromLeft (headW);
         velRow.removeFromRight (sb);
@@ -1343,7 +1596,7 @@ private:
         if (stripOn) drawCard (g, toolStrip.getBounds().toFloat().expanded (2), th::panel, 8, "Toolbars");
         g.setFont (font (10.5f, 1)); g.setColour (th::faint);
         const auto focus = st.focusLane >= 0 && st.song().lane (st.focusLane) ? st.song().lane (st.focusLane)->name : String ("all lanes");
-        g.drawFittedText ("Showing: " + focus, velLabelArea.reduced (10, 6).withTrimmedTop (3 * (btnH + 4) + 4), Justification::topLeft, 2);
+        g.drawFittedText ("Showing: " + focus, velLabelArea.reduced (10, 6).withTrimmedTop (4 * (smallH() + 3) + 4), Justification::topLeft, 2);
     }
 
     void paintBody (Graphics& g)
@@ -1355,8 +1608,9 @@ private:
         g.drawText ("PLAYER", headerTitle.withTrimmedLeft (58), Justification::centredLeft);
         // cards behind the roll and the keyboard
         if (themed ("Header")) drawCard (g, headerArea.toFloat().expanded (4, 3), th::panel, 8, "Header");
-        if (themed ("Toolbars")) drawCard (g, toolArea.toFloat().expanded (4, 3), th::panel, 8, "Toolbars");
-        if (detached == nullptr) paintRollCards (g);
+        if (themed ("Toolbars") && ! toolArea.isEmpty()) drawCard (g, toolArea.toFloat().expanded (4, 3), th::panel, 8, "Toolbars");
+        drawCard (g, transportArea.toFloat(), th::panel, 8, "Toolbars");
+        if (detached == nullptr && proc.uiEditOpen) paintRollCards (g);
     }
 
     // ------------------------------------------------------------ refresh
@@ -1380,8 +1634,10 @@ private:
         bpbBox.setSelectedItemIndex (p.beatsPerBar - 1, dontSendNotification);
         gridBox.setSelectedItemIndex (st.grid < 0 ? numNoteValues : st.grid, dontSendNotification);
         presetName.setButtonText (proc.presetName.isNotEmpty() ? proc.presetName : String ("Presets"));
-        undoBtn.setEnabled (proc.undo.canUndo()); redoBtn.setEnabled (proc.undo.canRedo());
-        zoomPct.setButtonText (String ((int) std::round (scale * 100)) + "%");
+        randBtn.setButtonText (st.probMode ? "Randomize chance" : "Randomize velocity");
+        editBtn.setToggleState (proc.uiEditOpen, dontSendNotification);
+
+        if (! zoomPct.isBeingEdited()) zoomPct.setText (String ((int) std::round (scale * 100)) + "%", dontSendNotification);
         keysBtn.setToggleState (st.song().settings.keyMode == 0, dontSendNotification);
         playModeBtn.setToggleState (st.song().settings.keyMode == 1, dontSendNotification);
         strip.ensureVisible (st.song().editKey); bigStrip.ensureVisible (st.song().editKey);
@@ -1418,6 +1674,7 @@ private:
     {
         const int sv = proc.stateVersion.load();
         if (sv != lastStateVersion) { lastStateVersion = sv; st.grid = jlimit (-1, numNoteValues - 1, st.grid); refreshAll(); }
+        if (st.song().editKey != lastEditKeySeen) { const bool first = lastEditKeySeen < 0; lastEditKeySeen = st.song().editKey; if (! first) setEditorOpen (true); }
         const int pk = proc.playingKey.load();
         const double pt = pk == st.song().editKey ? proc.playRelTicks.load() : -1.0;
         if (pk != lastPlayKey) { lastPlayKey = pk; strip.repaint(); bigStrip.repaint(); }
@@ -1428,7 +1685,9 @@ private:
         if (st.activeLoop >= 0 && st.loopForKey != st.song().editKey) { st.setActiveLoop (-1, false); ruler.repaint(); grid.repaint(); }   // another key: loops start over
         {   // Rec lamp: steady while recording, blinking during the count-in
             const int rs = proc.recStateUi.load();
-            const bool lit = rs == 2 || ((rs == 1 || rs == 3) && (Time::getMillisecondCounter() / 200) % 2 == 0);
+            const bool lit = rs != 0 || proc.songRecArmed.load();
+            const int want = (rs == 2 || proc.songRecArmed.load()) ? (int) 0xffff2a2a : (int) 0xffc8463f;          // count-in red, recording redder
+            if ((int) recBtn.getProperties()["lit"] != want) { recBtn.getProperties().set ("lit", want); recBtn.repaint(); }
             if (lit != recBtn.getToggleState()) recBtn.setToggleState (lit, dontSendNotification);
         }
         if (headers.pollHits()) headers.repaint();
@@ -1470,7 +1729,7 @@ private:
                 if (how == 3) t << "  (stops)";
             }
             else t << "  ->  plays drum: " << st.song().laneName (n);
-            keyInfo.setText (t, dontSendNotification);
+            if (n >= 0) keyInfo.setText (t, dontSendNotification);
         }
         {   // new drums arriving from the keyboard or pads get their own lane straight away
             bool added = false;
@@ -1539,9 +1798,82 @@ private:
 
     void setKeyMode (int m)
     {
-        st.applySong (m == 0 ? "Pattern mode" : "Play mode", [m] (Song& s) { s.settings.keyMode = m; });
-        if (m == 0) showToast ("Pattern mode: keys from C-1 up play patterns");
+        st.applySong (m == 0 ? "Pattern mode" : "Drum kit mode", [m] (Song& s) { s.settings.keyMode = m; });
+        showToast (m == 0 ? "Pattern mode: keys from C-1 up play patterns, empty keys play drums" : "Drum kit mode: every key plays a drum");
         refreshControls();
+    }
+    // the pattern editor opens by itself when you pick a pattern; Esc (with nothing selected) or Ctrl+E closes it for the big song view
+    void setEditorOpen (bool on)
+    {
+        if (proc.uiEditOpen == on) return;
+        proc.uiEditOpen = on; layout(); refreshAll();
+    }
+    int lastEditKeySeen = -1;
+    // listen to a groove file (on the hidden preview key)
+    void previewFile (const File& f)
+    {
+        auto pieces = splitToPatterns (readMidiFile (f), 0);
+        if (pieces.empty()) return;
+        auto p = pieces.front();
+        const int from = st.song().importMap;
+        if (from >= 0 && from != st.song().playMap) convertPattern (p, st.song().map (from), st.song().map (st.song().playMap));
+        st.song().keys[previewKey] = p; st.song().ensureLanesForPattern (p);
+        proc.publish(); proc.uiStop(); proc.uiTrigger (previewKey);
+    }
+    // a whole set onto the keys: grooves on white keys, fills on black keys, each part folder a colour group
+    void loadGrooveSet (const File& dir)
+    {
+        if (! dir.isDirectory()) return;
+        struct Part { String name; Array<File> files; };
+        std::vector<Part> parts;
+        auto byName = [] (const File& a, const File& b) { return a.getFileName().compareNatural (b.getFileName()) < 0; };
+        Array<File> own = dir.findChildFiles (File::findFiles, false, "*.mid;*.midi"); std::sort (own.begin(), own.end(), byName);
+        if (! own.isEmpty()) parts.push_back ({ {}, own });
+        Array<File> subs = dir.findChildFiles (File::findDirectories, false); std::sort (subs.begin(), subs.end(), byName);
+        for (auto& d : subs) {
+            Array<File> fs = d.findChildFiles (File::findFiles, true, "*.mid;*.midi"); std::sort (fs.begin(), fs.end(), byName);
+            if (! fs.isEmpty()) parts.push_back ({ d.getFileName(), fs });
+        }
+        if (parts.empty()) { showToast ("No MIDI grooves in " + dir.getFileName()); return; }
+        const int from = st.song().importMap, to = st.song().playMap;
+        int placed = 0;
+        st.applySong ("Load groove set", [&] (Song& s) {
+            for (int k = s.settings.zoneLow; k < 128; ++k) if (! s.settings.isStop (k)) s.keys[(size_t) k] = Pattern();
+            int cursor = s.settings.zoneLow;
+            for (auto& part : parts) {
+                int group = -1;
+                if (part.name.isNotEmpty()) {
+                    for (int i = 0; i < (int) s.groups.size(); ++i) if (s.groups[(size_t) i].name.equalsIgnoreCase (part.name)) group = i;
+                    if (group < 0) { static const uint32 cols[] = { 0xff5aa9ff, 0xffb8f28b, 0xff6ee7d8, 0xffffc15e, 0xffd3a6ff, 0xffff8a65, 0xfff06292 };
+                                     s.groups.push_back ({ part.name, cols[s.groups.size() % 7] }); group = (int) s.groups.size() - 1; }
+                }
+                int white = cursor, black = cursor, last = cursor - 1;
+                for (auto& f : part.files) {
+                    const bool fill = f.getFileName().containsIgnoreCase ("fill");
+                    int& k = fill ? black : white;
+                    while (k < 128 && (MidiMessage::isMidiNoteBlack (k) != fill || s.settings.isStop (k))) ++k;
+                    if (k >= 128) break;
+                    auto pieces = splitToPatterns (readMidiFile (f), 0);
+                    if (pieces.empty()) continue;
+                    auto p = pieces.front();
+                    if (from >= 0 && from != to) convertPattern (p, s.map (from), s.map (to));
+                    p.name = f.getFileNameWithoutExtension(); p.source = f.getFullPathName(); p.group = group;
+                    if (fill) p.type = PatternType::Fill;
+                    s.keys[(size_t) k] = p; s.ensureLanesForPattern (p);
+                    last = jmax (last, k); ++k; ++placed;
+                }
+                cursor = jmin (127, last + 1);
+                while (cursor < 127 && MidiMessage::isMidiNoteBlack (cursor)) ++cursor;      // the next part starts on a white key
+            }
+            s.editKey = s.settings.zoneLow;
+        });
+        refreshAll();
+        showToast ("Loaded the set " + dir.getFileName() + ": " + String (placed) + " grooves on the keys  (Ctrl+Z undoes it)");
+    }
+    void openSettings (int tab)
+    {
+        if (openPage != &setPage) togglePage (setPage, settingsBtn);
+        setPage.showTab (tab);
     }
     void setTool (Tool t) { st.tool = t; st.stamping = false; refreshControls(); for (int i = 0; i < toolBtns.size(); ++i) toolBtns[i]->setToggleState (i == (int) t, dontSendNotification); grid.repaint(); }
 
@@ -1776,7 +2108,7 @@ private:
         pat.addItem (44, "Export as MIDI file...");
         m.addSubMenu ("Pattern", pat);
         m.addItem (50, "Import MIDI files...");
-        m.showMenuAsync (PopupMenu::Options().withTargetComponent (&funcBtn), [this] (int r) { runFunction (r); });
+        m.showMenuAsync (PopupMenu::Options().withTargetComponent (menuAnchor != nullptr ? menuAnchor : (Component*) &funcBtn), [this] (int r) { runFunction (r); });
     }
     void runFunction (int r)
     {
@@ -1811,7 +2143,7 @@ private:
             case 31: st.apply ("Randomize timing", [] (Pattern& q) { std::mt19937 g ((uint32) Time::getMillisecondCounter()); randomizeTiming (q, 12, g); }); break;
             case 32: st.apply ("Randomize chance", [] (Pattern& q) { std::mt19937 g ((uint32) Time::getMillisecondCounter()); randomizeProbability (q, 40, 100, g); }); break;
             case 33: st.apply ("Thin out", [] (Pattern& q) { std::mt19937 g ((uint32) Time::getMillisecondCounter()); thinOut (q, 25, g); }); break;
-            case 34: CallOutBox::launchAsynchronously (std::make_unique<GhostPanel> (st), getLocalArea (&funcBtn, funcBtn.getLocalBounds()), this); break;
+            case 34: { Component* a = menuAnchor != nullptr ? menuAnchor : (Component*) &funcBtn; CallOutBox::launchAsynchronously (std::make_unique<GhostPanel> (st), getLocalArea (a, a->getLocalBounds()), this); }; break;
             case 40: patternClip = p; hasPatternClip = true; showToast ("Pattern copied"); break;
             case 41: { auto c = patternClip; st.apply ("Paste pattern", [c] (Pattern& q) { q = c; }); break; }
             case 42: st.apply ("Clear pattern", [] (Pattern& q) { q = Pattern(); }); break;
@@ -1893,6 +2225,12 @@ private:
         m.addItem (1, "Edit");
         if (! p.isEmpty()) m.addItem (50, String (p.fav ? "Remove the star" : "Favourite (star)") + (targets.size() > 1 ? "  (all picked keys)" : ""), true, p.fav);
         if (! p.notes.empty()) m.addItem (2, "Play");
+        if (p.hasOriginal()) {                                     // the version it started with is always kept
+            m.addSeparator();
+            m.addItem (60, "Play the original", true, p.showingOriginal);
+            m.addItem (61, "Play my edited version", p.edited != nullptr || ! p.showingOriginal, ! p.showingOriginal);
+            m.addSeparator();
+        }
         if (! p.isEmpty()) {
             PopupMenu type; for (int t = 0; t < 4; ++t) type.addItem (10 + t, typeName ((PatternType) t), true, (int) p.type == t);
             m.addSubMenu (targets.size() > 1 ? "Type  (all picked keys)" : "Type", type);
@@ -1928,6 +2266,8 @@ private:
         if (! p.isEmpty()) m.addItem (7, "Clear");
         m.showMenuAsync (PopupMenu::Options().withMousePosition(), [this, k, targets] (int r) {
             switch (r) {
+                case 60: st.applySong ("Play the original", [k] (Song& s2) { playOriginal (s2.keys[(size_t) k], true); }); break;
+                case 61: st.applySong ("Play my edited version", [k] (Song& s2) { playOriginal (s2.keys[(size_t) k], false); }); break;
                 case 50: {
                     const bool on = ! st.song().keys[(size_t) k].fav;
                     st.applySong (on ? "Star" : "Remove star", [targets, on] (Song& s2) { for (int t : targets) if (! s2.keys[(size_t) t].isEmpty()) s2.keys[(size_t) t].fav = on; });

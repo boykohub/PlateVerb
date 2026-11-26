@@ -123,8 +123,11 @@ public:
         g.setColour (Colours::black.withAlpha (0.35f)); g.fillRoundedRectangle (r.translated (0, 1.0f), cr);
         // a button can carry its own lamp colour (Play green, Stop and Rec red); otherwise amber
         const Colour lamp = b.getProperties().contains ("lit") ? Colour ((uint32) (int) b.getProperties()["lit"]) : th::amber;
-        Colour top = on ? lamp.brighter (0.15f) : th::raised.brighter (0.06f);
-        Colour bot = on ? lamp.darker (0.25f) : th::surface;
+        // a button can also carry a dim colour for when it's off (Rec and Play green, Stop blue)
+        const bool hasIdle = b.getProperties().contains ("idle");
+        const Colour idle = hasIdle ? Colour ((uint32) (int) b.getProperties()["idle"]) : th::raised;
+        Colour top = on ? lamp.brighter (0.15f) : hasIdle ? idle.brighter (0.12f) : th::raised.brighter (0.06f);
+        Colour bot = on ? lamp.darker (0.25f) : hasIdle ? idle.darker (0.35f) : th::surface;
         if (! b.isEnabled()) { top = top.withMultipliedAlpha (0.45f); bot = bot.withMultipliedAlpha (0.45f); }
         g.setGradientFill (ColourGradient (top, r.getTopLeft(), bot, r.getBottomLeft(), false));
         g.fillRoundedRectangle (r, cr);

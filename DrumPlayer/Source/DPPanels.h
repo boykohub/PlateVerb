@@ -39,7 +39,7 @@ public:
         g.setFont (font (13.0f, 3)); g.setColour (th::amber);
         g.drawText (title, 16, 8, getWidth() - 32, 22, Justification::centredLeft);
         g.setFont (font (10.5f, 1)); g.setColour (th::faint);
-        g.drawText ("press its button again to close", 16, 8, getWidth() - 32, 22, Justification::centredRight);
+        g.drawText ("press its button again to close", 16, 8, getWidth() - 56, 22, Justification::centredRight);
     }
     virtual void refresh() {}
     String title;
@@ -206,7 +206,8 @@ public:
         }
         if (e.mods.isShiftDown()) {                                 // Shift+click: pick every key from the last one to here
             const int from = st.keySel.empty() ? st.song().editKey : (k > *st.keySel.rbegin() ? *st.keySel.rbegin() : *st.keySel.begin());
-            for (int q = jmin (from, k); q <= jmax (from, k); ++q) if (isPatternKey (q)) st.keySel.insert (q);
+            const bool blackFirst = MidiMessage::isMidiNoteBlack (from);         // white keys or black keys, like the first one
+            for (int q = jmin (from, k); q <= jmax (from, k); ++q) if (isPatternKey (q) && MidiMessage::isMidiNoteBlack (q) == blackFirst) st.keySel.insert (q);
             repaint(); return;
         }
         if (! st.keySel.empty()) { st.keySel.clear(); repaint(); }
@@ -325,6 +326,12 @@ private:
         if (st.keySel.count (k)) {                                   // picked with Option/Alt+click
             g.setColour (th::green.withAlpha (0.3f)); g.fillRoundedRectangle (r.reduced (1.0f), 3);
             g.setColour (th::green); g.drawRoundedRectangle (r.reduced (1.0f), 3, 2.5f);
+        }
+        if (const auto& kp = st.song().keys[(size_t) k]; kp.hasOriginal()) {   // edited (amber corner) or playing the original (blue corner)
+            const float t = jlimit (6.0f, 11.0f, r.getWidth() * 0.32f);
+            Path tri; tri.addTriangle (r.getRight() - 1 - t, r.getY() + 1, r.getRight() - 1, r.getY() + 1, r.getRight() - 1, r.getY() + 1 + t);
+            g.setColour (kp.showingOriginal ? th::blue : th::amber); g.fillPath (tri);
+            g.setColour (Colours::black.withAlpha (0.5f)); g.strokePath (tri, PathStrokeType (0.8f));
         }
         if (st.song().keys[(size_t) k].fav) {                         // your star: at the bottom of the key, over the text
             const float sz = jlimit (8.0f, 16.0f, r.getWidth() * 0.42f);
@@ -510,7 +517,8 @@ public:
     void resized() override
     {
         RowPlacer rp (getLocalBounds().withTrimmedLeft (52), 5);
-        rp.place (sel, 120); rp.place (play); rp.place (loop); rp.place (keyBtn, 86); rp.place (dragOut);
+        play.setVisible (false);
+        rp.place (sel, 120); rp.place (loop); rp.place (keyBtn, 86); rp.place (dragOut);
         tilesX = rp.x + 6;
     }
     void mouseDown (const MouseEvent& e) override
@@ -660,7 +668,8 @@ public:
         setWantsKeyboardFocus (true);
         setTooltip ("Drag keys here to arrange a song. Drag chunks to move (Alt: by beat), their right edge to make them longer or shorter, "
                     "their left edge to trim. Ctrl-drag copies. D duplicates, Alt+X splits at the cursor, M mutes, Del deletes. Double-click: edit the pattern. "
-                    "Right-click + drag up/down: zoom. Double-click the bar numbers: play from there. Where chunks overlap, the one on top plays");
+                    "Right-click + drag up/down: zoom. The loop bar on the bar numbers: drag to make one, drag its ends to resize, click to turn it on, double-click to turn it off. "
+                    "Clicking a chunk loops it (Settings). Double-click the bar numbers outside the loop: play from there. Where chunks overlap, the one on top plays");
     }
     std::function<void()> onFocus;
     float pxPerBeat = 12.0f; int scrollX = 0; double cursorBeat = 0; int snap = 0;   // snap: an index into snapBeats(), the last = off
@@ -730,15 +739,26 @@ public:
             }
             // a sketch of the notes
             if (L > 0 && r.getHeight() > 20) {
-                g.setColour (th::ink.withAlpha (0.45f));
+                // one row per drum used (cymbals on top, kick at the bottom): a small drum grid that grows with the lane
+                std::vector<int> used; for (auto& n : p.notes) if (std::find (used.begin(), used.end(), n.note) == used.end()) used.push_back (n.note);
+                std::sort (used.begin(), used.end(), std::greater<int>());
+                const float top = r.getY() + 16, avail = r.getHeight() - 20;
+                const float rowH = used.empty() ? 0 : jmin (40.0f, avail / (float) used.size());
+                const float dotH = jlimit (2.0f, 14.0f, rowH * 0.5f), dotW = jlimit (2.0f, 5.0f, rowH * 0.3f);
+                if (rowH >= 6) {                                       // faint row lines when there's room
+                    g.setColour (th::ink.withAlpha (0.08f));
+                    for (size_t i = 0; i < used.size(); ++i) g.drawHorizontalLine ((int) (top + rowH * (float) i + rowH * 0.5f), r.getX() + 2, r.getRight() - 2);
+                }
                 for (auto& n : p.notes) {
                     if (n.tick >= p.lengthTicks()) continue;
                     const double nt = n.tick / (double) PPQ;
-                    const float y = r.getY() + 14 + (r.getHeight() - 17) * (1.0f - (float) jlimit (0, 127, n.note - 24) / 72.0f);
+                    const auto idx = (float) (std::find (used.begin(), used.end(), n.note) - used.begin());
+                    const float y = top + rowH * idx + (rowH - dotH) * 0.5f;
+                    g.setColour (th::ink.withAlpha (0.25f + 0.45f * (float) n.velocity / 127.0f));
                     for (double base = std::floor (c.offset / L) * L; base < c.offset + c.length; base += L) {
                         const double t = base + nt;
                         if (t < c.offset || t >= c.offset + c.length) continue;
-                        g.fillRect ((float) beatToX (c.start + t - c.offset), y, 2.0f, 2.0f);
+                        g.fillRect ((float) beatToX (c.start + t - c.offset), y, dotW, dotH);
                     }
                 }
             }
@@ -747,6 +767,17 @@ public:
             if (c.selected) { g.setColour (th::amber); g.drawRoundedRectangle (r.expanded (1), 4, 2.0f); }
         }
         if (dropBeat >= 0) { g.setColour (th::green); g.fillRect ((float) beatToX (dropBeat) - 1, (float) rulerH, 2.0f, (float) getHeight()); }
+        {   // the loop: a bar on the ruler, amber when on
+            const auto& sg = st.song();
+            if (sg.loopEnd > sg.loopStart) {
+                const float x0 = (float) beatToX (sg.loopStart), x1 = (float) beatToX (sg.loopEnd);
+                if (sg.loopOn) { g.setColour (th::amber.withAlpha (0.06f)); g.fillRect (x0, (float) rulerH, x1 - x0, (float) getHeight() - rulerH); }
+                g.setColour (sg.loopOn ? th::amber.withAlpha (0.85f) : Colours::white.withAlpha (0.18f));
+                g.fillRoundedRectangle (x0, 2.0f, jmax (3.0f, x1 - x0), (float) rulerH - 4, 3.0f);
+                g.setColour (sg.loopOn ? th::ink : th::dim); g.setFont (font (9.0f, 3));
+                if (x1 - x0 > 40) g.drawText (sg.loopOn ? "LOOP" : "loop off", Rectangle<float> (x0 + 4, 2.0f, x1 - x0 - 8, (float) rulerH - 4).toNearestInt(), Justification::centredLeft);
+            }
+        }
         // cursor and playhead
         g.setColour (th::blue.withAlpha (0.8f)); g.drawVerticalLine ((int) beatToX (cursorBeat), 0, (float) getHeight());
         const double ph = st.proc.songBeatUi.load();
@@ -762,6 +793,19 @@ public:
         auto& clips = st.song().clips;
         const int i = clipAt (e.position);
         if (e.mods.isPopupMenu()) { rzDown = true; rzZoom = false; rzY = e.position.y; rzX = e.position.x; rzPx = pxPerBeat; rzBeat = xToBeat (e.x); rzClip = i; return; }   // menu on release, zoom on drag
+        if (e.y < rulerH) {                                       // the loop bar: click turns it on, double-click off, drag its ends or move it
+            auto& sg = st.song();
+            const float x0 = (float) beatToX (sg.loopStart), x1 = (float) beatToX (sg.loopEnd);
+            loopOrigA = sg.loopStart; loopOrigB = sg.loopEnd; downPos = e.position;
+            if (sg.loopEnd > sg.loopStart && std::abs (e.position.x - x1) < 6) { mode = LoopR; return; }
+            if (sg.loopEnd > sg.loopStart && std::abs (e.position.x - x0) < 6) { mode = LoopL; return; }
+            if (sg.loopEnd > sg.loopStart && e.position.x > x0 && e.position.x < x1) {
+                if (e.getNumberOfClicks() > 1) { sg.loopOn = false; st.proc.publish(); repaint(); return; }
+                if (! sg.loopOn) { sg.loopOn = true; st.proc.publish(); }
+                mode = LoopMove; repaint(); return;
+            }
+            if (e.getNumberOfClicks() < 2) { mode = LoopNew; cursorBeat = snapBeat (xToBeat (e.x), e.mods.isAltDown()); repaint(); return; }
+        }
         cursorBeat = snapBeat (xToBeat (e.x), e.mods.isAltDown());          // the cursor goes where you click, on the lane's grid
         if (e.y < rulerH && e.getNumberOfClicks() > 1) {        // double-click in the ruler: play the song from there
             if (! st.song().songMode) st.applySong ("Song mode", [] (Song& s) { s.songMode = true; });
@@ -776,6 +820,10 @@ public:
         if (e.getNumberOfClicks() > 1) { st.song().editKey = c.key; if (st.changed) st.changed(); return; }
         if (e.mods.isShiftDown()) c.selected = ! c.selected;
         else if (! c.selected) { for (auto& x : clips) x.selected = false; c.selected = true; }
+        if (st.song().settings.loopSelected) {                      // the loop goes around what you clicked
+            double lo = 1e9, hi = 0; for (auto& x : clips) if (x.selected) { lo = jmin (lo, x.start); hi = jmax (hi, x.start + x.length); }
+            if (hi > lo) { auto& sg = st.song(); sg.loopStart = lo; sg.loopEnd = hi; sg.loopOn = true; }
+        }
         const auto r = clipRect (c);
         mode = e.position.x > r.getRight() - 6 ? ResizeR : (e.position.x < r.getX() + 6 ? ResizeL : Move);
         st.proc.beginEdit();
@@ -792,6 +840,18 @@ public:
             pxPerBeat = jlimit (2.0f, 240.0f, rzPx * std::exp (-dy * 0.012f));
             scrollX = jmax (0, (int) (rzBeat * pxPerBeat - rzX));
             repaint(); return;
+        }
+        if (mode == LoopL || mode == LoopR || mode == LoopMove || mode == LoopNew) {
+            auto& sg = st.song(); const bool alt = e.mods.isAltDown();
+            const double d = (e.position.x - downPos.x) / pxPerBeat;
+            if (mode == LoopR) sg.loopEnd = jmax (sg.loopStart + 0.25, snapBeat (loopOrigB + d, alt));
+            else if (mode == LoopL) sg.loopStart = jlimit (0.0, sg.loopEnd - 0.25, snapBeat (loopOrigA + d, alt));
+            else if (mode == LoopMove) { const double ns = snapBeat (loopOrigA + d, alt); sg.loopStart = ns; sg.loopEnd = ns + (loopOrigB - loopOrigA); }
+            else if (std::abs (e.position.x - downPos.x) > 4) {
+                const double a = snapBeat (xToBeat (downPos.x), alt), b = snapBeat (xToBeat (e.position.x), alt);
+                sg.loopStart = jmin (a, b); sg.loopEnd = jmax (jmax (a, b), sg.loopStart + 0.25); sg.loopOn = true;
+            }
+            st.proc.publish(); repaint(); return;
         }
         auto& clips = st.song().clips;
         if (mode == Band) {
@@ -859,6 +919,11 @@ public:
     }
     void mouseMove (const MouseEvent& e) override
     {
+        if (e.y < rulerH) {
+            const auto& sg = st.song();
+            const bool edge = std::abs (e.position.x - (float) beatToX (sg.loopEnd)) < 6 || std::abs (e.position.x - (float) beatToX (sg.loopStart)) < 6;
+            setMouseCursor (edge ? MouseCursor::LeftRightResizeCursor : MouseCursor::NormalCursor); return;
+        }
         const int i = clipAt (e.position);
         if (i < 0) { setMouseCursor (MouseCursor::NormalCursor); return; }
         const auto r = clipRect (st.song().clips[(size_t) i]);
@@ -885,7 +950,9 @@ public:
         if (d.description.toString().startsWith ("park:")) { if (onDropPattern) onDropPattern (d.description.toString(), at); repaint(); return; }
         const int k = d.description.toString().fromFirstOccurrenceOf ("key:", false, false).getIntValue();
         const double len = jmax (1.0, st.song().keys[(size_t) jlimit (0, 127, k)].lengthTicks() / (double) PPQ);
-        st.applySong ("Add chunk", [k, at, len] (Song& s) { for (auto& c : s.clips) c.selected = false; Clip c; c.start = at; c.length = len; c.key = k; c.selected = true; s.clips.push_back (c); });
+        st.applySong ("Add chunk", [k, at, len] (Song& s) {
+            if (s.clips.empty()) s.songMode = true;               // the first chunk: the lane plays with Studio One from now on (Settings)
+            for (auto& c : s.clips) c.selected = false; Clip c; c.start = at; c.length = len; c.key = k; c.selected = true; s.clips.push_back (c); });
         cursorBeat = at + len;
     }
 
@@ -953,7 +1020,8 @@ public:
     bool anySelected() const { for (auto& c : st.song().clips) if (c.selected) return true; return false; }
 
 private:
-    enum Mode { None, Move, ResizeL, ResizeR, Band };
+    enum Mode { None, Move, ResizeL, ResizeR, Band, LoopL, LoopR, LoopMove, LoopNew };
+    double loopOrigA = 0, loopOrigB = 4;
     EditState& st;
     Mode mode = None; Point<float> downPos; std::vector<Clip> orig, clipboard; int anchor = -1; bool copying = false;
     Rectangle<float> band; double dropBeat = -1;
@@ -1040,14 +1108,13 @@ public:
     }
     void resized() override
     {
+        // the transport at the bottom plays and records the song; here: the lane's grid and the drag to Studio One
+        for (auto* b : { &onBtn, &play, &stop, &rec }) b->setVisible (false);
         auto a = getLocalBounds().reduced (6, 3);
-        auto r1 = a.removeFromTop (btnH); r1.removeFromLeft (38);
-        onBtn.setBounds (r1.removeFromLeft (onBtn.getWidth())); r1.removeFromLeft (4); dragOut.setBounds (r1.removeFromLeft (jmin (r1.getWidth(), dragOut.getWidth())));
+        auto r1 = a.removeFromTop (btnH); r1.removeFromLeft (44);
+        dragOut.setBounds (r1.removeFromLeft (jmin (r1.getWidth(), dragOut.getWidth())));
         a.removeFromTop (4);
-        auto r2 = a.removeFromTop (btnH);
-        play.setBounds (r2.removeFromLeft (play.getWidth())); r2.removeFromLeft (3); stop.setBounds (r2.removeFromLeft (stop.getWidth())); r2.removeFromLeft (3);
-        rec.setBounds (r2.removeFromLeft (rec.getWidth())); r2.removeFromLeft (3);
-        snap.setBounds (r2);
+        snap.setBounds (a.removeFromTop (btnH).removeFromLeft (jmin (a.getWidth(), 120)));
     }
 private:
     struct DragSong : public TextButton
@@ -1942,7 +2009,9 @@ public:
         setupButton (*this, hostStop, "Stop when Studio One stops", true);
         setupButton (*this, thru, "Pass other notes through", true, "Notes outside the pattern keys go straight to the drum plugin, so you can play along");
         setupButton (*this, fills, "Dropped fills to black keys", true, "When several files are dropped, files with 'fill' in the name go to black keys");
-        setupButton (*this, remember, "Open the way I left it", true, "New Drum Player instances start with your last patterns and settings");
+        setupButton (*this, remember, "Open the way I left it", true, "On: new Drum Player instances start with your latest patterns, even ones you didn't save. Off (best): only what's saved in the song");
+        setupButton (*this, songWithHost, "Song lane plays with Studio One", true, "On: when Studio One plays, the song lane plays (a key you press takes over). Off: only your keys play");
+        setupButton (*this, loopSel, "Clicking a chunk loops it", true, "Click a chunk in the song lane and the loop goes around it, so Play repeats it");
         setupLabel (*this, help, "In Studio One: put Drum Player on an instrument track, then on the drum plugin's track choose Drum Player as the input.", 10.5f, th::faint);
         help.setJustificationType (Justification::topLeft);
         setupButton (*this, tabGeneral, "General", true); setupButton (*this, tabMap, "Drum map", true);
@@ -1967,12 +2036,13 @@ public:
                 o.mirrorOctaves = mirror.getToggleState();
                 static const int sb[] = { 0, 1, 2, 4, 8, 16 }; o.splitBars = sb[jlimit (0, 5, split.getSelectedItemIndex())];
                 o.stopWithHost = hostStop.getToggleState(); o.passThrough = thru.getToggleState();
-                o.fillsToBlack = fills.getToggleState(); o.rememberLast = remember.getToggleState();
+                o.fillsToBlack = fills.getToggleState(); o.rememberLast = remember.getToggleState(); o.loopSelected = loopSel.getToggleState();
+                st.song().songMode = songWithHost.getToggleState();
             });
         };
         for (auto* c : { &out, &zLo, &zHi, &start, &mode, &stopKey, &stopKey2, &split, &trigCh, &playCh }) c->onChange = commit;
         startTimerHz (10);
-        for (auto* b : { &hostStop, &thru, &fills, &remember, &mirror }) b->onClick = commit;
+        for (auto* b : { &hostStop, &thru, &fills, &remember, &mirror, &songWithHost, &loopSel }) b->onClick = commit;
     }
     LookEditor look;
     MapPage map; InnerPage inner;
@@ -1992,7 +2062,7 @@ public:
         if (t == 1) map.refresh();
         if (t == 2) inner.refresh();
         static const char* names[] = { "SETTINGS", "SETTINGS  ·  DRUM MAP", "SETTINGS  ·  INNER WORKINGS", "SETTINGS  ·  LOOK" };
-        title = names[jlimit (0, 3, t)];
+        title = String::fromUTF8 (names[jlimit (0, 3, t)]);
         repaint();
     }
     int tab = 0;
@@ -2014,6 +2084,7 @@ public:
         const int sb = o.splitBars; split.setSelectedItemIndex (sb <= 0 ? 0 : sb == 1 ? 1 : sb == 2 ? 2 : sb <= 4 ? 3 : sb <= 8 ? 4 : 5, dontSendNotification);
         hostStop.setToggleState (o.stopWithHost, dontSendNotification); thru.setToggleState (o.passThrough, dontSendNotification);
         fills.setToggleState (o.fillsToBlack, dontSendNotification); remember.setToggleState (o.rememberLast, dontSendNotification);
+        loopSel.setToggleState (o.loopSelected, dontSendNotification); songWithHost.setToggleState (st.song().songMode, dontSendNotification);
         loading = false;
     }
     void resized() override
@@ -2039,7 +2110,7 @@ public:
         split.setBounds (row (a, lSplit, lw).removeFromLeft (120));
         a.removeFromTop (4);
         mirror.setVisible (false);
-        for (auto* b : { &hostStop, &thru, &fills, &remember }) { b->setBounds (a.removeFromTop (26).removeFromLeft (b->getWidth()).reduced (0, 2)); a.removeFromTop (4); }
+        for (auto* b : { &songWithHost, &hostStop, &loopSel, &thru, &fills, &remember }) { b->setBounds (a.removeFromTop (26).removeFromLeft (b->getWidth()).reduced (0, 2)); a.removeFromTop (4); }
         help.setBounds (a.removeFromTop (40));
     }
 private:
@@ -2060,7 +2131,7 @@ private:
         }
         if (! st.proc.uiLearnStopKey && learnPc.getToggleState()) refresh();     // learnt on the computer keyboard
     }
-    TextButton hostStop, thru, fills, remember, mirror, tabGeneral, tabLook, tabMap, tabInner;
+    TextButton hostStop, thru, fills, remember, mirror, songWithHost, loopSel, tabGeneral, tabLook, tabMap, tabInner;
 };
 
 // ---------------------------------------------------------------- preset browser
@@ -2252,6 +2323,31 @@ public:
         startBox.setSelectedItemIndex (o.recWaitForKey ? 1 : 0, dontSendNotification); layersBox.setSelectedItemIndex (o.recLayers ? 1 : 0, dontSendNotification);
         targetBox.setSelectedItemIndex (o.recTarget, dontSendNotification);
         loading = false;
+    }
+    // every recording option as a menu (right-click Rec)
+    void showMenu (Component* target)
+    {
+        refresh();
+        PopupMenu m; m.addSectionHeader ("RECORDING");
+        struct Item { const char* title; ComboBox* box; };
+        const Item items[] = { { "Count-in", &count }, { "Click", &metro }, { "Mode", &mode }, { "Start", &startBox }, { "Record into", &targetBox },
+                               { "Layers", &layersBox }, { "Stop recording after", &stopAfter }, { "Quantize while recording", &recQ }, { "Velocity", &vel } };
+        int base = 1000;
+        for (auto& it : items) {
+            PopupMenu sub;
+            for (int i = 0; i < it.box->getNumItems(); ++i) sub.addItem (base + i, it.box->getItemText (i), true, it.box->getSelectedItemIndex() == i);
+            m.addSubMenu (String (it.title) + ":  " + it.box->getText(), sub);
+            base += 100;
+        }
+        PopupMenu lv; for (int v : { 25, 50, 75, 100 }) lv.addItem (5000 + v, String (v) + " %", true, roundToInt (level.getValue()) == v);
+        m.addSubMenu ("Click volume:  " + String (roundToInt (level.getValue())) + " %", lv);
+        std::vector<ComboBox*> boxes; for (auto& it : items) boxes.push_back (it.box);
+        m.showMenuAsync (PopupMenu::Options().withTargetComponent (target), [this, boxes] (int r) {
+            if (r >= 5000) { level.setValue (r - 5000, sendNotificationSync); return; }
+            if (r < 1000) return;
+            const int which = (r - 1000) / 100, idx = (r - 1000) % 100;
+            if (which < (int) boxes.size()) boxes[(size_t) which]->setSelectedItemIndex (idx, sendNotificationSync);
+        });
     }
     void resized() override
     {
