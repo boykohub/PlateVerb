@@ -42,6 +42,7 @@ struct EditState
     std::function<void()> changed;                    // repaint + refresh controls
     std::function<void (Tool)> chooseTool;            // so menus can switch the toolbar's tool
     std::function<void()> openCurve;                  // the velocity curve panel
+    std::function<void (int)> quantHum;               // 0 quantize setup, 1 quantize, 2 humanize setup, 3 humanize
     // the last note action from a menu: repeat it (Ctrl+R) or click notes to stamp it on them
     std::function<void (Pattern&)> lastAction; String lastName; bool stamping = false;
     void remember (const String& name, std::function<void (Pattern&)> f) { lastName = name; lastAction = std::move (f); }
@@ -994,6 +995,16 @@ private:
         auto* hitNote = hit (e.position);
         if (hitNote != nullptr) { clickedVel = hitNote->velocity; if (! hitNote->selected) { selectAll (p, false); hitNote->selected = true; st.publish(); } }
         PopupMenu m;
+        // quantize and humanize first: set them up, or just do them the way they're set up
+        auto qh = [&m, this] (bool notes) {
+            const String what = notes ? (anySelected (st.pat()) ? " the selected notes" : " the notes") : " the notes";
+            m.addItem (960, "Quantize setup...");
+            m.addItem (961, "Quantize" + what + "  (Q)");
+            m.addItem (962, "Humanize setup...");
+            m.addItem (963, "Humanize" + what);
+            m.addSeparator();
+        };
+        qh (hitNote != nullptr);
         if (hitNote != nullptr) {
             // on a note: only what can be done to notes
             m.addItem (1, "Delete"); m.addItem (2, "Duplicate  (D)"); m.addItem (3, "Copy"); m.addItem (6, hitNote->probability == 0 ? "Unmute" : "Mute  (M)");
@@ -1011,8 +1022,7 @@ private:
             PopupMenu len; for (int vi : { 0, 1, 3, 5, 7, 9 }) len.addItem (700 + vi, noteValues[vi].name);
             m.addSubMenu ("Note length", len);
             PopupMenu tm;
-            tm.addItem (20, String ("Quantize to ") + (st.grid >= 0 ? noteValues[st.grid].name : "1/16"));
-            tm.addItem (21, "Humanize"); tm.addItem (23, "Nudge left"); tm.addItem (24, "Nudge right");
+            tm.addItem (23, "Nudge left"); tm.addItem (24, "Nudge right");
             if (anySelectedCount (p) > 1) { tm.addItem (22, "Reverse"); tm.addItem (25, "Double speed"); tm.addItem (26, "Half speed"); }
             m.addSubMenu ("Timing", tm);
             PopupMenu drums; for (auto& l : st.song().lanes) if (l.note != hitNote->note) drums.addItem (1000 + l.note, l.name + "  (" + String (l.note) + ")");
@@ -1052,6 +1062,7 @@ private:
             auto act = [this] (const String& name, std::function<void (Pattern&)> f) { st.remember (name, f); st.apply (name, f); };
             if (r >= 900 && r < 907) { st.stamping = false; if (st.chooseTool) st.chooseTool ((Tool) (r - 900)); return; }
             if (r == 950) { st.repeatLast(); return; }
+            if (r >= 960 && r <= 963) { if (st.quantHum) st.quantHum (r - 960); return; }
             if (r == 951) { st.stamping = ! st.stamping; if (st.toast) st.toast (st.stamping ? "Click notes to apply \"" + st.lastName + "\". Esc ends." : "Stopped"); return; }
             switch (r) {
                 case 1: act ("Delete", [] (Pattern& q) { deleteSelected (q); }); break;

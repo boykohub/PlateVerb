@@ -130,7 +130,7 @@ public:
         auto* ui = x->createNewChildElement ("UI");
         String pn; { const ScopedLock l (uiLock); pn = presetName; }
         ui->setAttribute ("scale", uiScale); ui->setAttribute ("preset", pn); ui->setAttribute ("grid", uiGrid);
-        ui->setAttribute ("zoomX", uiZoomX); ui->setAttribute ("strip", uiStripTools); ui->setAttribute ("shelf", uiShelfTools); ui->setAttribute ("headW", uiHeadW); ui->setAttribute ("editOpen", uiEditOpen);
+        ui->setAttribute ("zoomX", uiZoomX); ui->setAttribute ("strip", uiStripTools); ui->setAttribute ("shelf", uiShelfTools); ui->setAttribute ("qscope", uiQuantScope); ui->setAttribute ("headW", uiHeadW); ui->setAttribute ("editOpen", uiEditOpen);
         ui->setAttribute ("stopkey", uiStopKey); ui->setAttribute ("project", uiProjectPath);
         return x;
     }
@@ -141,7 +141,7 @@ public:
             { const ScopedLock l (uiLock); presetName = ui->getStringAttribute ("preset"); }
             uiGrid = jlimit (0, numNoteValues - 1, ui->getIntAttribute ("grid", 3));
             uiZoomX = (float) jlimit (0.25, 8.0, ui->getDoubleAttribute ("zoomX", 1.0));
-            uiStripTools = ui->getStringAttribute ("strip", uiStripTools); uiShelfTools = ui->getStringAttribute ("shelf", uiShelfTools); uiHeadW = jlimit (70, 360, ui->getIntAttribute ("headW", 200)); uiEditOpen = ui->getBoolAttribute ("editOpen", true);
+            uiStripTools = ui->getStringAttribute ("strip", uiStripTools); uiShelfTools = ui->getStringAttribute ("shelf", uiShelfTools); uiQuantScope = jlimit (0, 2, ui->getIntAttribute ("qscope", 0)); uiHeadW = jlimit (70, 360, ui->getIntAttribute ("headW", 200)); uiEditOpen = ui->getBoolAttribute ("editOpen", true);
             uiStopKey = ui->getIntAttribute ("stopkey", KeyPress::spaceKey);
             uiProjectPath = ui->getStringAttribute ("project");
         }
@@ -185,6 +185,7 @@ public:
     int uiStopKey = KeyPress::spaceKey;          // the computer key that stops (0 = none)
     bool uiLearnStopKey = false;                 // the next key you press becomes the stop key
     String uiStripTools = "fit,grid,tools,play,stop,rec,quantize";
+    int uiQuantScope = 0;                                // the Quantize button: 0 this pattern, 1 the selected keys, 2 all
     String uiShelfTools = "humanize,functions";          // the buttons you put next to the pattern's length   // the Option-key strip: what you put on it
     std::atomic<int> stateVersion { 0 };
 
@@ -210,7 +211,7 @@ public:
     // replace the whole song as one undo step
     void commit (Song s, const String& name)
     {
-        keepOriginals (edit, s);
+        keepOriginals (edit, s); uniqueClipIds (s); followLoop (s);
         undo.beginNewTransaction (name);
         undo.perform (new SongAction (*this, edit, std::move (s)));
         ++editSerial;
@@ -222,7 +223,7 @@ public:
     {
         if (editStart == nullptr) return;
         auto before = std::move (*editStart); editStart.reset();
-        keepOriginals (before, edit);
+        keepOriginals (before, edit); uniqueClipIds (edit); followLoop (edit);
         undo.beginNewTransaction (name);
         undo.perform (new SongAction (*this, std::move (before), edit));
         ++editSerial;
@@ -261,6 +262,7 @@ public:
     std::atomic<int> playingKey { -1 }, queuedKey { -2 }, chainPlaying { -1 }, chainStep { -1 };
     std::atomic<double> playRelTicks { 0.0 };
     std::atomic<double> lastBpm { 120.0 }, hostBpm { 120.0 };
+    std::atomic<bool> hostLooping { false }; std::atomic<double> hostLoopA { 0.0 }, hostLoopB { 0.0 };   // Studio One's loop
     std::atomic<bool> hostPlaying { false };
     std::atomic<uint32> activity { 0 };          // bit per lane note hit recently, for the lane lights (low 0..63 notes folded)
     std::atomic<int> lastHitNote { -1 }, lastHitSerial { 0 };
@@ -435,6 +437,8 @@ private:
             if (auto pos = ph->getPosition()) {
                 if (auto b = pos->getBpm()) bpm = jlimit (20.0, 400.0, *b);
                 playing = pos->getIsPlaying();
+                hostLooping = pos->getIsLooping();
+                if (auto lp = pos->getLoopPoints()) { hostLoopA = lp->ppqStart; hostLoopB = lp->ppqEnd; }
                 if (playing) if (auto pp = pos->getPpqPosition()) ppq = *pp;
             }
         hostBpm = bpm;
@@ -715,8 +719,6 @@ private:
         const auto& st = S->settings;
         if (m.isNoteOnOrOff()) {
             const int nn = m.getNoteNumber();
-            for (int c = 0; c < (int) S->chains.size(); ++c)
-                if (S->chains[(size_t) c].triggerNote == nn) { if (m.isNoteOn()) { lastTrigger = 5; lastInNote = nn; lastInKey = -1; lastInSerial++; startChain (c, ppq); } return; }
             int key = st.keyForNote (nn, m.getChannel());
             // Pattern mode: an empty key plays its drum, so you can play hits along with the grooves
             if (key >= 0 && ! keyHasPattern (key) && key != cur.key && ! (queued.active && key == queued.key)) key = -1;

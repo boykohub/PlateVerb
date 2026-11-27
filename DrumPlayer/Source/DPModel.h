@@ -162,7 +162,8 @@ inline std::vector<Group> defaultGroups()
              { "Bridge", 0xffc9a7ff }, { "Fills", 0xffffa36e }, { "Breakdown", 0xffe3e37a }, { "Outro", 0xffff8fa3 } };
 }
 // a chunk on the song lane: plays a key's pattern from `start` for `length` beats, `offset` beats into it (it repeats if longer)
-struct Clip { double start = 0, length = 4, offset = 0; int key = 12; bool muted = false, selected = false; };
+inline uint32 newClipId() { static std::atomic<uint32> c { (uint32) Random::getSystemRandom().nextInt() }; return ++c; }
+struct Clip { double start = 0, length = 4, offset = 0; int key = 12; bool muted = false, selected = false; uint32 id = newClipId(); };
 struct Chain { String name; std::vector<ChainStep> steps; int triggerNote = -1; bool loop = true; };
 
 enum class StartQuant { Immediate = 0, Beat, Bar, PatternEnd, InTime };   // InTime: switch at once, keeping the bar position
@@ -237,6 +238,7 @@ struct Song
     std::vector<Group> groups = defaultGroups();
     bool songMode = false;                         // the song lane plays (with Studio One's transport, or its own Play)
     bool loopOn = false; double loopStart = 0, loopEnd = 4;   // the song lane's loop (its own playback; Studio One loops with its own)
+    bool loopFollows = true; uint32 loopClip = 0;             // the loop sits on this chunk and moves with it (on or off)
     std::vector<Lane> lanes;
     std::vector<Chain> chains { Chain { "Chain 1", {}, -1, true } };      // as many as you like
     std::array<Pattern, 8> park;
@@ -336,6 +338,21 @@ inline void computeAutoSwing (Pattern& p)
 
 // ------------------------------------------------------------------ quantize
 enum class QuantMode { Normal = 0, Catch, Dual };
+// the kinds of notes the quantizer tells apart (by the finest grid a note sits on)
+static constexpr int numQClasses = 8;
+inline const char* qClassName (int c) { static const char* n[] = { "1/4", "1/8", "1/8 triplets", "1/16", "1/16 triplets", "1/32", "1/32 triplets", "1/64 and faster" }; return n[jlimit (0, 7, c)]; }
+inline int qClassTicks (int c) { static const int t[] = { 960, 480, 320, 240, 160, 120, 80, 60 }; return t[jlimit (0, 7, c)]; }
+inline int qClassOf (int tick)
+{
+    for (int c = 0; c < numQClasses - 1; ++c) {
+        const int g = qClassTicks (c);
+        const int d = std::abs (tick - (int) std::round ((double) tick / g) * g);
+        if (d <= jmax (6, (int) (g * 0.12))) return c;
+    }
+    return numQClasses - 1;
+}
+struct QuantRule { int action = 0; double strength = 100.0; };   // action: 0 to the grid, 1 to its own value, 2 leave it
+
 struct QuantOptions
 {
     int valueIndex = 3;            // grid
@@ -344,7 +361,10 @@ struct QuantOptions
     double strength = 100.0;
     bool keepSwing = false;
     double swingPct = 50.0;
+    int swingValue = -1;           // keep the swing on this note value (-1: the quantize grid)
     bool selectedOnly = true;
+    bool useRules = false;         // a rule for each kind of note
+    std::array<QuantRule, numQClasses> rules {};
 };
 
 inline void quantize (Pattern& p, const QuantOptions& o)
@@ -353,14 +373,23 @@ inline void quantize (Pattern& p, const QuantOptions& o)
     const int g = nv.ticks;
     const int tg = nv.triplet ? g * 3 / 2 : g * 2 / 3;        // the partner grid for Dual
     bool anySel = false; for (auto& n : p.notes) anySel |= n.selected;
+    const int swingGrid = o.swingValue >= 0 ? noteValues[jlimit (0, numNoteValues - 1, o.swingValue)].ticks : g;
     auto target = [&] (int t, int grid, bool swingIt) {
         const double k = std::round ((double) t / grid);
         double pos = k * grid;
-        if (swingIt && o.keepSwing) pos += swingOffset ((int) pos, grid, o.swingPct);
+        if (swingIt && o.keepSwing) pos += swingOffset ((int) pos, swingGrid, o.swingPct);
         return pos;
     };
     for (auto& n : p.notes) {
         if (o.selectedOnly && anySel && ! n.selected) continue;
+        if (o.useRules) {                                          // each kind of note has its own rule
+            const int cls = qClassOf (n.tick - (o.keepSwing ? (int) swingOffset (n.tick, swingGrid, o.swingPct) : 0));
+            const auto& r = o.rules[(size_t) cls];
+            if (r.action == 2) continue;
+            const double to = r.action == 1 ? target (n.tick, qClassTicks (cls), cls != 2 && cls != 4 && cls != 6) : target (n.tick, g, ! nv.triplet);
+            n.tick = jlimit (0, p.lengthTicks() * 4 - 1, (int) std::round (n.tick + (to - n.tick) * r.strength / 100.0));
+            continue;
+        }
         double best = target (n.tick, g, ! nv.triplet);
         if (o.mode == QuantMode::Dual) {
             const double alt = target (n.tick, tg, nv.triplet);
@@ -735,6 +764,17 @@ inline void keepOriginals (const Song& before, Song& after)
         if (a.showingOriginal) { a.showingOriginal = false; a.edited.reset(); }  // editing the original makes a new edit; the original stays
     }
 }
+// the loop sits on its chunk: when the chunk moves or changes length, the loop goes with it
+inline void uniqueClipIds (Song& s)
+{
+    std::set<uint32> seen;
+    for (auto& c : s.clips) { if (seen.count (c.id) || c.id == 0) c.id = newClipId(); seen.insert (c.id); }
+}
+inline void followLoop (Song& s)
+{
+    if (! s.loopFollows || s.loopClip == 0) return;
+    for (auto& c : s.clips) if (c.id == s.loopClip) { s.loopStart = c.start; s.loopEnd = c.start + c.length; return; }
+}
 // switch a key between the original and your edit (neither is ever lost)
 inline void playOriginal (Pattern& p, bool orig)
 {
@@ -850,10 +890,11 @@ inline std::unique_ptr<XmlElement> songToXml (const Song& s)
         ex->setAttribute ("feel", e.feel); ex->setAttribute ("tune", e.tune); ex->setAttribute ("addbpm", e.addBpm); ex->setAttribute ("naming", e.naming); }
     auto* sg = x->createNewChildElement ("SongLane");
     sg->setAttribute ("on", s.songMode); sg->setAttribute ("loopOn", s.loopOn); sg->setAttribute ("loopA", s.loopStart); sg->setAttribute ("loopB", s.loopEnd);
+    sg->setAttribute ("loopFollow", s.loopFollows); sg->setAttribute ("loopClip", (int) s.loopClip);
     for (auto& c : s.clips) {
         auto* e = sg->createNewChildElement ("Clip");
         e->setAttribute ("start", c.start); e->setAttribute ("len", c.length); e->setAttribute ("off", c.offset);
-        e->setAttribute ("key", c.key); e->setAttribute ("muted", c.muted);
+        e->setAttribute ("key", c.key); e->setAttribute ("muted", c.muted); e->setAttribute ("id", (int) c.id);
     }
     auto* st = x->createNewChildElement ("Settings");
     const auto& o = s.settings;
@@ -933,9 +974,10 @@ inline Song songFromXml (const XmlElement& x)
     if (auto* sg = x.getChildByName ("SongLane")) {
         s.songMode = sg->getBoolAttribute ("on", false);
         s.loopOn = sg->getBoolAttribute ("loopOn", false); s.loopStart = jmax (0.0, sg->getDoubleAttribute ("loopA", 0)); s.loopEnd = jmax (s.loopStart + 0.25, sg->getDoubleAttribute ("loopB", 4));
+        s.loopFollows = sg->getBoolAttribute ("loopFollow", true); s.loopClip = (uint32) sg->getIntAttribute ("loopClip", 0);
         for (auto* e : sg->getChildIterator()) {
             Clip c; c.start = jmax (0.0, e->getDoubleAttribute ("start")); c.length = jmax (0.25, e->getDoubleAttribute ("len", 4));
-            c.offset = jmax (0.0, e->getDoubleAttribute ("off")); c.key = jlimit (0, 127, e->getIntAttribute ("key", 12)); c.muted = e->getBoolAttribute ("muted");
+            c.offset = jmax (0.0, e->getDoubleAttribute ("off")); c.key = jlimit (0, 127, e->getIntAttribute ("key", 12)); c.muted = e->getBoolAttribute ("muted"); if (e->hasAttribute ("id")) c.id = (uint32) e->getIntAttribute ("id");
             s.clips.push_back (c);
         }
     }

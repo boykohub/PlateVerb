@@ -63,6 +63,102 @@ struct RightClickButton : public TextButton
     void mouseUp (const MouseEvent& e) override { if (e.mods.isPopupMenu()) return; TextButton::mouseUp (e); }
 };
 
+// a little triangle in the bottom-left corner: this control has a right-click menu
+inline void drawMenuCorner (Graphics& g, Rectangle<float> r, Colour c)
+{
+    const float t = jlimit (4.0f, 6.0f, r.getHeight() * 0.22f);
+    Path p; p.addTriangle (r.getX() + 2, r.getBottom() - 2 - t, r.getX() + 2, r.getBottom() - 2, r.getX() + 2 + t, r.getBottom() - 2);
+    g.setColour (c); g.fillPath (p);
+}
+
+// a transport button: a symbol instead of a word (the word is its tooltip and its name in the Look editor)
+struct TransportButton : public RightClickButton
+{
+    enum Icon { Start, Rewind, Forward, Stop, Play, Rec, Loop, Click };
+    Icon icon = Play;
+    void paintButton (Graphics& g, bool over, bool down) override
+    {
+        getLookAndFeel().drawButtonBackground (g, *this, {}, over, down);
+        auto r = getLocalBounds().toFloat();
+        const auto c = r.getCentre(); const float h = jmin (r.getHeight() * 0.42f, 12.0f);
+        const bool lit = getToggleState();
+        g.setColour (lit ? th::ink : th::text.withAlpha (isEnabled() ? 1.0f : 0.4f));
+        Path p;
+        auto tri = [&p] (float x, float y, float w, float hh, bool right) {
+            if (right) p.addTriangle (x, y - hh / 2, x, y + hh / 2, x + w, y); else p.addTriangle (x + w, y - hh / 2, x + w, y + hh / 2, x, y); };
+        switch (icon) {
+            case Start:   p.addRectangle (c.x - h * 0.7f, c.y - h / 2, 2.0f, h); tri (c.x - h * 0.45f, c.y, h * 0.9f, h, false); break;
+            case Rewind:  tri (c.x - h * 0.9f, c.y, h * 0.8f, h * 0.9f, false); tri (c.x - h * 0.1f, c.y, h * 0.8f, h * 0.9f, false); break;
+            case Forward: tri (c.x - h * 0.7f, c.y, h * 0.8f, h * 0.9f, true); tri (c.x + h * 0.1f, c.y, h * 0.8f, h * 0.9f, true); break;
+            case Stop:    p.addRoundedRectangle (c.x - h * 0.45f, c.y - h * 0.45f, h * 0.9f, h * 0.9f, 1.5f); break;
+            case Play:    tri (c.x - h * 0.4f, c.y, h * 0.95f, h * 1.05f, true); break;
+            case Rec:     p.addEllipse (c.x - h * 0.48f, c.y - h * 0.48f, h * 0.96f, h * 0.96f); break;
+            case Loop: {
+                Path a; a.addCentredArc (c.x, c.y, h * 0.62f, h * 0.42f, 0, 0.5f, MathConstants<float>::twoPi - 0.4f, true);
+                g.strokePath (a, PathStrokeType (1.7f));
+                tri (c.x + h * 0.08f, c.y - h * 0.42f, h * 0.38f, h * 0.42f, false);
+                break; }
+            case Click: {
+                p.startNewSubPath (c.x - h * 0.45f, c.y + h * 0.5f); p.lineTo (c.x - h * 0.18f, c.y - h * 0.55f); p.lineTo (c.x + h * 0.18f, c.y - h * 0.55f);
+                p.lineTo (c.x + h * 0.45f, c.y + h * 0.5f); p.closeSubPath();
+                g.fillPath (p); p.clear();
+                g.setColour (lit ? th::text : th::ink.withAlpha (0.8f)); g.drawLine (c.x, c.y + h * 0.35f, c.x + h * 0.38f, c.y - h * 0.4f, 1.4f);
+                break; }
+        }
+        g.fillPath (p);
+    }
+};
+
+// where you are: bars.beats.ticks and minutes:seconds (right-click: what to show)
+struct PositionDisplay : public Component, public SettableTooltipClient
+{
+    std::function<double()> beat; std::function<double()> bpm; std::function<int()> beatsPerBar; std::function<void()> onRight;
+    int show = 2;     // 0 bars, 1 time, 2 both
+    void paint (Graphics& g) override
+    {
+        auto r = getLocalBounds().toFloat().reduced (0.5f);
+        g.setColour (Colours::black.withAlpha (0.35f)); g.fillRoundedRectangle (r, 6);
+        g.setColour (Colours::white.withAlpha (0.07f)); g.drawRoundedRectangle (r, 6, 0.8f);
+        const double b = beat ? jmax (0.0, beat()) : 0.0; const int bpb = beatsPerBar ? jmax (1, beatsPerBar()) : 4;
+        const int bar = (int) (b / bpb) + 1, bt = (int) std::fmod (b, (double) bpb) + 1, tk = (int) ((b - std::floor (b)) * 960.0);
+        const double secs = b * 60.0 / jmax (20.0, bpm ? bpm() : 120.0);
+        const String bars = String (bar) + "." + String (bt) + "." + String (tk).paddedLeft ('0', 3);
+        const String tm = String ((int) secs / 60) + ":" + String (std::fmod (secs, 60.0), 1).paddedLeft ('0', 4);
+        auto a = getLocalBounds().reduced (8, 2);
+        if (show == 2) {
+            g.setColour (th::text); g.setFont (font (15.0f, 3)); g.drawText (bars, a.removeFromLeft (a.getWidth() * 58 / 100), Justification::centredLeft);
+            g.setColour (th::dim); g.setFont (font (12.0f, 2)); g.drawText (tm, a, Justification::centredRight);
+        } else { g.setColour (th::text); g.setFont (font (15.0f, 3)); g.drawText (show == 0 ? bars : tm, a, Justification::centred); }
+        drawMenuCorner (g, r, th::faint);
+    }
+    void mouseDown (const MouseEvent& e) override { if (e.mods.isPopupMenu() && onRight) onRight(); }
+};
+
+// MIDI in and out lights
+struct MidiLights : public Component, public SettableTooltipClient
+{
+    std::function<uint32()> in, out; uint32 lastIn = 0, lastOut = 0; uint32 inUntil = 0, outUntil = 0;
+    void tick()
+    {
+        const auto now = Time::getMillisecondCounter();
+        if (in) { auto v = in(); if (v != lastIn) { lastIn = v; inUntil = now + 120; } }
+        if (out) { auto v = out(); if (v != lastOut) { lastOut = v; outUntil = now + 120; } }
+        repaint();
+    }
+    void paint (Graphics& g) override
+    {
+        const auto now = Time::getMillisecondCounter();
+        auto r = getLocalBounds();
+        auto lamp = [&] (Rectangle<int> a, const char* t, bool on, Colour c) {
+            auto d = a.removeFromLeft (10).withSizeKeepingCentre (8, 8).toFloat();
+            g.setColour (on ? c : c.withAlpha (0.18f)); g.fillEllipse (d);
+            g.setColour (th::dim); g.setFont (font (9.5f, 2)); g.drawText (t, a.withTrimmedLeft (3), Justification::centredLeft);
+        };
+        lamp (r.removeFromTop (r.getHeight() / 2), "MIDI in", now < inUntil, th::green);
+        lamp (r, "MIDI out", now < outUntil, th::amber);
+    }
+};
+
 // the settings button: a cog wheel
 struct GearButton : public TextButton
 {
@@ -98,6 +194,7 @@ struct ZoomBox : public Label
         g.setColour (Colours::black.withAlpha (0.28f)); g.fillRoundedRectangle (r, 5);
         g.setColour (Colours::white.withAlpha (0.08f)); g.drawRoundedRectangle (r, 5, 0.8f);
         if (! isBeingEdited()) { g.setFont (dp::font (12.0f, 2)); g.setColour (th::text); g.drawText (getText(), getLocalBounds(), Justification::centred); }
+        drawMenuCorner (g, r, th::faint);
     }
 };
 
@@ -116,6 +213,7 @@ struct TempoLabel : public Label
         if (set) set (std::round ((start + dy * step) * 10.0) / 10.0);
     }
     void mouseUp (const MouseEvent& e) override { if (e.mods.isPopupMenu()) return; if (! dragged) Label::mouseUp (e); }
+    void paintOverChildren (Graphics& g) override { drawMenuCorner (g, getLocalBounds().toFloat(), th::faint); }
     double start = 120.0; bool dragged = false;
 };
 
@@ -576,7 +674,18 @@ public:
         swingSlider.onValueChange = [this] { syncSwingPreset(); };
         setupCombo (body, swingValue, StringArray::fromTokens (swingChoiceNames(), "|", ""), 1, "Which notes swing. Auto finds the value you played in each beat");
         swingValAtt = std::make_unique<AudioProcessorValueTreeState::ComboBoxAttachment> (proc.apvts, ids::swingGrid, swingValue);
-        setupButton (body, quantBtn, "Quantize", true); quantBtn.onClick = [this] { togglePage (quantPage, quantBtn); };
+        setupButton (body, quantBtn, "Quantize", false, "Quantize whole patterns (every drum) with the Quantize setup: this pattern, the selected keys or all. Right-click: Quantize setup");
+        quantBtn.getProperties().set ("rmenu", true);
+        quantBtn.onClick = [this] { quantizePatterns(); };
+        quantBtn.onRight = [this] { PopupMenu m; m.addItem (1, "Quantize setup..."); m.addItem (2, "Quantize now"); m.addItem (3, "Humanize setup..."); m.addItem (4, "Humanize now");
+                                    m.showMenuAsync (PopupMenu::Options().withTargetComponent (&quantBtn), [this] (int r) { if (r > 0) quantHum (r - 1, true); }); };
+        setupLabel (body, lQs, "on");
+        setupButton (body, qsPattern, "Pattern", true, "Quantize the pattern you're editing (all its drums)");
+        setupButton (body, qsSelected, "Selected", true, "Quantize the keys you selected on the keyboard (Shift / Ctrl+click keys)");
+        setupButton (body, qsAll, "All", true, "Quantize every pattern on the keys");
+        for (auto* b : { &qsPattern, &qsSelected, &qsAll }) { b->setRadioGroupId (771); b->setSize (b->getWidth() - 6, smallH()); }
+        qsPattern.onClick = [this] { proc.uiQuantScope = 0; }; qsSelected.onClick = [this] { proc.uiQuantScope = 1; }; qsAll.onClick = [this] { proc.uiQuantScope = 2; };
+        (proc.uiQuantScope == 2 ? qsAll : proc.uiQuantScope == 1 ? qsSelected : qsPattern).setToggleState (true, dontSendNotification);
         setupButton (body, humBtn, "Humanize & Feel", true); humBtn.onClick = [this] { togglePage (humPage, humBtn); };
         setupButton (body, funcBtn, "Functions", false, "Every editing function"); funcBtn.onClick = [this] { functionsMenu(); };
         StringArray vels; for (int v : { 127, 120, 110, 100, 90, 80, 70, 60, 50, 40, 30, 20 }) vels.add ("New notes: " + String (v));
@@ -602,27 +711,27 @@ public:
         setupCombo (body, guideBox, guides, 1, "Guide lines in the velocity lane. Bars click onto them; hold Alt to move freely");
         guideBox.setSelectedItemIndex (2, dontSendNotification);
         guideBox.onChange = [this] { static const int g[] = { 0, 8, 16, 20, 32 }; st.velGuide = g[jlimit (0, 4, guideBox.getSelectedItemIndex())]; vel.repaint(); };
-        setupButton (body, playBtn, "Play", false, "Plays what you clicked last: the song lane, a pattern (a key or the editor) or the chain strip");
+        setupButton (body, playBtn, "Play", false, "Plays what you clicked last: the song lane or a pattern (a key or the editor). Right-click: play options");
         playBtn.onClick = [this] { transportPlay(); };
-        body.addAndMakeVisible (playsWhat); playsWhat.setFont (font (11.0f, 2)); playsWhat.setColour (Label::textColourId, th::dim);
-        playsWhat.setComponentID ("Plays");
+        playsWhat.setVisible (false);
         // what Play plays follows where you click
         targetWatch.f = [this] (Component* c) {
             int t = playTarget;
-            if (c == &chainStrip || chainStrip.isParentOf (c)) t = 2;
-            else if (c == &songLane) t = 0;
+            if (c == &songLane) t = 0;
             else if (c == &strip || c == &grid || c == &headers || c == &vel || c == &ruler) t = 1;
             if (t != playTarget) { playTarget = t; showPlays(); }
             if (c == &strip) { DrumPlayerEditor* self = this; Component::SafePointer<DrumPlayerEditor> sp (self); MessageManager::callAsync ([sp] { if (sp != nullptr) sp->setEditorOpen (true); }); }
         };
-        for (Component* c : { (Component*) &chainStrip, (Component*) &songLane, (Component*) &strip, (Component*) &grid, (Component*) &headers, (Component*) &vel, (Component*) &ruler })
+        for (Component* c : { (Component*) &songLane, (Component*) &strip, (Component*) &grid, (Component*) &headers, (Component*) &vel, (Component*) &ruler })
             c->addMouseListener (&targetWatch, true);
-        setupButton (body, stopBtn, "Stop"); stopBtn.onClick = [this] { stopAll(); };
+        setupButton (body, stopBtn, "Stop", false, "Stop. Right-click: stop options"); stopBtn.onClick = [this] { stopAll(); };
+        setupControlBar();
         // transport lamps: Rec and Play are green, Rec turns red (redder while recording), Play lights up bright green, Stop is blue
         playBtn.getProperties().set ("idle", (int) 0xff2f7a4c); playBtn.getProperties().set ("lit", (int) 0xff5cff8f);
         recBtn.getProperties().set ("idle", (int) 0xff2f7a4c);  recBtn.getProperties().set ("lit", (int) 0xffc8463f);
         stopBtn.getProperties().set ("idle", (int) 0xff2b5f7e); stopBtn.getProperties().set ("lit", (int) 0xff7fd1ff);
-        for (TextButton* b : { (TextButton*) &recBtn, &playBtn, &stopBtn }) b->setSize (jmax (58, b->getWidth() + 14), btnH);
+        recBtn.icon = TransportButton::Rec; playBtn.icon = TransportButton::Play; stopBtn.icon = TransportButton::Stop;
+        for (TextButton* b : { (TextButton*) &recBtn, (TextButton*) &playBtn, (TextButton*) &stopBtn }) { b->setButtonText ({}); b->setSize (42, btnH + 4); }
         dragBtn.setButtonText ("Drag MIDI"); dragBtn.setSize (fitW ("Drag MIDI"), btnH); body.addAndMakeVisible (dragBtn);
         dragBtn.getParts = [this] { return std::vector<const Pattern*> { &st.pat() }; };
         dragBtn.getChannel = [this] { return st.song().settings.outChannel; };
@@ -754,7 +863,7 @@ public:
             tempoLbl.onRight = [this] {
                 PopupMenu m; const double hb = proc.hostBpm.load();
                 m.addItem (1, "Take Studio One's tempo now (" + String (hb, std::abs (hb - std::round (hb)) < 0.05 ? 0 : 1) + " BPM)");
-                m.addItem (2, "Lock to Studio One", true, st.song().settings.followHost);
+                m.addItem (2, "Sync tempo to DAW", true, st.song().settings.followHost);
                 m.addSeparator(); for (int b : { 80, 90, 100, 110, 120, 130, 140 }) m.addItem (100 + b, String (b) + " BPM");
                 m.showMenuAsync (PopupMenu::Options().withTargetComponent (&tempoLbl), [this, hb] (int r) {
                     if (r == 1) { setOwnTempo (hb); showToast ("Tempo from Studio One: " + String (hb, 1) + " BPM"); }
@@ -764,14 +873,23 @@ public:
             };
             tempoLbl.setColour (Label::backgroundColourId, Colours::black.withAlpha (0.25f));
             tempoLbl.onTextChange = [this] { const double b = tempoLbl.getText().getDoubleValue(); if (b >= 20.0) setOwnTempo (b); else showTempo(); };
-            setupButton (body, tapBtn, "Tap", false, "Tap the tempo (4 taps or more)");
+            setupButton (body, tapBtn, "Tap", false, "Tap the tempo. Right-click: tap and count-in options");
             tapBtn.onClick = [this] {
                 const double now = Time::getMillisecondCounterHiRes();
                 if (! taps.empty() && now - taps.back() > 2000.0) taps.clear();
-                taps.push_back (now); if (taps.size() > 8) taps.erase (taps.begin());
-                if (taps.size() >= 2) setOwnTempo (60000.0 / ((taps.back() - taps.front()) / (double) (taps.size() - 1)));
+                taps.push_back (now); while ((int) taps.size() > tapAverage) taps.erase (taps.begin());
+                if (taps.size() >= 2) { double b = 60000.0 / ((taps.back() - taps.front()) / (double) (taps.size() - 1)); if (tapRound) b = std::round (b); setOwnTempo (b); }
             };
-            setupButton (body, followBtn, "Lock to Studio One", true, "On: always Studio One's tempo. Off: your tempo here while Studio One is stopped (while it plays, its tempo rules)");
+            tapBtn.onRight = [this] {
+                PopupMenu m; m.addSectionHeader ("TAP");
+                for (int n : { 2, 4, 8 }) m.addItem (100 + n, "Average the last " + String (n) + " taps", true, tapAverage == n);
+                m.addItem (120, "Round to whole BPM", true, tapRound);
+                m.addItem (121, "Tap while recording (sets the count-in tempo)", ! st.song().settings.followHost, true);
+                addClickItems (m);
+                m.showMenuAsync (PopupMenu::Options().withTargetComponent (&tapBtn), [this] (int r) {
+                    if (r > 100 && r <= 108) tapAverage = r - 100; else if (r == 120) tapRound = ! tapRound; else clickItem (r); });
+            };
+            setupButton (body, followBtn, "Sync tempo to DAW", true, "On: Drum Player always runs at Studio One's tempo, live as you change it there. Off: your own tempo here while Studio One is stopped (while it plays, its tempo rules)");
             followBtn.onClick = [this] { const bool on = followBtn.getToggleState(); st.applySong ("Follow tempo", [on] (Song& s) { s.settings.followHost = on; }); showTempo(); };
         }
         groovePage.onLoad = [this] (const File& f, int k) { importFiles ({ f.getFullPathName() }, k); };
@@ -806,6 +924,8 @@ public:
         setResizeLimits (900, 560, 3200, 2000);
         setSize ((int) (1240 * scale), (int) (800 * scale));
         setupToolStrip();
+        st.quantHum = [this] (int w) { quantHum (w); };
+        refreshTransport();
         showPlays();
         savedSerial = proc.editSerial.load();
         refreshAll();
@@ -1014,7 +1134,7 @@ public:
                 m.addItem (606, "Bigger velocity area"); m.addItem (607, "Smaller velocity area"); m.addItem (608, "Bigger song lane"); m.addItem (609, "Smaller song lane");
                 m.addItem (610, "Show only used lanes", true, st.usedOnly);
                 m.addSeparator(); m.addItem (614, "Mixer", true, openPage == &mixerPage);
-                m.addItem (615, "Tool strip (Option / Alt)", true, stripOn); m.addItem (616, detached != nullptr ? "Bring the editor back" : "Editor in its own window (full screen)"); m.addItem (611, "Exchange keys"); m.addItem (612, "Chains page"); m.addItem (613, "Recording options");
+                m.addItem (615, "Tool strip (Option / Alt)", true, stripOn); m.addItem (616, detached != nullptr ? "Bring the editor back" : "Editor in its own window (full screen)"); m.addItem (611, "Exchange keys"); m.addItem (613, "Recording options");
                 break;
             case 6: {
                 static const char* tn[] = { "Select (arrow)  1", "Draw (pencil)  5", "Erase  4", "Split (scissors)  3", "Paint brush  7", "Mute  6", "Line (velocity ramps)  2" };
@@ -1185,7 +1305,13 @@ private:
     TextEditor nameEd, barsEd;
     ComboBox typeBox, bpbBox, gridBox, swingPreset, swingValue, velBox;
     Label lLen, lGrid, lSwing, lVel, exchangeHelp, status;
-    TextButton lenMenuBtn, undoBtn, redoBtn, quantBtn, humBtn, funcBtn, recOptBtn, playBtn, stopBtn, velMode, velShow, chanceShow, randBtn; RightClickButton recBtn;
+    TextButton lenMenuBtn, undoBtn, redoBtn, humBtn, funcBtn, recOptBtn, velMode, velShow, chanceShow, randBtn;
+    TransportButton recBtn, playBtn, stopBtn, startBtn, rewBtn, ffwBtn, loopBtn, clickBtn;
+    RightClickButton quantBtn, locL, locR; TextButton targetSong, targetPat, qsPattern, qsSelected, qsAll; Label lQs;
+    PositionDisplay posDisp; MidiLights midiLights;
+    double stepBeats = -1;               // rewind / forward step (-1: one bar)
+    bool returnOnStop = false; double playStartBeat = 0;
+    int tapAverage = 4; bool tapRound = false;
     ComboBox guideBox;
     OwnedArray<TextButton> toolBtns;
     FineSlider swingSlider;
@@ -1350,13 +1476,16 @@ private:
     QuantizePage quantPage; HumanizePage humPage; ChainPage chainPage; SettingsPage setPage; PresetPage presetPage; MapPage mapPage; RecordPage recPage; GroovePage groovePage; MixerPage mixerPage; ExportPage exportPage; GrooveSetsPage setsPage;
     TextButton mixerBtn, exportDummy;
     // tempo: your own when Studio One is stopped, or follow Studio One
-    TextButton tempoDown, tempoUp, tapBtn, followBtn; TempoLabel tempoLbl; Label lTempo;
+    TextButton tempoDown, tempoUp, followBtn; RightClickButton tapBtn; TempoLabel tempoLbl; Label lTempo;
     std::vector<double> taps;
     double ownTempo() { return st.song().settings.ownBpm; }
     void setOwnTempo (double b)
     {
+        if (st.song().settings.followHost) {           // a plugin can't change Studio One's tempo: Studio One leads
+            showToast ("Synced to Studio One: change the tempo in Studio One (or turn Sync tempo to DAW off)"); showTempo(); return;
+        }
         b = jlimit (20.0, 400.0, std::round (b * 10.0) / 10.0);
-        st.applySong ("Tempo", [b] (Song& s) { s.settings.ownBpm = b; s.settings.followHost = false; });
+        st.applySong ("Tempo", [b] (Song& s) { s.settings.ownBpm = b; });
         showTempo();
     }
     double effectiveTempo() { return st.song().settings.followHost || proc.hostPlaying.load() ? proc.hostBpm.load() : ownTempo(); }
@@ -1376,18 +1505,151 @@ private:
     }
     // ---- the transport: Play plays what you clicked last (0 song lane, 1 a pattern, 2 the chain strip)
     struct TargetWatch : public MouseListener { std::function<void (Component*)> f; void mouseDown (const MouseEvent& e) override { if (f) f (e.eventComponent); } } targetWatch;
-    int playTarget = 1; Label playsWhat;
+    int playTarget = 1; Label playsWhat;   // (the old label, kept hidden)
     void showPlays()
     {
-        static const char* t[] = { "Play: song", "Play: pattern", "Play: chain" };
-        playsWhat.setText (t[jlimit (0, 2, playTarget)], dontSendNotification);
-        songLane.repaint(); chainStrip.repaint();
+        targetSong.setToggleState (playTarget == 0, dontSendNotification); targetPat.setToggleState (playTarget == 1, dontSendNotification);
+        songLane.repaint();
     }
     void transportPlay()
     {
-        if (playTarget == 2) { proc.uiPlayChain (st.currentChain); return; }
-        if (playTarget == 0) { const auto& sg = st.song(); proc.uiSongPlay (true, sg.loopOn && (songLane.cursorBeat < sg.loopStart || songLane.cursorBeat >= sg.loopEnd) ? sg.loopStart : songLane.cursorBeat); return; }
+        if (playTarget == 0) { const auto& sg = st.song(); playStartBeat = sg.loopOn && (songLane.cursorBeat < sg.loopStart || songLane.cursorBeat >= sg.loopEnd) ? sg.loopStart : songLane.cursorBeat;
+                               proc.uiSongPlay (true, playStartBeat); return; }
         proc.uiTrigger (st.song().editKey);
+    }
+    // ---- the control bar: like a DAW's, every button with its own right-click menu
+    void setupControlBar()
+    {
+        auto tb = [this] (TransportButton& b, TransportButton::Icon ic, const String& name, const String& tip) {
+            setupButton (body, b, name, false, tip); b.icon = ic; b.setButtonText ({}); b.getProperties().set ("rmenu", true); };
+        tb (startBtn, TransportButton::Start, "To start", "Go to the start. Right-click: go to the loop start");
+        tb (rewBtn, TransportButton::Rewind, "Rewind", "Back one bar. Right-click: how far");
+        tb (ffwBtn, TransportButton::Forward, "Forward", "On one bar. Right-click: how far");
+        tb (loopBtn, TransportButton::Loop, "Loop", "Loop on / off. Right-click: loop options");
+        tb (clickBtn, TransportButton::Click, "Click", "The click (metronome). Right-click: when it clicks, count-in, volume");
+        for (auto* b : { &recBtn, &playBtn, &stopBtn }) b->getProperties().set ("rmenu", true);
+        loopBtn.setClickingTogglesState (false); clickBtn.setClickingTogglesState (false);
+        loopBtn.getProperties().set ("lit", (int) 0xffffc15e); clickBtn.getProperties().set ("lit", (int) 0xff7fd1ff);
+        startBtn.onClick = [this] { moveCursorTo (0); };
+        startBtn.onRight = [this] { PopupMenu m; m.addItem (1, "Go to the start"); m.addItem (2, "Go to the loop start"); m.addItem (3, "Go to the loop end");
+            m.showMenuAsync (PopupMenu::Options().withTargetComponent (&startBtn), [this] (int r) { const auto& sg = st.song(); if (r == 1) moveCursorTo (0); else if (r == 2) moveCursorTo (sg.loopStart); else if (r == 3) moveCursorTo (sg.loopEnd); }); };
+        auto stepMenu = [this] (Component* at) { PopupMenu m; m.addSectionHeader ("MOVE BY");
+            m.addItem (1, "1 beat", true, stepBeats == 1); m.addItem (2, "1 bar", true, stepBeats < 0); m.addItem (3, "2 bars", true, stepBeats == -2); m.addItem (4, "4 bars", true, stepBeats == -4);
+            m.showMenuAsync (PopupMenu::Options().withTargetComponent (at), [this] (int r) { if (r == 1) stepBeats = 1; else if (r == 2) stepBeats = -1; else if (r == 3) stepBeats = -2; else if (r == 4) stepBeats = -4; }); };
+        rewBtn.onClick = [this] { moveCursorTo (songLane.cursorBeat - stepSize()); };
+        ffwBtn.onClick = [this] { moveCursorTo (songLane.cursorBeat + stepSize()); };
+        rewBtn.onRight = [this, stepMenu] { stepMenu (&rewBtn); }; ffwBtn.onRight = [this, stepMenu] { stepMenu (&ffwBtn); };
+        playBtn.onRight = [this] { PopupMenu m;
+            m.addItem (1, "Play from the cursor"); m.addItem (2, "Play from the start"); m.addItem (3, "Play the loop", st.song().loopEnd > st.song().loopStart);
+            m.addSeparator(); m.addItem (4, "Return to the start position on Stop", true, returnOnStop);
+            m.addSeparator(); m.addItem (5, "Play plays the song", true, playTarget == 0); m.addItem (6, "Play plays the pattern", true, playTarget == 1);
+            m.showMenuAsync (PopupMenu::Options().withTargetComponent (&playBtn), [this] (int r) {
+                if (r == 1) { playTarget = 0; showPlays(); transportPlay(); }
+                else if (r == 2) { playTarget = 0; showPlays(); songLane.cursorBeat = 0; transportPlay(); }
+                else if (r == 3) { playTarget = 0; showPlays(); auto& sg = st.song(); sg.loopOn = true; proc.publish(); songLane.cursorBeat = sg.loopStart; transportPlay(); }
+                else if (r == 4) returnOnStop = ! returnOnStop;
+                else if (r == 5 || r == 6) { playTarget = r - 5; showPlays(); } }); };
+        stopBtn.onRight = [this] { PopupMenu m;
+            m.addItem (1, "Stop"); m.addItem (2, "Stop and go to the start");
+            m.addSeparator(); m.addItem (3, "Return to the start position on Stop", true, returnOnStop);
+            m.addItem (4, "Stop when Studio One stops", true, st.song().settings.stopWithHost);
+            m.showMenuAsync (PopupMenu::Options().withTargetComponent (&stopBtn), [this] (int r) {
+                if (r == 1) stopAll(); else if (r == 2) { stopAll(); moveCursorTo (0); } else if (r == 3) returnOnStop = ! returnOnStop;
+                else if (r == 4) { const bool on = ! st.song().settings.stopWithHost; st.applySong ("Stop with Studio One", [on] (Song& s2) { s2.settings.stopWithHost = on; }); } }); };
+        loopBtn.onClick = [this] { auto& sg = st.song(); sg.loopOn = ! sg.loopOn; proc.publish(); songLane.repaint(); refreshTransport(); };
+        loopBtn.onRight = [this] { songLane.loopMenu(); };
+        clickBtn.onClick = [this] { const int now = st.song().settings.metroMode; const int to = now == 3 ? (lastMetro > 0 && lastMetro < 3 ? lastMetro : 0) : 3; if (now != 3) lastMetro = now;
+                                    st.applySong ("Click", [to] (Song& s2) { s2.settings.metroMode = to; }); refreshTransport(); };
+        clickBtn.onRight = [this] { PopupMenu m; addClickItems (m); m.showMenuAsync (PopupMenu::Options().withTargetComponent (&clickBtn), [this] (int r) { clickItem (r); }); };
+        tapBtn.getProperties().set ("rmenu", true);
+        // (the tap button's right-click is set up after it is created)
+        // locators: the loop's left and right ends
+        for (auto* b : { &locL, &locR }) { setupButton (body, *b, b == &locL ? "L" : "R", false, b == &locL ? "The loop's left end: click to go there. Right-click: set it" : "The loop's right end: click to go there. Right-click: set it");
+                                            b->getProperties().set ("rmenu", true); }
+        locL.onClick = [this] { moveCursorTo (st.song().loopStart); }; locR.onClick = [this] { moveCursorTo (st.song().loopEnd); };
+        auto locMenu = [this] (bool left) { PopupMenu m; m.addItem (1, "Set to the cursor"); m.addItem (2, "Set to the selected chunks");
+            m.showMenuAsync (PopupMenu::Options().withTargetComponent (left ? &locL : &locR), [this, left] (int r) {
+                auto& sg = st.song();
+                if (r == 1) { if (left) sg.loopStart = jmin (songLane.cursorBeat, sg.loopEnd - 0.25); else sg.loopEnd = jmax (songLane.cursorBeat, sg.loopStart + 0.25); sg.loopClip = 0; }
+                else if (r == 2) { double lo = 1e9, hi = 0; for (auto& c : sg.clips) if (c.selected) { lo = jmin (lo, c.start); hi = jmax (hi, c.start + c.length); } if (hi > lo) { sg.loopStart = lo; sg.loopEnd = hi; } }
+                proc.publish(); songLane.repaint(); refreshTransport(); }); };
+        locL.onRight = [locMenu] { locMenu (true); }; locR.onRight = [locMenu] { locMenu (false); };
+        // where you are
+        body.addAndMakeVisible (posDisp); posDisp.setTooltip ("Where you are: bar.beat.tick and minutes:seconds. Right-click: what to show");
+        posDisp.beat = [this] { const double sb = proc.songBeatUi.load(); if (sb >= 0) return sb; return songLane.cursorBeat; };
+        posDisp.bpm = [this] { return effectiveTempo(); }; posDisp.beatsPerBar = [this] { return st.pat().beatsPerBar; };
+        posDisp.onRight = [this] { PopupMenu m; m.addItem (1, "Bars and time", true, posDisp.show == 2); m.addItem (2, "Bars", true, posDisp.show == 0); m.addItem (3, "Time", true, posDisp.show == 1);
+            m.showMenuAsync (PopupMenu::Options().withTargetComponent (&posDisp), [this] (int r) { if (r == 1) posDisp.show = 2; else if (r == 2) posDisp.show = 0; else if (r == 3) posDisp.show = 1; posDisp.repaint(); }); };
+        // what Play plays
+        setupButton (body, targetSong, "Song", true, "Play plays the song lane (also: click the song lane)");
+        setupButton (body, targetPat, "Pattern", true, "Play plays the pattern you're editing (also: click a key or the editor)");
+        for (auto* b : { &targetSong, &targetPat }) { b->setRadioGroupId (772); b->setSize (b->getWidth() - 4, smallH()); }
+        targetSong.onClick = [this] { playTarget = 0; showPlays(); }; targetPat.onClick = [this] { playTarget = 1; showPlays(); };
+        body.addAndMakeVisible (midiLights); midiLights.setTooltip ("MIDI coming in from your keyboard, and going out to the drum plugin");
+        midiLights.in = [this] { uint32 t = 0; for (auto& h : proc.inHits) t += h.load(); return t; };
+        midiLights.out = [this] { uint32 t = 0; for (auto& h : proc.outHits) t += h.load(); return t; };
+    }
+    int lastMetro = 2; String lastTransportKey;
+    double stepSize() { return stepBeats > 0 ? stepBeats : -stepBeats * st.pat().beatsPerBar; }
+    void moveCursorTo (double b)
+    {
+        b = jmax (0.0, b);
+        songLane.cursorBeat = b;
+        if (proc.songBeatUi.load() >= 0) { playStartBeat = b; proc.uiSongPlay (true, b); }      // playing: carry on from there
+        songLane.repaint(); posDisp.repaint();
+    }
+    void addClickItems (PopupMenu& m)
+    {
+        const auto& o = st.song().settings;
+        m.addSectionHeader ("CLICK");
+        m.addItem (11, "Off", true, o.metroMode == 0); m.addItem (12, "Count-in only", true, o.metroMode == 1);
+        m.addItem (13, "While recording", true, o.metroMode == 2); m.addItem (14, "Whenever playing", true, o.metroMode == 3);
+        m.addSectionHeader ("COUNT-IN BEFORE RECORDING");
+        m.addItem (21, "None", true, o.countInBars == 0); m.addItem (22, "1 bar", true, o.countInBars == 1); m.addItem (23, "2 bars", true, o.countInBars == 2);
+        PopupMenu lv; for (int v : { 25, 50, 75, 100 }) lv.addItem (30 + v, String (v) + " %", true, std::abs (o.metroLevel * 100.0f - (float) v) < 1.0f);
+        m.addSubMenu ("Click volume", lv);
+    }
+    void clickItem (int r)
+    {
+        if (r >= 11 && r <= 14) { const int v = r - 11; st.applySong ("Click", [v] (Song& s2) { s2.settings.metroMode = v; }); }
+        else if (r >= 21 && r <= 23) { const int v = r - 21; st.applySong ("Count-in", [v] (Song& s2) { s2.settings.countInBars = v; }); }
+        else if (r > 30 && r <= 130) { const float v = (r - 30) / 100.0f; st.applySong ("Click volume", [v] (Song& s2) { s2.settings.metroLevel = v; }); }
+        refreshTransport();
+    }
+    void refreshTransport()
+    {
+        const auto& sg = st.song();
+        loopBtn.setToggleState (sg.loopOn, dontSendNotification);
+        clickBtn.setToggleState (sg.settings.metroMode == 3, dontSendNotification);
+        const int bpb = jmax (1, st.pat().beatsPerBar);
+        auto pos = [bpb] (double b) { return String ((int) (b / bpb) + 1) + "." + String ((int) std::fmod (b, (double) bpb) + 1); };
+        locL.setButtonText ("L  " + pos (sg.loopStart)); locR.setButtonText ("R  " + pos (sg.loopEnd));
+    }
+    // quantize whole patterns: the one you edit, the keys you selected, or all
+    void quantizePatterns()
+    {
+        auto o = quantPage.options(); o.selectedOnly = false;
+        const int scope = proc.uiQuantScope; const int ek = st.song().editKey;
+        std::set<int> keys;
+        if (scope == 0) keys.insert (ek);
+        else if (scope == 1) { keys = st.keySel; if (keys.empty()) keys.insert (ek); }
+        else for (int k = 0; k < 128; ++k) if (! st.song().keys[(size_t) k].notes.empty()) keys.insert (k);
+        st.applySong (scope == 0 ? "Quantize pattern" : scope == 1 ? "Quantize selected patterns" : "Quantize all patterns", [keys, o] (Song& s2) {
+            for (int k : keys) if (k >= 0 && k < 128) { auto& p = s2.keys[(size_t) k]; for (auto& n : p.notes) n.selected = false; quantize (p, o); } });
+        refreshAll();
+        showToast (String ("Quantized ") + (scope == 0 ? "this pattern" : String ((int) keys.size()) + " patterns") + " to " + noteValues[jlimit (0, numNoteValues - 1, o.valueIndex)].name + "  (Ctrl+Z undoes it)");
+    }
+    // quantize setup, quantize, humanize setup, humanize: from the menus
+    void quantHum (int what, bool wholePattern = false)
+    {
+        if (what == 0) { if (openPage != &quantPage) togglePage (quantPage, quantBtn); return; }
+        if (what == 1) { if (wholePattern) quantizePatterns(); else quantPage.run(); return; }
+        if (what == 2) { if (openPage != &humPage) togglePage (humPage, humBtn); return; }
+        const double ticksPerMs = effectiveTempo() / 60000.0 * PPQ;
+        const int ht = (int) std::round (proc.apvts.getRawParameterValue (ids::humTime)->load() * ticksPerMs);
+        const int hv = (int) proc.apvts.getRawParameterValue (ids::humVel)->load();
+        st.apply ("Humanize", [ht, hv] (Pattern& q) { std::mt19937 g ((uint32) Time::getMillisecondCounter()); humanizeBake (q, jmax (1, ht), jmax (1, hv), g); });
+        showToast ("Humanized with the Humanize setup (timing " + String (ht) + " ticks, velocity " + String (hv) + ")  (Ctrl+Z undoes it)");
     }
     // ---- unsaved changes: ask before they'd be lost
     int savedSerial = 0;
@@ -1405,8 +1667,9 @@ private:
     }
     void stopAll()
     {
-        if (proc.songBeatUi.load() >= 0) proc.uiSongPlay (false, 0);
-        proc.uiStop(); stopFlashUntil = Time::getMillisecondCounter() + 450;
+        const double was = proc.songBeatUi.load();
+        if (was >= 0) { proc.uiSongPlay (false, 0); songLane.cursorBeat = returnOnStop ? playStartBeat : songLane.cursorBeat; }
+        proc.uiStop(); stopFlashUntil = Time::getMillisecondCounter() + 450; songLane.repaint();
     }
     Component exchange;
     Page* openPage = nullptr; TextButton* openPageBtn = nullptr;
@@ -1437,10 +1700,10 @@ private:
         RowPlacer hp (h, 5);
         hp.place (prevPreset, 24); hp.place (presetName, 200); hp.place (nextPreset, 24); hp.skip (16);
         hp.place (keysBtn); hp.place (playModeBtn); hp.skip (10);
-        const int rightW = mixerBtn.getWidth() + groovesBtn.getWidth() + setsBtn.getWidth() + exchangeBtn.getWidth() + chainsBtn.getWidth() + settingsBtn.getWidth() + 52 + 8 * 6 + 20;
+        const int rightW = mixerBtn.getWidth() + groovesBtn.getWidth() + setsBtn.getWidth() + exchangeBtn.getWidth() + settingsBtn.getWidth() + 52 + 8 * 6 + 20;
         hp.place (keyInfo, jmax (0, h.getRight() - rightW - hp.x - 10));
         RowPlacer hr (h.withTrimmedLeft (h.getWidth() - rightW), 5);
-        hr.place (mixerBtn); hr.place (groovesBtn); hr.place (setsBtn); hr.place (exchangeBtn); hr.place (chainsBtn); hr.skip (8);
+        hr.place (mixerBtn); hr.place (groovesBtn); hr.place (setsBtn); hr.place (exchangeBtn); chainsBtn.setVisible (false); hr.skip (8);
         hr.place (zoomPct, 52); hr.skip (6); hr.place (settingsBtn);
         zoomOut.setVisible (false); zoomIn.setVisible (false);
         for (auto* b : { &saveBtn, &mapBtn, &undoBtn, &redoBtn, &recOptBtn, (TextButton*) &dragBtn }) b->setVisible (false);
@@ -1459,9 +1722,18 @@ private:
         {   auto tb = a.removeFromBottom (jmax (36, (int) btnH + 14));
             transportArea = tb;
             tb.reduce (8, 0);
-            RowPlacer tp (tb, 6);
+            RowPlacer tp (tb, 4);
             editBtn.setVisible (false);
-            tp.place (recBtn); tp.place (playBtn); tp.place (stopBtn); tp.skip (6); tp.place (playsWhat, 110);
+            const int bh = jmin (tb.getHeight() - 8, (int) btnH + 6);
+            auto put = [&] (Component& c, int w) { c.setBounds (tp.x, tb.getCentreY() - bh / 2, w, bh); tp.x += w + 3; };
+            put (startBtn, 30); put (rewBtn, 30); put (ffwBtn, 30); tp.x += 6;
+            put (stopBtn, 40); put (playBtn, 40); put (recBtn, 40); tp.x += 6;
+            put (loopBtn, 34); put (locL, 64); put (locR, 64); tp.x += 6;
+            put (posDisp, 150); tp.x += 6;
+            put (clickBtn, 34); tp.x += 6;
+            { const int sh = smallH(); targetSong.setBounds (tp.x, tb.getCentreY() - sh / 2, targetSong.getWidth(), sh); tp.x += targetSong.getWidth() + 2;
+              targetPat.setBounds (tp.x, tb.getCentreY() - sh / 2, targetPat.getWidth(), sh); tp.x += targetPat.getWidth() + 8; }
+            midiLights.setBounds (tp.x, tb.getY() + 4, 64, tb.getHeight() - 8);
             // tempo, big, at the right end: label, - number + right next to each other, tap, lock
             const int tH = jmax ((int) btnH + 6, 30);
             auto tr = tb;
@@ -1470,11 +1742,13 @@ private:
             tempoUp.setBounds (tr.removeFromRight (24).withSizeKeepingCentre (24, tH)); tr.removeFromRight (1);
             tempoLbl.setBounds (tr.removeFromRight (76).withSizeKeepingCentre (76, tH)); tr.removeFromRight (1);
             tempoDown.setBounds (tr.removeFromRight (24).withSizeKeepingCentre (24, tH)); tr.removeFromRight (6);
-            lTempo.setBounds (tr.removeFromRight (56).withSizeKeepingCentre (56, tH));
+            lTempo.setBounds (tr.removeFromRight (50).withSizeKeepingCentre (50, tH));
+            if (lTempo.getX() < midiLights.getRight() + 4) { midiLights.setVisible (false); } else midiLights.setVisible (true);
             a.removeFromBottom (6); }
         const bool editing = proc.uiEditOpen;
         // the pattern player (song lane) right under the keys, with its own scroll bar; it takes the room when the editor is closed
-        {   const int chainH = jmax (32, (int) btnH + 10);
+        chainStrip.setVisible (false);                         // chains are gone: the song lane does their job
+        {   const int chainH = 0;
             songH = jlimit (40, jmax (40, a.getHeight() - 260), songH);
             const int h2 = editing ? songH : jmax (60, a.getHeight() - chainH - 12);
             auto songRow = a.removeFromTop (h2);
@@ -1484,10 +1758,10 @@ private:
             songLane.setBounds (songRow);
             songDiv.setVisible (editing);
             if (editing) songDiv.setBounds (a.removeFromTop (10)); else a.removeFromTop (8);
-            chainStrip.setBounds (a.removeFromTop (chainH)); }
+            (void) chainH; }
         a.removeFromTop (7);
-        std::vector<Component*> editParts { &nameEd, &typeBox, &lLen, &barsEd, &lenMenuBtn, &bpbBox, &lGrid, &gridBox, &lSwing, &swingPreset, &swingSlider, &swingValue,
-                                           &quantBtn, &velBox, &shelf };
+        std::vector<Component*> editParts { &nameEd, &lLen, &barsEd, &lenMenuBtn, &bpbBox, &lGrid, &gridBox, &lSwing, &swingPreset, &swingSlider, &swingValue,
+                                           &quantBtn, &velBox, &shelf, &lQs, &qsPattern, &qsSelected, &qsAll };
         for (auto* c : rollParts()) editParts.push_back (c);
         {   const auto rp = rollParts();
             for (auto* c : editParts) {
@@ -1504,7 +1778,7 @@ private:
             auto t1 = a.removeFromTop (jmax (28, (int) btnH + 6));
             toolArea = t1;
             RowPlacer r1 (t1, 5);
-            r1.place (nameEd, 100); r1.place (typeBox, 84); r1.skip (6);
+            r1.place (nameEd, 100); typeBox.setVisible (false); r1.skip (6);
             r1.place (lLen, 44); r1.place (barsEd, 40); r1.place (lenMenuBtn); r1.place (bpbBox, 58); r1.skip (10);
             shelf.setBounds (t1.withLeft (r1.x).withRight (t1.getRight()));          // your buttons: double-click to add, Alt+Shift drag to arrange
             humBtn.setVisible (false); funcBtn.setVisible (false);
@@ -1514,7 +1788,9 @@ private:
             auto t2 = a.removeFromTop (jmax (28, (int) btnH + 6));
             toolArea = toolArea.getUnion (t2);
             RowPlacer r2 (t2, 5);
-            r2.place (lGrid, 30); r2.place (gridBox, 70); r2.place (quantBtn); r2.skip (14);
+            r2.place (lGrid, 30); r2.place (gridBox, 70); r2.place (quantBtn); r2.place (lQs, 24);
+            for (auto* b : { &qsPattern, &qsSelected, &qsAll }) { b->setBounds (r2.x, t2.getCentreY() - smallH() / 2, b->getWidth(), smallH()); r2.x += b->getWidth() + 2; }
+            r2.skip (12);
             r2.place (lSwing, 40); r2.place (swingPreset, 104); r2.place (swingSlider, 190); r2.place (swingValue, 66);
             a.removeFromTop (8);
             bodyRest = a;
@@ -1675,6 +1951,13 @@ private:
         const int sv = proc.stateVersion.load();
         if (sv != lastStateVersion) { lastStateVersion = sv; st.grid = jlimit (-1, numNoteValues - 1, st.grid); refreshAll(); }
         if (st.song().editKey != lastEditKeySeen) { const bool first = lastEditKeySeen < 0; lastEditKeySeen = st.song().editKey; if (! first) setEditorOpen (true); }
+        {   // the control bar: position, MIDI lights, loop and click state
+            midiLights.tick();
+            if (proc.songBeatUi.load() >= 0 || posDisp.isMouseOver()) posDisp.repaint();
+            const auto& sg = st.song();
+            const String key = String ((int) sg.loopOn) + String (sg.loopStart) + ":" + String (sg.loopEnd) + ":" + String (sg.settings.metroMode) + String (songLane.cursorBeat);
+            if (key != lastTransportKey) { lastTransportKey = key; refreshTransport(); posDisp.repaint(); }
+        }
         const int pk = proc.playingKey.load();
         const double pt = pk == st.song().editKey ? proc.playRelTicks.load() : -1.0;
         if (pk != lastPlayKey) { lastPlayKey = pk; strip.repaint(); bigStrip.repaint(); }
@@ -2259,9 +2542,6 @@ private:
         }
         if (! p.notes.empty()) {
             m.addItem (6, "Export as MIDI file...");
-            PopupMenu chain;
-            for (int c = 0; c < (int) s.chains.size() && c < 200; ++c) chain.addItem (2000 + c, "Add to " + (s.chains[(size_t) c].name.isNotEmpty() ? s.chains[(size_t) c].name : "Chain " + String (c + 1)));
-            m.addSubMenu ("Chains", chain);
         }
         if (! p.isEmpty()) m.addItem (7, "Clear");
         m.showMenuAsync (PopupMenu::Options().withMousePosition(), [this, k, targets] (int r) {

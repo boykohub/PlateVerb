@@ -116,6 +116,11 @@ public:
                 if (on && T.findCustom ("Lit buttons") == nullptr) { g.setColour (th::amber.withAlpha (0.55f)); g.fillRoundedRectangle (r, cr); }
                 if (over || down) { g.setColour (Colours::white.withAlpha (down ? 0.14f : 0.06f)); g.fillRoundedRectangle (r, cr); }
                 if (! b.isEnabled()) { g.setColour (Colours::black.withAlpha (0.45f)); g.fillRoundedRectangle (r, cr); }
+                if (b.getProperties().contains ("rmenu")) {
+                    const float t = jlimit (4.0f, 6.0f, r.getHeight() * 0.22f);
+                    Path p; p.addTriangle (r.getX() + 2, r.getBottom() - 2 - t, r.getX() + 2, r.getBottom() - 2, r.getX() + 2 + t, r.getBottom() - 2);
+                    g.setColour (on ? th::ink.withAlpha (0.55f) : th::faint); g.fillPath (p);
+                }
                 return;
             }
         }
@@ -127,6 +132,7 @@ public:
         const bool hasIdle = b.getProperties().contains ("idle");
         const Colour idle = hasIdle ? Colour ((uint32) (int) b.getProperties()["idle"]) : th::raised;
         Colour top = on ? lamp.brighter (0.15f) : hasIdle ? idle.brighter (0.12f) : th::raised.brighter (0.06f);
+        const bool rmenu = b.getProperties().contains ("rmenu");
         Colour bot = on ? lamp.darker (0.25f) : hasIdle ? idle.darker (0.35f) : th::surface;
         if (! b.isEnabled()) { top = top.withMultipliedAlpha (0.45f); bot = bot.withMultipliedAlpha (0.45f); }
         g.setGradientFill (ColourGradient (top, r.getTopLeft(), bot, r.getBottomLeft(), false));
@@ -137,6 +143,11 @@ public:
         g.setColour (Colours::white.withAlpha (on ? 0.35f : 0.08f)); g.drawLine (r.getX() + cr, r.getY() + 1.0f, r.getRight() - cr, r.getY() + 1.0f, 1.0f);
         g.setColour (on ? lamp.darker (0.4f) : Colours::black.withAlpha (0.5f)); g.drawRoundedRectangle (r, cr, 0.8f);
         if (over || down) { g.setColour (Colours::white.withAlpha (down ? 0.14f : 0.06f)); g.fillRoundedRectangle (r, cr); }
+        if (rmenu) {                                                // a little corner: this one has a right-click menu
+            const float t = jlimit (4.0f, 6.0f, r.getHeight() * 0.22f);
+            Path p; p.addTriangle (r.getX() + 2, r.getBottom() - 2 - t, r.getX() + 2, r.getBottom() - 2, r.getX() + 2 + t, r.getBottom() - 2);
+            g.setColour (on ? th::ink.withAlpha (0.55f) : th::faint); g.fillPath (p);
+        }
     }
     Font getTextButtonFont (TextButton&, int) override { return font (12.0f, 2); }
     void drawButtonText (Graphics& g, TextButton& b, bool, bool) override
