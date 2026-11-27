@@ -1,8 +1,9 @@
-// 1081+ — 1081 channel amplifier, 2254 / Velvet compressor and gate, arrangeable left to right.
+// 1081+ — 1081 channel amplifier, 2254 / VCA / 88R compressor and 88R gate, arrangeable left to right.
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_dsp/juce_dsp.h>
 #include "N1081Engine.h"
 #include "N1081Oversampler.h"
+#include "FlexFonts.h"
 #include "Engine.h"            // PlateVerb's compressor (pv::Compressor), unchanged — "Velvet" here
 
 using namespace juce;
@@ -24,7 +25,9 @@ namespace ids {
     static const char* pThr = "p_thr"; static const char* pRatio = "p_ratio"; static const char* pAtk = "p_atk";
     static const char* pRel = "p_rel"; static const char* pMk = "p_makeup"; static const char* pTone = "p_tone";
     static const char* gIn = "g_in"; static const char* gThr = "g_thr"; static const char* gRange = "g_range";
-    static const char* gAtk = "g_atk"; static const char* gHold = "g_hold"; static const char* gRel = "g_rel"; static const char* gKey = "g_key";
+    static const char* gRel = "g_rel"; static const char* gFast = "g_fast"; static const char* gHyst = "g_hyst"; static const char* gPad = "g_pad";
+    static const char* rThr = "r_thr"; static const char* rPad = "r_pad"; static const char* rRatio = "r_ratio"; static const char* rFast = "r_fast";
+    static const char* rAtk = "r_atk"; static const char* rRel = "r_rel"; static const char* rAuto = "r_auto"; static const char* rGain = "r_gain";
     static const char* os = "os"; static const char* osFilt = "osfilt";
     static const char* analog = "analog";
 }
@@ -78,7 +81,7 @@ static AudioProcessorValueTreeState::ParameterLayout makeLayout()
                                           "Comp > Gate > EQ", "Gate > EQ > Comp", "Gate > Comp > EQ" }, 1);
 
     // compressor
-    choice (ids::cModel, "Comp Type", { "2254", "Velvet VCA", "Velvet FET", "Velvet Opto" }, 0);
+    choice (ids::cModel, "Comp Type", { "2254", "VCA", "88R" }, 0);          // old FET / Opto sessions (index 2 / 3) open on the 88R
     bln (ids::cIn, "Comp In", false);
     flt (ids::cDrive, "Comp Drive", NormalisableRange<float> (-18.f, 18.f, 0.f), 0.f, "dB", 1);
     flt (ids::cMix, "Comp Mix", NormalisableRange<float> (0.f, 100.f, 0.f), 100.f, "%", 0);
@@ -103,15 +106,27 @@ static AudioProcessorValueTreeState::ParameterLayout makeLayout()
     flt (ids::pRel, "Velvet Release", skewed (20.f, 10000.f, 500.f), 300.f, "ms", 0);
     flt (ids::pMk, "Velvet Makeup", NormalisableRange<float> (0.f, 24.f, 0.f), 0.f, "dB", 1);
     choice (ids::pTone, "Velvet Tone", { "Clean", "Vintage" }, 0);
+    // 88R: the Neve 88R channel compressor's controls and ranges
+    flt (ids::rThr, "88R Threshold", NormalisableRange<float> (-10.f, 20.f, 0.f), 0.f, "dBu", 1);
+    bln (ids::rPad, "88R Threshold -20 dB", false);
+    l.add (std::make_unique<AudioParameterFloat> (ParameterID { ids::rRatio, 1 }, "88R Ratio", skewed (1.f, 30.f, 4.f), 4.f,
+               AudioParameterFloatAttributes().withStringFromValueFunction ([] (float v, int) { return v >= 29.95f ? String ("inf") : String (v, 1) + ":1"; })));
+    bln (ids::rFast, "88R Fast Attack", false);
+    flt (ids::rAtk, "88R Attack", NormalisableRange<float> (3.f, 7.f, 0.f), 5.f, "ms", 1);
+    flt (ids::rRel, "88R Release", skewed (10.f, 3000.f, 200.f), 300.f, "ms", 0);
+    bln (ids::rAuto, "88R Auto Release", false);
+    flt (ids::rGain, "88R Gain", NormalisableRange<float> (0.f, 30.f, 0.f), 0.f, "dB", 1);
 
     // gate
     bln (ids::gIn, "Gate In", false);
-    flt (ids::gThr, "Gate Threshold", NormalisableRange<float> (-80.f, 0.f, 0.f), -50.f, "dB", 1);
-    flt (ids::gRange, "Gate Range", NormalisableRange<float> (0.f, 80.f, 0.f), 40.f, "dB", 1);
-    flt (ids::gAtk, "Gate Attack", skewed (0.05f, 50.f, 2.f), 0.5f, "ms", 2);
-    flt (ids::gHold, "Gate Hold", skewed (0.f, 500.f, 60.f), 50.f, "ms", 0);
-    flt (ids::gRel, "Gate Release", skewed (5.f, 2000.f, 150.f), 150.f, "ms", 0);
-    choice (ids::gKey, "Gate Key HPF", sc, 0);
+    // gate / expander after the Neve 88R: threshold -25 ... +15 dBu (-40 dB switch), range 0 ... 60 dB, attack 500 us (FAST 50 us),
+    // release 10 ms ... 3 s, hysteresis 0 ... 25 dB (fully down = 1:2 expander)
+    flt (ids::gThr, "Gate Threshold", NormalisableRange<float> (-25.f, 15.f, 0.f), 8.f, "dBu", 1);
+    bln (ids::gPad, "Gate Threshold -40 dB", true);
+    flt (ids::gRange, "Gate Range", NormalisableRange<float> (0.f, 60.f, 0.f), 40.f, "dB", 1);
+    bln (ids::gFast, "Gate Fast Attack", false);
+    flt (ids::gRel, "Gate Release", skewed (10.f, 3000.f, 150.f), 150.f, "ms", 0);
+    flt (ids::gHyst, "Gate Hysteresis", NormalisableRange<float> (0.f, 25.f, 0.f), 3.f, "dB", 1);
 
     // settings (not automatable)
     choice (ids::os, "Oversampling", { "Auto", "Off", "2x", "4x", "6x", "8x" }, 0, false);
@@ -136,7 +151,8 @@ public:
         kThr = p (ids::kThr); kRatio = p (ids::kRatio); kRec = p (ids::kRec); kGain = p (ids::kGain); kFast = p (ids::kFast);
         kComp = p (ids::kComp); kLim = p (ids::kLim); kLimLvl = p (ids::kLimLvl); kLimRec = p (ids::kLimRec);
         qThr = p (ids::pThr); qRatio = p (ids::pRatio); qAtk = p (ids::pAtk); qRel = p (ids::pRel); qMk = p (ids::pMk); qTone = p (ids::pTone);
-        gIn = p (ids::gIn); gThr = p (ids::gThr); gRange = p (ids::gRange); gAtk = p (ids::gAtk); gHold = p (ids::gHold); gRel = p (ids::gRel); gKey = p (ids::gKey);
+        gIn = p (ids::gIn); gThr = p (ids::gThr); gRange = p (ids::gRange); gRel = p (ids::gRel); gFast = p (ids::gFast); gHyst = p (ids::gHyst); gPad = p (ids::gPad);
+        rThr = p (ids::rThr); rPad = p (ids::rPad); rRatio = p (ids::rRatio); rFast = p (ids::rFast); rAtk = p (ids::rAtk); rRel = p (ids::rRel); rAuto = p (ids::rAuto); rGain = p (ids::rGain);
         pOs = p (ids::os); pOsFilt = p (ids::osFilt); pAnalog = p (ids::analog);
     }
 
@@ -275,7 +291,7 @@ private:
         curFactor = f; curLinear = lin;
         osRate = baseRate * f;
         for (auto& c : ch) c.prepare (osRate);
-        comp.prepare (osRate); pv.prepare (osRate); gate.prepare (osRate);
+        comp.prepare (osRate); c88.prepare (osRate); pv.prepare (osRate); gate.prepare (osRate);
         for (int i = 0; i < 4; ++i) fir[i].reset();
         for (auto& o : iir) if (o) o->reset();
         int lat = 0;
@@ -339,11 +355,15 @@ private:
 
         const bool compOn = cIn->load() > 0.5f, gateOn = gIn->load() > 0.5f;
         const int model = (int) cModel->load();
-        if (model != lastModel) { comp.reset(); pv.c.reset(); lastModel = model; }
+        if (model != lastModel) { comp.reset(); c88.reset(); pv.c.reset(); lastModel = model; }
         const n1081::CompParams2254 kp = params2254();
         const pv::CompParams pp = paramsPv();
-        n1081::GateParams gp; gp.thrDb = gThr->load(); gp.rangeDb = gRange->load(); gp.atkMs = gAtk->load();
-        gp.holdMs = gHold->load(); gp.relMs = gRel->load(); gp.keyHpf = (int) gKey->load();
+        const n1081::Comp88Params rp = params88();
+        n1081::GateParams gp;
+        gp.thrDb = gThr->load() - (gPad->load() > 0.5f ? 40.0 : 0.0) - n1081::kDbuOffset;     // dBu -> dBFS
+        gp.rangeDb = gRange->load(); gp.atkMs = gFast->load() > 0.5f ? 0.05 : 0.5;
+        gp.holdMs = 0; gp.relMs = gRel->load(); gp.keyHpf = 0;
+        gp.hystDb = gHyst->load(); gp.expander = gp.hystDb < 0.1;
         updatePvSc();
         int order[3]; currentOrder (order);
         double sIn = 0, sOut = 0, grMax = 0, gateMax = 0;
@@ -380,6 +400,7 @@ private:
                             sIn += L * L + R * R;
                             double gr = 0;
                             if (model == 0) { comp.process (L, R, kp); gr = comp.gr; }
+                            else if (model == 2) { c88.process (L, R, rp); gr = c88.gr; }
                             else {
                                 float fl = (float) L, fr = (float) R, kl = fl, kr = fr;
                                 if (pv.scHz > 0) { kl = pv.sc[0].process (kl); kr = pv.sc[1].process (kr); }
@@ -433,10 +454,21 @@ private:
         p.mix = cMix->load() * 0.01;
         return p;
     }
+    n1081::Comp88Params params88() const
+    {
+        n1081::Comp88Params p;
+        p.thrDbu = rThr->load() - (rPad->load() > 0.5f ? 20.0 : 0.0);
+        p.ratio = rRatio->load();
+        const double a = rAtk->load();                   // 3 ... 7 ms; FAST stretches the range down to 1 ms
+        p.atkMs = rFast->load() > 0.5f ? 1.0 + (a - 3.0) * 1.5 : a;
+        p.relMs = rRel->load(); p.autoRel = rAuto->load() > 0.5f;
+        p.gainDb = rGain->load(); p.mix = cMix->load() * 0.01; p.scHpf = (int) cSc->load();
+        return p;
+    }
     pv::CompParams paramsPv() const
     {
         pv::CompParams p; p.on = true; p.duck = false;
-        p.type = jlimit (0, 2, (int) cModel->load() - 1);
+        p.type = 0;                                       // the clean VCA (with its Vintage colour)
         p.vintage = qTone->load() > 0.5f;
         p.thr = qThr->load(); p.ratio = qRatio->load(); p.atkMs = qAtk->load(); p.relMs = qRel->load();
         p.makeup = qMk->load(); p.mix = cMix->load() * 0.01f;
@@ -469,7 +501,8 @@ private:
     std::atomic<float>* cModel {}, * cIn {}, * cDrive {}, * cMix {}, * cSc {};
     std::atomic<float>* kThr {}, * kRatio {}, * kRec {}, * kGain {}, * kFast {}, * kComp {}, * kLim {}, * kLimLvl {}, * kLimRec {};
     std::atomic<float>* qThr {}, * qRatio {}, * qAtk {}, * qRel {}, * qMk {}, * qTone {};
-    std::atomic<float>* gIn {}, * gThr {}, * gRange {}, * gAtk {}, * gHold {}, * gRel {}, * gKey {};
+    std::atomic<float>* gIn {}, * gThr {}, * gRange {}, * gRel {}, * gFast {}, * gHyst {}, * gPad {};
+    std::atomic<float>* rThr {}, * rPad {}, * rRatio {}, * rFast {}, * rAtk {}, * rRel {}, * rAuto {}, * rGain {};
     std::atomic<float>* pOs {}, * pOsFilt {}, * pAnalog {};
 
     std::unique_ptr<dsp::Oversampling<double>> iir[3];
@@ -479,6 +512,7 @@ private:
     double baseRate = 48000, osRate = 192000;
     n1081::Channel ch[2];
     n1081::Comp2254 comp;
+    n1081::Comp88 c88;
     n1081::Gate gate;
     PvUnit pv;
     SmoothedValue<float> gainSm[4], lineSm, outSm, inSm, drvSm, anSm;
@@ -488,6 +522,13 @@ private:
 };
 
 //==============================================================================
+// the text: Inter, thinner than before (medium where it was bold, regular elsewhere), same sizes
+static Font uiFont (float size, bool medium)
+{
+    static Typeface::Ptr reg = Typeface::createSystemTypefaceFor (flexfonts::InterRegular, (size_t) flexfonts::InterRegularSize);
+    static Typeface::Ptr med = Typeface::createSystemTypefaceFor (flexfonts::InterMedium, (size_t) flexfonts::InterMediumSize);
+    return Font (FontOptions (medium ? med : reg).withHeight (size));
+}
 namespace col {
     static const Colour panel  (0xff4f5b66), panelDark (0xff3c4650), well (0xff2b3239);
     static const Colour comp   (0xff46525c), compDark (0xff353f48);
@@ -571,6 +612,10 @@ public:
             return;
         }
         const bool on = b.getToggleState();
+        if ((int) b.getProperties()["icon"] != 0 || (bool) b.getProperties()["text"]) {     // no key: the wave or the word alone
+            if (over || down) { g.setColour (Colours::white.withAlpha (down ? 0.10f : 0.05f)); g.fillRoundedRectangle (r, 4); }
+            return;
+        }
         g.setColour (col::well); g.fillRoundedRectangle (r, 3);
         auto face = r.reduced (2.0f);
         g.setGradientFill (ColourGradient (on ? col::lampOn : col::cream, face.getTopLeft(),
@@ -582,13 +627,20 @@ public:
     {
         const bool flat = b.getProperties()["flat"];
         g.setColour (flat ? col::legend : col::ink);
-        if (const int icon = b.getProperties()["icon"]) {
-            const auto r = b.getLocalBounds().toFloat().reduced (b.getWidth() * 0.24f, b.getHeight() * 0.3f);
-            g.strokePath (shapeIcon (icon, b.getToggleState(), r), PathStrokeType (1.8f, PathStrokeType::curved, PathStrokeType::rounded));
+        if (const int icon = b.getProperties()["icon"]) {                       // the wave alone: white, yellow when on
+            const auto r = b.getLocalBounds().toFloat().reduced (b.getWidth() * 0.18f, b.getHeight() * 0.26f);
+            g.setColour (b.getToggleState() ? col::lampOn : Colours::white.withAlpha (0.92f));
+            g.strokePath (shapeIcon (icon, b.getToggleState(), r), PathStrokeType (2.0f, PathStrokeType::curved, PathStrokeType::rounded));
+            return;
+        }
+        if ((bool) b.getProperties()["text"]) {                                 // the word alone: white, yellow when on
+            g.setColour (b.getToggleState() ? col::lampOn : col::legend);
+            g.setFont (uiFont (11.5f, true));
+            g.drawFittedText (b.getButtonText(), b.getLocalBounds(), Justification::centred, 1);
             return;
         }
         const auto text = b.getButtonText();
-        g.setFont (FontOptions (text.length() == 1 ? 15.0f : 11.0f, Font::bold));
+        g.setFont (uiFont (text.length() == 1 ? 15.0f : 11.0f, true));
         g.drawFittedText (text, b.getLocalBounds(), Justification::centred, 1);
     }
     void drawComboBox (Graphics& g, int w, int h, bool, int, int, int, int, ComboBox& box) override
@@ -608,10 +660,10 @@ public:
     Label* createSliderTextBox (Slider& s) override
     {
         auto* l = LookAndFeel_V4::createSliderTextBox (s);
-        if ((bool) s.getProperties()["ring"] || (bool) s.getProperties()["small"]) l->setFont (FontOptions (11.5f, Font::bold));
+        if ((bool) s.getProperties()["ring"] || (bool) s.getProperties()["small"]) l->setFont (uiFont (11.5f, true));
         return l;
     }
-    Font getComboBoxFont (ComboBox&) override { return FontOptions (11.5f, Font::bold); }
+    Font getComboBoxFont (ComboBox&) override { return uiFont (11.5f, true); }
     void positionComboBoxText (ComboBox& b, Label& l) override { l.setBounds (4, 0, b.getWidth() - 18, b.getHeight()); l.setFont (getComboBoxFont (b)); l.setJustificationType (Justification::centred); }
 };
 
@@ -719,8 +771,7 @@ protected:
             mv[i].setButtonText (i == 0 ? "<" : ">"); mv[i].getProperties().set ("flat", true);
             mv[i].setTooltip (i == 0 ? "Move left (earlier in the chain)" : "Move right (later in the chain)");
             mv[i].onClick = [this, i] { if (onMove) onMove (i == 0 ? -1 : 1); };
-            addAndMakeVisible (mv[i]);
-            mv[i].setBounds (x + i * 24, y, 22, 20);
+            mv[i].setBounds (x + i * 24, y, 22, 20);          // not shown: the swap sign between the panels does it
         }
     }
     // knob centred at cx, top at y; the value box is exactly as wide as the knob column
@@ -771,14 +822,14 @@ protected:
             g.setColour (Colour (0xff9aa1a6)); g.fillEllipse (Rectangle<float> (9, 9).withCentre (pt));
             g.setColour (Colour (0xff4a4f53)); g.drawLine (pt.x - 3, pt.y, pt.x + 3, pt.y, 1.3f);
         }
-        if (title.isNotEmpty()) { g.setColour (col::legend); g.setFont (FontOptions (20.f, Font::bold)); g.drawText (title, titleX, 10, 110, 26, Justification::left); }
+        if (title.isNotEmpty()) { g.setColour (col::legend); g.setFont (uiFont (20.f, true)); g.drawText (title, titleX, 10, 110, 26, Justification::left); }
         for (auto& s : rows) {
             g.setColour (Colours::black.withAlpha (0.17f)); g.fillRoundedRectangle (s.r.toFloat(), 6);
-            g.setColour (col::legend); g.setFont (FontOptions (centredTitles ? 12.f : 11.f, Font::bold));
+            g.setColour (col::legend); g.setFont (uiFont (centredTitles ? 12.f : 11.f, true));
             if (centredTitles) g.drawText (s.text, s.r.getX(), s.r.getY() + 5, s.r.getWidth(), 14, Justification::centred);
             else g.drawText (s.text, s.r.getX() + 8, s.r.getY() + 4, 200, 13, Justification::left);
         }
-        g.setFont (FontOptions (10.f, Font::bold)); g.setColour (col::dim);
+        g.setFont (uiFont (10.f, true)); g.setColour (col::dim);
         for (auto& c : captions) g.drawText (c.text, c.r, Justification::centred);
     }
 
@@ -795,7 +846,7 @@ protected:
 class Graph : public Component, private Timer
 {
 public:
-    explicit Graph (N1081Processor& p) : proc (p), fft (12) { startTimerHz (30); }
+    explicit Graph (N1081Processor& p) : proc (p), fft (12) { startTimerHz (60); }
 
     void paint (Graphics& g) override
     {
@@ -803,7 +854,7 @@ public:
         g.setColour (col::well); g.fillRoundedRectangle (r, 5);
         auto mr = r.removeFromRight (10).reduced (2, 6);
         plot = r.reduced (8, 6);
-        g.setFont (FontOptions (10.f));
+        g.setFont (uiFont (10.f, false));
         for (double f : { 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0 }) {
             g.setColour (Colours::white.withAlpha (0.07f)); g.drawVerticalLine ((int) xOf (f), plot.getY(), plot.getBottom());
             g.setColour (col::dim.withAlpha (0.7f)); g.drawText (hz (f), (int) xOf (f) + 2, (int) plot.getBottom() - 12, 30, 12, Justification::left);
@@ -850,7 +901,7 @@ public:
                 const auto s = n1081::bandSpec (p, b);
                 const String txt = hz (s.f0) + "   " + signedDb (p.gainDb[b], 1) + " dB   Q " + String (s.Q, 2)
                                  + (std::abs (p.qMul[b] - 1.0) < 0.005 ? "  (hardware)" : "   (wheel: Q, double-click: hardware)");
-                g.setColour (col::legend); g.setFont (FontOptions (11.f, Font::bold));
+                g.setColour (col::legend); g.setFont (uiFont (11.f, true));
                 g.drawText (txt, plot.withHeight (14).translated (0, 2), Justification::centredTop);
             }
         }
@@ -933,7 +984,7 @@ private:
         fft.performFrequencyOnlyForwardTransform (fftData);
         for (int b = 0; b < kN / 2; ++b) {
             const float db = Decibels::gainToDecibels (fftData[b] * 4.0f / (float) kN, -120.f);
-            smooth[b] = db > smooth[b] ? db : smooth[b] * 0.8f + db * 0.2f;      // fast rise, gentle fall
+            smooth[b] = db > smooth[b] ? db : smooth[b] * 0.894f + db * 0.106f;  // fast rise, gentle fall (same speed at 60 redraws a second)
         }
         repaint();
     }
@@ -974,7 +1025,7 @@ public:
         }
         g.setColour (col::well);
         for (float x = in.getX() + 5; x < in.getRight(); x += 5) g.drawVerticalLine ((int) x, in.getY(), in.getBottom());
-        g.setColour (col::legend); g.setFont (FontOptions (10.5f, Font::bold));
+        g.setColour (col::legend); g.setFont (uiFont (10.5f, true));
         const String t = gr ? "GR " + String (-level, 1) : (level <= -29.9 ? String ("-30 VU") : signedDb (level, 1) + " VU");
         g.drawText (t, getLocalBounds().reduced (5, 0), Justification::centredRight);
     }
@@ -1038,11 +1089,11 @@ public:
     void paint (Graphics& g) override
     {
         paintPanel (g, col::panel.brighter (0.06f), col::panelDark, {}, true);
-        g.setColour (col::legend); g.setFont (FontOptions (30.f, Font::bold)); g.drawText ("1081+", 26, 22, 120, 34, Justification::left);
-        g.setFont (FontOptions (11.f)); g.setColour (col::dim);
+        g.setColour (col::legend); g.setFont (uiFont (30.f, true)); g.drawText ("1081+", 26, 22, 120, 34, Justification::left);
+        g.setFont (uiFont (11.f, false)); g.setColour (col::dim);
         g.drawText ("CHANNEL AMPLIFIER", 26, 60, 130, 14, Justification::left);
         g.drawText ("CIRCUIT MODEL", 26, 76, 130, 14, Justification::left);
-        g.setFont (FontOptions (9.5f, Font::bold));
+        g.setFont (uiFont (9.5f, true));
         g.drawText ("ANALOG", 74, 102, 38, 12, Justification::right);
     }
 
@@ -1052,9 +1103,10 @@ public:
         const bool cmp = proc.compactEq;
         for (auto* c : std::initializer_list<Component*> { &hpf, &lpf, &freq[0], &freq[1], &freq[2], &freq[3], &gain[0], &gain[1], &gain[2], &gain[3] }) c->setVisible (! cmp);
         for (auto* c : std::initializer_list<Component*> { &cHpf, &cLpf, &cFreq[0], &cFreq[1], &cFreq[2], &cFreq[3], &cGain[0], &cGain[1], &cGain[2], &cGain[3] }) c->setVisible (cmp);
-        graph.setBounds (156, 14, kOutX - 156 - 8, 112);
+        const int lower = cmp ? 0 : 36;                       // classic knobs: the controls sit at the bottom of the dark panels; the graph gets the room
+        graph.setBounds (156, 14, kOutX - 156 - 8, 112 + lower);
         analog.setBounds (114, 90, 36, 36);
-        const int top = 138, h = getHeight() - top - 12;
+        const int top = 138 + lower, h = getHeight() - top - 12;
         const int off = cmp ? jmax (0, (h - (kHc - top - 12)) / 2) : 0;     // compact knobs centred if the strip is taller
         const int btnY = cmp ? h - 32 : 228;                                  // all shape / phase / EQ buttons on one line
         int x = 14;
@@ -1087,7 +1139,7 @@ public:
         put (out, "TRIM", r.getCentreX(), r.getY() + (cmp ? 22 + off : 26), 64, r.getWidth() - 8);
         btn (eqIn, r);
         eqIn.setButtonText (cmp ? "EQ IN" : "EQ");
-        if (! cmp) captions.push_back ({ "EQ IN", { r.getX(), r.getY() + 256, r.getWidth(), 12 } });
+        if (! cmp) captions.push_back ({ "EQ IN", { r.getX(), r.getY() + btnY - 16, r.getWidth(), 12 } });
     }
 
 private:
@@ -1118,13 +1170,14 @@ private:
 };
 
 //==============================================================================
-// Dynamics: compressor (2254 diode bridge, or Velvet = PlateVerb's VCA / FET / Opto) and gate in one panel
+// Dynamics: compressor (2254 diode bridge, VCA = PlateVerb's clean VCA, or the Neve 88R) and the 88R gate in one panel
 static String msShort (double v) { return v < 1 ? String (v, 2) : v < 1000 ? String (v, v < 10 ? 1 : 0) : String (v / 1000.0, 1) + "s"; }
 
 class DynPanel : public ModulePanel, private Timer
 {
 public:
-    static constexpr int kW = 256;
+    static constexpr int kCols = 6, kColW = 70;
+    static constexpr int kW = 12 * 2 + kCols * kColW;
     std::function<void()> onGateOrder;                   // flip gate before / after the compressor
     std::function<bool()> gateFirst;
     DynPanel (N1081Processor& p, KnobLnF& l) : ModulePanel (p, l), meter (p)
@@ -1135,19 +1188,13 @@ public:
         presets.onChange = [this] { const int i = presets.getSelectedItemIndex(); if (i >= 0) { applyPreset (presetList()[(size_t) i]); presets.setSelectedId (0, dontSendNotification); } };
         addAndMakeVisible (presets);
 
-        type.addItemList ({ "2254", "VCA", "FET", "OPTO" }, 1);
+        type.addItemList ({ "2254", "VCA", "88R" }, 1);
         type.getProperties().set ("button", true);
         type.setColour (ComboBox::textColourId, col::ink);
         type.setTooltip ("Compressor type");
         addAndMakeVisible (type);
         typeAtt = std::make_unique<AudioProcessorValueTreeState::ComboBoxAttachment> (proc.apvts, ids::cModel, type);
         type.onChange = [this] { layoutModel(); };
-
-        StringArray scNames { "SC HPF off" }; for (int i = 1; i < 6; ++i) scNames.add ("SC " + String ((int) n1081::kScHpf[i]) + " Hz");
-        sc.addItemList (scNames, 1);
-        sc.setTooltip ("Sidechain high-pass: keeps the low end from pumping the compressor");
-        addAndMakeVisible (sc);
-        scAtt = std::make_unique<AudioProcessorValueTreeState::ComboBoxAttachment> (proc.apvts, ids::cSc, sc);
 
         onOff (compIn, ids::cIn);
         titleX = 14 + kSmallW + 8;
@@ -1158,30 +1205,62 @@ public:
 
         const Colour dark = col::capGrey.darker (0.35f), red = col::capRed, blue = col::capBlue, grey = col::capGrey;
         auto num = [] (double v) { return signedDb (v, 1); };
+        auto pct = [] (double v) { return String ((int) std::round (v)) + "%"; };
+        // shared by all three types
+        knob (mixK, ids::cMix, grey, false, pct);
+        knob (scK, ids::cSc, dark, true, [] (double v) { const int i = jlimit (0, 5, (int) std::round (v)); return i == 0 ? String ("OFF") : String ((int) n1081::kScHpf[i]) + " Hz"; });
+        scK.setTooltip ("Sidechain high-pass: keeps the low end from pumping the compressor");
+        knob (drvK, ids::cDrive, red, false, num);
+        drvK.setTooltip ("Clean drive into the compressor");
         // 2254
         concentric (kThr, kRatio, ids::kThr, ids::kRatio, blue, dark, true, true, [] (double v) { return signedDb (n1081::compThrDbu ((int) std::round (v))); });
         concentric (kRec, kGain, ids::kRec, ids::kGain, grey, red, true, true, {}, [] (double v) { return signedDb (n1081::compGainDb ((int) std::round (v))); });
-        concentric (kDrive, kMix, ids::cDrive, ids::cMix, red, dark, false, false, num, [] (double v) { return String ((int) std::round (v)) + "%"; });
         concentric (kLim, kLimRec, ids::kLimLvl, ids::kLimRec, grey, dark, true, true, [] (double v) { return signedDb (n1081::limThrDbu ((int) std::round (v))); });
         kLim.setTooltip ("Limiter level in dBu (ring) / limiter recovery (cap)");
         button (kComp, ids::kComp, "COMP");
         button (kFast, ids::kFast, "FAST");
         button (kLimit, ids::kLim, "LIMIT");
-        // Velvet
+        // VCA
         concentric (vThr, vRatio, ids::pThr, ids::pRatio, blue, dark, false, false, num, [] (double v) { return String (v, 1) + ":1"; });
         concentric (vAtk, vRel, ids::pAtk, ids::pRel, grey, dark, false, false, msShort, msShort);
-        concentric (vDrive, vMk, ids::cDrive, ids::pMk, red, red.darker (0.3f), false, false, num, num);
-        knob (vMix, ids::cMix, grey, false, [] (double v) { return "MIX " + String ((int) std::round (v)) + "%"; });
-        vMix.getProperties().set ("small", true);
+        knob (vMk, ids::pMk, red.darker (0.3f), false, num);
         button (vTone, ids::pTone, "VINTAGE");
-        // gate
+        // 88R
+        auto* rPadP = proc.apvts.getRawParameterValue (ids::rPad);
+        concentric (rThr, rRatio, ids::rThr, ids::rRatio, blue, dark, false, false,
+                    [rPadP] (double v) { return signedDb (v - (rPadP->load() > 0.5f ? 20.0 : 0.0), 1); },
+                    [] (double v) { return v >= 29.95 ? String ("inf") : String (v, 1) + ":1"; });
+        rThr.setTooltip ("Threshold in dBu (ring, +20 ... -10; with -20 dB: 0 ... -30) / ratio (cap, 1:1 ... inf)");
+        concentric (rAtk, rRel, ids::rAtk, ids::rRel, grey, dark, false, false,
+                    [] (double v) { return String (v, 1); }, msShort);
+        rAtk.setTooltip ("Attack 3 ... 7 ms (FAST: 1 ... 7 ms) (ring) / release 10 ms ... 3 s (cap); AUTO: programme dependent release");
+        knob (rGain, ids::rGain, red.darker (0.3f), false, num);
+        button (rFast, ids::rFast, "FAST");
+        button (rAuto, ids::rAuto, "AUTO");
+        button (rPad, ids::rPad, "-20 dB");
+        rPad.onStateChange = [this] { rThr.updateText(); };
+        // gate (88R gate / expander)
         onOff (gIn, ids::gIn);
-        concentric (gThr, gRange, ids::gThr, ids::gRange, blue, dark, false, false, num, num);
-        concentric (gAtk, gRel, ids::gAtk, ids::gRel, grey, dark, false, false, msShort, msShort);
-        concentric (gHold, gKey, ids::gHold, ids::gKey, grey, dark, false, true, msShort);
+        auto* gPadP = proc.apvts.getRawParameterValue (ids::gPad);
+        concentric (gThr, gRange, ids::gThr, ids::gRange, blue, dark, false, false,
+                    [gPadP] (double v) { return signedDb (v - (gPadP->load() > 0.5f ? 40.0 : 0.0), 1); },
+                    [] (double v) { return String (v, 1); });
+        gThr.setTooltip ("Threshold in dBu (ring, -25 ... +15; with -40 dB: -65 ... -25) / range (cap, 0 ... 60 dB)");
+        concentric (gRel, gHyst, ids::gRel, ids::gHyst, grey, dark, false, false, msShort,
+                    [] (double v) { return v < 0.1 ? String ("EXP") : String (v, 1); });
+        gRel.setTooltip ("Release 10 ms ... 3 s (ring) / hysteresis 0 ... 25 dB (cap); fully down = 1:2 expander");
+        button (gFast, ids::gFast, "FAST");
+        gFast.setTooltip ("Attack 500 us, FAST: 50 us");
+        button (gPad, ids::gPad, "-40 dB");
+        gPad.onStateChange = [this] { gThr.updateText(); };
         gOrder.setTooltip ("Gate before (PRE) or after (POST) the compressor");
         gOrder.onClick = [this] { if (onGateOrder) onGateOrder(); };
+        gOrder.setButtonText ("POST");
         addAndMakeVisible (gOrder);
+
+        for (auto* s : std::initializer_list<Slider*> { &mixK, &scK, &drvK, &vMk, &rGain }) s->getProperties().set ("small", true);
+        for (auto* b : std::initializer_list<Button*> { &compIn, &meterMode, &kComp, &kFast, &kLimit, &vTone, &rFast, &rAuto, &rPad, &gIn, &gFast, &gPad, &gOrder })
+            b->getProperties().set ("text", true);
 
         arrows (14, 44);
         setSize (kW, EqPanel::kHc);
@@ -1193,8 +1272,9 @@ public:
 
     void paint (Graphics& g) override
     {
-        paintPanel (g, col::comp.brighter (0.05f), col::compDark, is2254() ? "2254" : "VELVET");
-        g.setColour (col::legend); g.setFont (FontOptions (14.f, Font::bold));
+        const char* names[3] = { "2254", "VCA", "88R" };
+        paintPanel (g, col::comp.brighter (0.05f), col::compDark, names[model()]);
+        g.setColour (col::legend); g.setFont (uiFont (14.f, true));
         g.drawText ("GATE", gateTitle, Justification::left);
         const float a = proc.gateAtten.load();
         const auto bar = gateBar.toFloat();
@@ -1208,59 +1288,66 @@ public:
 
     void layoutModel()
     {
-        const bool k = is2254();
-        for (auto* c : std::initializer_list<Component*> { &kThr, &kRatio, &kRec, &kGain, &kDrive, &kMix, &kLim, &kLimRec, &kComp, &kFast, &kLimit }) c->setVisible (k);
-        for (auto* c : std::initializer_list<Component*> { &vThr, &vRatio, &vAtk, &vRel, &vDrive, &vMk, &vMix, &vTone }) c->setVisible (! k);
+        const int m = model();
+        for (auto* c : std::initializer_list<Component*> { &kThr, &kRatio, &kRec, &kGain, &kLim, &kLimRec, &kComp, &kFast, &kLimit }) c->setVisible (m == 0);
+        for (auto* c : std::initializer_list<Component*> { &vThr, &vRatio, &vAtk, &vRel, &vMk, &vTone }) c->setVisible (m == 1);
+        for (auto* c : std::initializer_list<Component*> { &rThr, &rRatio, &rAtk, &rRel, &rGain, &rFast, &rAuto, &rPad }) c->setVisible (m == 2);
         resized(); repaint();
     }
 
     void resized() override
     {
         rows.clear(); captions.clear();
-        const bool k = is2254();
-        const int extra = jmax (0, getHeight() - EqPanel::kHc);              // taller next to the classic EQ: bigger knobs, more air
-        const int ks = 50 + jmin (16, extra), gap = (extra - (ks - 50)) / 3;
+        const int m = model();
+        const int h = getHeight();
+        // every knob the same size: as big as the panel height allows, up to the classic THR / RATIO size
+        const int ks = jmin (66, (h - 218) / 2);
+        const int spare = jmax (0, h - 10 - (208 + 2 * ks)), gap = spare / 4;
         compIn.setBounds (14, 13, kSmallW, kBtnH);
         presets.setBounds (kW - 14 - 84, 13, 84, kBtnH);
         meter.setBounds (66, 44, kW - 14 - kSmallW - 6 - 66, 20);
         meterMode.setBounds (kW - 14 - kSmallW, 43, kSmallW, 22);
 
-        const int y0 = 68 + gap, top = y0 + 4;
-        const int cx[3] = { 49, 128, 207 }, colW = 76;
-        if (k) {
-            putConcentric (kThr, kRatio, "THR / RATIO", cx[0], top, ks, colW);
-            putConcentric (kRec, kGain, "REC / GAIN", cx[1], top, ks, colW);
-            putConcentric (kDrive, kMix, "DRIVE / MIX", cx[2], top, ks, colW);
+        int cx[kCols]; for (int i = 0; i < kCols; ++i) cx[i] = 12 + kColW / 2 + i * kColW;
+        const int colW = kColW - 2;
+        const int y0 = 68 + gap, ra = y0 + 6, top = ra + 24 + 6 + gap / 2;
+        // type selector, and the type's switches above the knobs they belong to
+        type.setBounds (cx[0] - 30, ra, 60, 24);
+        auto sw = [&] (Button& b, int centre, int w) { b.setBounds (centre - w / 2, ra, w, 24); };
+        if (m == 0)      { sw (kComp, cx[2], 56); sw (kFast, cx[3], 56); sw (kLimit, cx[4], 56); }
+        else if (m == 1) { sw (vTone, cx[2], 66); }
+        else             { sw (rPad, cx[2], 56); sw (rFast, cx[3] - 18, 36); sw (rAuto, cx[3] + 18, 36); }
+        // MIX under the type selector, SC HPF next to it, then the type's own knobs, DRIVE last
+        put (mixK, "MIX", cx[0], top, ks, colW);
+        put (scK, "SC HPF", cx[1], top, ks, colW);
+        if (m == 0) {
+            putConcentric (kThr, kRatio, "THR / RATIO", cx[2], top, ks, colW);
+            putConcentric (kRec, kGain, "REC / GAIN", cx[3], top, ks, colW);
+            putConcentric (kLim, kLimRec, "LIMIT / REC", cx[4], top, ks, colW);
+        } else if (m == 1) {
+            putConcentric (vThr, vRatio, "THR / RATIO", cx[2], top, ks, colW);
+            putConcentric (vAtk, vRel, "ATK / REL ms", cx[3], top, ks, colW);
+            put (vMk, "MAKEUP", cx[4], top, ks, colW);
         } else {
-            putConcentric (vThr, vRatio, "THR / RATIO", cx[0], top, ks, colW);
-            putConcentric (vAtk, vRel, "ATK / REL ms", cx[1], top, ks, colW);
-            putConcentric (vDrive, vMk, "DRIVE / MAKEUP", cx[2], top, ks, colW);
+            putConcentric (rThr, rRatio, "THR / RATIO", cx[2], top, ks, colW);
+            putConcentric (rAtk, rRel, "ATK / REL ms", cx[3], top, ks, colW);
+            put (rGain, "GAIN", cx[4], top, ks, colW);
         }
-        const int by = top + ks + 16 + 11 + 4;
-        type.setBounds (16, by, 58, 24);
-        if (k) { kComp.setBounds (80, by, 50, 24); sc.setBounds (136, by, kW - 16 - 136, 24); }
-        else   { vTone.setBounds (80, by, 62, 24); sc.setBounds (148, by, kW - 16 - 148, 24); }
-        const int ly = by + 24 + 6;
-        if (k) {
-            kLimit.setBounds (16, ly + 5, 50, 24);
-            kFast.setBounds (72, ly + 5, 46, 24);
-            putConcentricRight (kLim, kLimRec, 126, ly, 34, kW - 16 - 126 - 34);
-        } else {
-            vMix.setTextBoxStyle (Slider::TextBoxRight, false, 80, 16);
-            vMix.setBounds (126, ly, 34 + 80, 34);
-        }
-        rows.push_back ({ {}, { 10, y0, kW - 20, ly + 34 + 4 - y0 } });
+        put (drvK, "DRIVE", cx[5], top, ks, colW);
+        const int cBottom = top + ks + 30 + 4;
+        rows.push_back ({ {}, { 10, y0, kW - 20, cBottom - y0 } });
 
-        const int gy = ly + 34 + 8 + gap;
-        Rectangle<int> gbox (10, gy, kW - 20, getHeight() - 10 - gy); rows.push_back ({ {}, gbox });
+        const int gy = cBottom + 6 + gap;
+        Rectangle<int> gbox (10, gy, kW - 20, jmax (0, h - 10 - gap - gy)); rows.push_back ({ {}, gbox });
         gIn.setBounds (16, gy + 4, kSmallW, 22);
         gateTitle = { 16 + kSmallW + 6, gy + 4, 44, 22 };
         gOrder.setBounds (kW - 16 - 44, gy + 4, 44, 22);
         gateBar = { gateTitle.getRight() + 2, gy + 8, gOrder.getX() - 6 - gateTitle.getRight() - 2, 14 };
-        const int gt = gy + 30 + jmax (0, (gbox.getBottom() - gy - 30 - (40 + 16 + 11 + 4)) / 2);
-        putConcentric (gThr, gRange, "THR / RANGE", cx[0], gt, 40, colW);
-        putConcentric (gAtk, gRel, "ATK / REL ms", cx[1], gt, 40, colW);
-        putConcentric (gHold, gKey, "HOLD / KEY", cx[2], gt, 40, colW);
+        const int gt = gy + 30 + jmax (0, (gbox.getBottom() - gy - 30 - (ks + 30 + 4)) / 2);
+        putConcentric (gThr, gRange, "THR / RANGE", cx[0], gt, ks, colW);
+        putConcentric (gRel, gHyst, "REL / HYST", cx[1], gt, ks, colW);
+        gPad.setBounds (cx[2] - 28, gt + ks / 2 - 12, 56, 24);
+        gFast.setBounds (cx[3] - 28, gt + ks / 2 - 12, 56, 24);
     }
 
 private:
@@ -1281,12 +1368,7 @@ private:
             { "2254 - Mix bus",          { { ids::cModel, 0 }, { ids::kComp, 1 }, { ids::kLim, 0 }, { ids::kThr, 10 }, { ids::kRatio, 0 }, { ids::kRec, 3 }, { ids::kGain, 1 }, { ids::kFast, 0 }, { ids::cSc, 3 }, { ids::cMix, 100 } } },
             { "2254 - Parallel smash",   { { ids::cModel, 0 }, { ids::kComp, 1 }, { ids::kLim, 0 }, { ids::kThr, 0 }, { ids::kRatio, 4 }, { ids::kRec, 0 }, { ids::kGain, 7 }, { ids::kFast, 1 }, { ids::cSc, 2 }, { ids::cMix, 35 } } },
             { "2254 - Peak limiter",     { { ids::cModel, 0 }, { ids::kComp, 0 }, { ids::kLim, 1 }, { ids::kLimLvl, 3 }, { ids::kLimRec, 1 }, { ids::kFast, 1 }, { ids::kGain, 0 }, { ids::cMix, 100 } } },
-            { "Velvet Opto - Vocal",     { { ids::cModel, 3 }, { ids::pThr, -24 }, { ids::pRatio, 3 }, { ids::pMk, 4 }, { ids::pTone, 1 }, { ids::cSc, 2 }, { ids::cMix, 100 } } },
-            { "Velvet Opto - Saxophone", { { ids::cModel, 3 }, { ids::pThr, -20 }, { ids::pRatio, 3 }, { ids::pMk, 3 }, { ids::pTone, 1 }, { ids::cSc, 2 }, { ids::cMix, 100 } } },
-            { "Velvet Opto - Bass",      { { ids::cModel, 3 }, { ids::pThr, -22 }, { ids::pRatio, 4 }, { ids::pMk, 4 }, { ids::pTone, 1 }, { ids::cSc, 0 }, { ids::cMix, 100 } } },
-            { "Velvet FET - Rock vocal", { { ids::cModel, 2 }, { ids::pThr, -20 }, { ids::pRatio, 6 }, { ids::pAtk, 0.3f }, { ids::pRel, 120 }, { ids::pMk, 5 }, { ids::pTone, 1 }, { ids::cSc, 2 }, { ids::cMix, 100 } } },
-            { "Velvet FET - Snare snap", { { ids::cModel, 2 }, { ids::pThr, -18 }, { ids::pRatio, 4 }, { ids::pAtk, 5 }, { ids::pRel, 80 }, { ids::pMk, 3 }, { ids::pTone, 0 }, { ids::cSc, 3 }, { ids::cMix, 100 } } },
-            { "Velvet VCA - Mix glue",   { { ids::cModel, 1 }, { ids::pThr, -18 }, { ids::pRatio, 2 }, { ids::pAtk, 30 }, { ids::pRel, 300 }, { ids::pMk, 2 }, { ids::pTone, 0 }, { ids::cSc, 3 }, { ids::cMix, 100 } } },
+            { "VCA - Mix glue",          { { ids::cModel, 1 }, { ids::pThr, -18 }, { ids::pRatio, 2 }, { ids::pAtk, 30 }, { ids::pRel, 300 }, { ids::pMk, 2 }, { ids::pTone, 0 }, { ids::cSc, 3 }, { ids::cMix, 100 } } },
         };
         return p;
     }
@@ -1296,18 +1378,37 @@ private:
         set (ids::cIn, 1); set (ids::cDrive, 0);
         for (auto& v : pr.values) set (v.first, v.second);
     }
-    bool is2254() const { return type.getSelectedItemIndex() <= 0; }
+    int model() const { return jlimit (0, 2, type.getSelectedItemIndex()); }
 
     LedMeter meter;
-    ComboBox presets, type, sc;
-    std::unique_ptr<AudioProcessorValueTreeState::ComboBoxAttachment> typeAtt, scAtt;
-    TextButton compIn, meterMode, kComp, kFast, kLimit, vTone, gIn, gOrder;
-    FineKnob kThr, kRec, kDrive, kLim, vThr, vAtk, vDrive, vMix, gThr, gAtk, gHold;
-    CentreKnob kRatio, kGain, kMix, kLimRec, vRatio, vRel, vMk, gRange, gRel, gKey;
+    ComboBox presets, type;
+    std::unique_ptr<AudioProcessorValueTreeState::ComboBoxAttachment> typeAtt;
+    TextButton compIn, meterMode, kComp, kFast, kLimit, vTone, rFast, rAuto, rPad, gIn, gFast, gPad, gOrder;
+    FineKnob mixK, scK, drvK, kThr, kRec, kLim, vThr, vAtk, vMk, rThr, rAtk, rGain, gThr, gRel;
+    CentreKnob kRatio, kGain, kLimRec, vRatio, vRel, rRatio, rRel, gRange, gHyst;
     Rectangle<int> gateTitle, gateBar;
 };
 
 //==============================================================================
+// the swap sign between the EQ and the dynamics: click it and they change places (and order in the signal chain)
+struct SwapButton : public Button
+{
+    SwapButton() : Button ("Swap") { setTooltip ("Swap: EQ and dynamics change places, and their order in the signal chain"); }
+    void paintButton (Graphics& g, bool over, bool down) override
+    {
+        auto r = getLocalBounds().toFloat().reduced (1.0f);
+        g.setColour (Colour (0xff1c2024).withAlpha (over ? 1.0f : 0.9f)); g.fillEllipse (r);
+        g.setColour (Colour (0xffece6d6).withAlpha (down ? 0.6f : 0.9f)); g.drawEllipse (r, 1.0f);
+        const auto c = r.getCentre(); const float w = r.getWidth() * 0.27f, h = r.getHeight() * 0.13f;
+        Path p;
+        p.startNewSubPath (c.x - w, c.y - h); p.lineTo (c.x + w, c.y - h);
+        p.startNewSubPath (c.x + w * 0.45f, c.y - h * 2.2f); p.lineTo (c.x + w, c.y - h); p.lineTo (c.x + w * 0.45f, c.y + h * 0.2f);
+        p.startNewSubPath (c.x + w, c.y + h); p.lineTo (c.x - w, c.y + h);
+        p.startNewSubPath (c.x - w * 0.45f, c.y - h * 0.2f); p.lineTo (c.x - w, c.y + h); p.lineTo (c.x - w * 0.45f, c.y + h * 2.2f);
+        g.strokePath (p, PathStrokeType (1.5f, PathStrokeType::curved, PathStrokeType::rounded));
+    }
+};
+
 class N1081Editor : public AudioProcessorEditor, private Timer
 {
 public:
@@ -1327,6 +1428,8 @@ public:
         zoomPct.onClick = [this] { zoomMenu(); };
         settings.onClick = [this] { settingsMenu(); };
         dynBtn.setTooltip ("Show / hide the compressor and gate (lit when either is on)");
+        addChildComponent (swap);
+        swap.onClick = [this] { int o[3]; proc.currentOrder (o); placeDyn (! (pos (o, ModComp) < pos (o, ModEq))); };
         dynBtn.onClick = [this] { proc.compOpen = ! proc.compOpen; applySize(); };
         scale = jlimit (0.6f, 2.0f, proc.uiScale);
         lastState = proc.uiStateVersion.load();
@@ -1349,6 +1452,8 @@ public:
         const int eqX = dynLeft ? DynPanel::kW : 0;
         eq.setBounds (eqX, 0, EqPanel::kW, baseHeight()); eq.setTransform (t);
         if (proc.compOpen) { dyn.setBounds (dynLeft ? 0 : EqPanel::kW, 0, DynPanel::kW, baseHeight()); dyn.setTransform (t); }
+        swap.setVisible (proc.compOpen);
+        if (proc.compOpen) { const int jx = dynLeft ? DynPanel::kW : EqPanel::kW; swap.setBounds (jx - 13, 1, 26, 26); swap.setTransform (t); swap.toFront (false); }
         // header tools: exactly the OUTPUT column's x and width
         const auto a = eq.toolArea().translated (eqX, 0);
         const int h = 22, gap = 6;
@@ -1421,7 +1526,7 @@ private:
     void timerCallback() override
     {
         const bool on = proc.apvts.getRawParameterValue (ids::cIn)->load() > 0.5f || proc.apvts.getRawParameterValue (ids::gIn)->load() > 0.5f;
-        const String t = String ("DYNAMICS") + (proc.compOpen ? "  <" : "  >");
+        const String t = "DYNAMICS";
         if (dynBtn.getButtonText() != t) dynBtn.setButtonText (t);
         dynBtn.setToggleState (on, dontSendNotification);
         const int ord = (int) proc.apvts.getRawParameterValue (ids::order)->load();
@@ -1435,6 +1540,7 @@ private:
     EqPanel eq;
     DynPanel dyn;
     TextButton zoomOut, zoomIn, zoomPct, settings, dynBtn;
+    SwapButton swap;
     TooltipWindow tips { this, 700 };
     float scale = 1.0f; bool ready = false; int lastOrder = -1, lastState = 0;
 };

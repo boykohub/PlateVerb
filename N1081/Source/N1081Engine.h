@@ -426,10 +426,53 @@ struct Comp2254 {
 };
 
 
-// ================================================================== gate / expander (stereo linked)
-// Peak detector with 3 dB hysteresis, hold, attack (opening) and release (closing) as "time to complete",
-// range = how far it closes. Key filter keeps low-frequency bleed from opening it.
-struct GateParams { double thrDb = -50, rangeDb = 40, atkMs = 0.5, holdMs = 50, relMs = 150; int keyHpf = 0; };
+// ================================================================== Neve 88R channel compressor (VCA, stereo linked)
+// Published 88R limiter/compressor: threshold +20 ... -10 dBu (a -20 dB switch moves it to 0 ... -30), ratio 1:1 ... infinity:1,
+// attack 3 ... 7 ms (FAST: 1 ... 7 ms), release 10 ms ... 3 s or AUTO (program dependent), make-up gain 0 ... 30 dB.
+// A clean VCA (THAT 2181 class): no added colour, the sound is in the detector and the timing.
+struct Comp88Params { double thrDbu = 0, ratio = 4, atkMs = 5, relMs = 300, gainDb = 0, mix = 1; bool autoRel = false; int scHpf = 0; };
+
+struct Comp88 {
+    double fs = 96000, env = 0, grFast = 0, grSlow = 0, gr = 0;
+    Biquad sc[2]; double scHz = -1;
+    void prepare (double rate) { fs = rate; scHz = -1; reset(); }
+    void reset() { env = grFast = grSlow = gr = 0; for (auto& b : sc) b.reset(); }
+    static double coef (double ms, double rate) { return 1.0 - std::exp (-1.0 / (std::max (0.01, ms) * 0.001 * rate)); }
+    inline void process (double& L, double& R, const Comp88Params& p)
+    {
+        double kL = L, kR = R;
+        if (p.scHpf > 0) {
+            if (scHz != kScHpf[p.scHpf]) { scHz = kScHpf[p.scHpf]; for (auto& b : sc) b.c = bilinear (0, 0, 1, 1, 1 / 0.707, 1, scHz, fs); }
+            kL = sc[0].process (kL); kR = sc[1].process (kR);
+        }
+        // detector: mean-square with a short window (VCA designs read close to RMS), linked
+        const double sq = 0.5 * (kL * kL + kR * kR);
+        env += (sq - env) * coef (5.0, fs);
+        const double lvlDbu = 10.0 * std::log10 (env + 1e-12) + kDbuOffset + 3.0;
+        // gain computer, soft knee over 6 dB; ratio >= 30 counts as infinity:1
+        const double slope = p.ratio >= 30.0 ? 1.0 : 1.0 - 1.0 / p.ratio;
+        const double over = lvlDbu - p.thrDbu, k = 6.0;
+        const double tgt = over <= -k / 2 ? 0.0 : over >= k / 2 ? over * slope : slope * (over + k / 2) * (over + k / 2) / (2 * k);
+        // attack / release in the dB domain; AUTO: a fast release for peaks plus a slow one that holds sustained compression
+        const double aA = coef (p.atkMs / 2.3, fs);
+        if (p.autoRel) {
+            grFast += (tgt - grFast) * (tgt > grFast ? aA : coef (60.0, fs));
+            grSlow += (tgt - grSlow) * (tgt > grSlow ? coef (400.0, fs) : coef (2500.0, fs));
+            gr = std::max (grFast, grSlow * 0.9);
+        } else {
+            gr += (tgt - gr) * (tgt > gr ? aA : coef (p.relMs / 2.3, fs));
+            grFast = grSlow = gr;
+        }
+        const double g = std::pow (10.0, (p.gainDb - gr) / 20.0);
+        L = L * (1.0 - p.mix) + L * g * p.mix;
+        R = R * (1.0 - p.mix) + R * g * p.mix;
+    }
+};
+
+// ================================================================== gate / expander (stereo linked), after the Neve 88R
+// Threshold with an adjustable hysteresis (it closes this many dB below where it opened); hysteresis fully down turns it
+// into a 1:2 expander. Attack 500 us (FAST: 50 us), release 10 ms ... 3 s, range = how far it closes.
+struct GateParams { double thrDb = -50, rangeDb = 40, atkMs = 0.5, holdMs = 0, relMs = 150; int keyHpf = 0; double hystDb = 3; bool expander = false; };
 
 struct Gate {
     double fs = 96000, env = 0, gainDb = 0, holdLeft = 0; bool open = false;
@@ -444,9 +487,13 @@ struct Gate {
         const double lvl = std::max (std::fabs (kL), std::fabs (kR));
         env = lvl > env ? lvl : env * std::exp (-1.0 / (0.010 * fs));        // 10 ms peak decay
         const double db = 20.0 * std::log10 (env + 1e-12);
-        if (db > p.thrDb) { open = true; holdLeft = p.holdMs * 0.001 * fs; }
-        else if (db < p.thrDb - 3.0) { if (holdLeft > 0) holdLeft -= 1; else open = false; }
-        const double target = open ? 0.0 : -p.rangeDb;
+        double target;
+        if (p.expander) target = db >= p.thrDb ? 0.0 : std::max (-p.rangeDb, db - p.thrDb);       // 1:2 below the threshold
+        else {
+            if (db > p.thrDb) { open = true; holdLeft = p.holdMs * 0.001 * fs; }
+            else if (db < p.thrDb - std::max (0.5, p.hystDb)) { if (holdLeft > 0) holdLeft -= 1; else open = false; }
+            target = open ? 0.0 : -p.rangeDb;
+        }
         const double ms = target > gainDb ? p.atkMs : p.relMs;
         const double a = 1.0 - std::exp (-4.6 / (std::max (0.01, ms) * 0.001 * fs));   // ~99 % in 'ms'
         gainDb += (target - gainDb) * a;
