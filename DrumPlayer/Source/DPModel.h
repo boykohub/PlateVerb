@@ -93,6 +93,9 @@ struct Pattern
     std::shared_ptr<const Pattern> edited;       // your edited version, kept while the key plays the original
     bool showingOriginal = false;
     bool hasOriginal() const { return original != nullptr; }
+    // swing (0 straight .. 100), written into the notes: the value now and the pattern's own (measured) value
+    float swing = -1.0f, swingOwn = -1.0f; int swingGrid = 0;       // -1 / 0: not measured yet
+    std::map<int, float> laneSwing, laneSwingOwn;                    // lanes with a swing of their own
     PatternType type = PatternType::Groove;
     int group = -1;                      // your own group (Intro, Verse...), shown as the key's colour
     int bars = 1, beatsPerBar = 4;
@@ -336,6 +339,51 @@ inline void computeAutoSwing (Pattern& p)
     }
 }
 
+// ------------------------------------------------------------------ swing, the Fender Studio Pro way: 0 % straight .. 100 % fully swung,
+// the off-beat of each pair of grid steps moved late (100 % = half a step). Turning a knob moves the notes; the pattern's own value is
+// remembered, and going back to it puts every note back where it was (the moves are exact, so nothing wears down).
+inline int swingDelay (double pct, int grid) { return (int) std::round (jlimit (0.0, 100.0, pct) / 100.0 * grid * 0.5); }
+inline bool onSwingOffbeat (int tick, int grid, int delay)
+{
+    int m = tick % (2 * grid); if (m < 0) m += 2 * grid;
+    return std::abs (m - (grid + delay)) <= jmax (6, grid / 8);
+}
+// how swung a pattern (or one lane, lane >= 0) already is; gridOut gets the step it swings on
+inline double measureSwing (const Pattern& p, int lane, int& gridOut)
+{
+    for (int g : { 240, 480 }) {
+        double sum = 0; int n = 0;
+        for (auto& nt : p.notes) {
+            if (lane >= 0 && nt.note != lane) continue;
+            int m = nt.tick % (2 * g);
+            if (m >= g - g / 8 && m <= g + (int) (g * 0.6)) { sum += jmax (0, m - g); ++n; }
+        }
+        if (n >= 2) { gridOut = g; return jlimit (0.0, 100.0, std::round (sum / n / (g * 0.5) * 100.0)); }
+    }
+    gridOut = 240; return 0.0;
+}
+inline double patternSwing (const Pattern& p) { int g; return p.swing >= 0 ? p.swing : measureSwing (p, -1, g); }
+inline double patternSwingOwn (const Pattern& p) { int g; return p.swingOwn >= 0 ? p.swingOwn : measureSwing (p, -1, g); }
+inline double laneSwingNow (const Pattern& p, int lane) { return p.laneSwing.count (lane) ? p.laneSwing.at (lane) : patternSwing (p); }
+inline double laneSwingOwnOf (const Pattern& p, int lane) { int g; return p.laneSwingOwn.count (lane) ? p.laneSwingOwn.at (lane) : measureSwing (p, lane, g); }
+// set the swing of the whole pattern (lane < 0; lanes with their own swing keep it) or of one lane
+inline void setSwing (Pattern& p, int lane, double pct)
+{
+    int g0 = 240;
+    if (p.swing < 0) { const double m = measureSwing (p, -1, g0); p.swing = p.swingOwn = (float) m; p.swingGrid = g0; }
+    const int g = p.swingGrid > 0 ? p.swingGrid : 240;
+    if (lane >= 0 && ! p.laneSwing.count (lane)) { int gl; const double now = patternSwing (p); p.laneSwing[lane] = (float) now; p.laneSwingOwn[lane] = (float) measureSwing (p, lane, gl); }
+    const double cur = lane >= 0 ? p.laneSwing[lane] : p.swing;
+    const int d0 = swingDelay (cur, g), d1 = swingDelay (pct, g);
+    if (d0 != d1)
+        for (auto& n : p.notes) {
+            if (lane >= 0 ? n.note != lane : p.laneSwing.count (n.note) > 0) continue;
+            if (onSwingOffbeat (n.tick, g, d0)) n.tick = jmax (0, n.tick + d1 - d0);
+        }
+    if (lane >= 0) p.laneSwing[lane] = (float) pct; else p.swing = (float) pct;
+    p.sort();
+}
+
 // ------------------------------------------------------------------ quantize
 enum class QuantMode { Normal = 0, Catch, Dual };
 // the kinds of notes the quantizer tells apart (by the finest grid a note sits on)
@@ -365,6 +413,7 @@ struct QuantOptions
     bool selectedOnly = true;
     bool useRules = false;         // a rule for each kind of note
     std::array<QuantRule, numQClasses> rules {};
+    std::map<int, double> laneSwingPct;   // lanes with a swing of their own (from the Lane knob)
 };
 
 inline void quantize (Pattern& p, const QuantOptions& o)
@@ -374,16 +423,18 @@ inline void quantize (Pattern& p, const QuantOptions& o)
     const int tg = nv.triplet ? g * 3 / 2 : g * 2 / 3;        // the partner grid for Dual
     bool anySel = false; for (auto& n : p.notes) anySel |= n.selected;
     const int swingGrid = o.swingValue >= 0 ? noteValues[jlimit (0, numNoteValues - 1, o.swingValue)].ticks : g;
+    double pctNow = o.swingPct;
     auto target = [&] (int t, int grid, bool swingIt) {
         const double k = std::round ((double) t / grid);
         double pos = k * grid;
-        if (swingIt && o.keepSwing) pos += swingOffset ((int) pos, swingGrid, o.swingPct);
+        if (swingIt && o.keepSwing) pos += swingOffset ((int) pos, swingGrid, pctNow);
         return pos;
     };
     for (auto& n : p.notes) {
         if (o.selectedOnly && anySel && ! n.selected) continue;
+        pctNow = o.laneSwingPct.count (n.note) ? o.laneSwingPct.at (n.note) : o.swingPct;
         if (o.useRules) {                                          // each kind of note has its own rule
-            const int cls = qClassOf (n.tick - (o.keepSwing ? (int) swingOffset (n.tick, swingGrid, o.swingPct) : 0));
+            const int cls = qClassOf (n.tick - (o.keepSwing ? (int) swingOffset (n.tick, swingGrid, pctNow) : 0));
             const auto& r = o.rules[(size_t) cls];
             if (r.action == 2) continue;
             const double to = r.action == 1 ? target (n.tick, qClassTicks (cls), cls != 2 && cls != 4 && cls != 6) : target (n.tick, g, ! nv.triplet);
@@ -810,6 +861,8 @@ inline std::unique_ptr<XmlElement> patternToXml (const Pattern& p, const String&
     }
     if (! p.comp.empty()) { String c; for (auto& seg : p.comp) c << seg.from << ':' << seg.to << ':' << seg.layer << ';'; x->setAttribute ("comp", c); }
     x->setAttribute ("uid", (int) p.uid);
+    if (p.swing >= 0) { x->setAttribute ("sw", p.swing); x->setAttribute ("swOwn", p.swingOwn); x->setAttribute ("swGrid", p.swingGrid); }
+    if (! p.laneSwing.empty()) { String t; for (auto& [n, v] : p.laneSwing) t << n << ':' << v << ':' << (p.laneSwingOwn.count (n) ? p.laneSwingOwn.at (n) : v) << ';'; x->setAttribute ("laneSw", t); }
     if (p.showingOriginal) x->setAttribute ("showOrig", true);
     if (p.original != nullptr) x->addChildElement (patternToXml (*p.original, "Original").release());
     if (p.edited != nullptr) x->addChildElement (patternToXml (*p.edited, "Edited").release());
@@ -839,6 +892,11 @@ inline Pattern patternFromXml (const XmlElement& x)
     for (auto& tok : StringArray::fromTokens (x.getStringAttribute ("lanemute"), ";", "")) if (tok.isNotEmpty()) p.laneMute.insert (tok.getIntValue());
     p.fav = x.getBoolAttribute ("fav", false); p.source = x.getStringAttribute ("src");
     if (x.hasAttribute ("uid")) p.uid = (uint32) x.getIntAttribute ("uid");
+    if (x.hasAttribute ("sw")) { p.swing = (float) x.getDoubleAttribute ("sw"); p.swingOwn = (float) x.getDoubleAttribute ("swOwn", p.swing); p.swingGrid = x.getIntAttribute ("swGrid", 240); }
+    for (auto& t : StringArray::fromTokens (x.getStringAttribute ("laneSw"), ";", "")) {
+        auto f = StringArray::fromTokens (t, ":", ""); if (f.size() < 3) continue;
+        p.laneSwing[f[0].getIntValue()] = (float) f[1].getDoubleValue(); p.laneSwingOwn[f[0].getIntValue()] = (float) f[2].getDoubleValue();
+    }
     p.showingOriginal = x.getBoolAttribute ("showOrig", false);
     if (auto* o = x.getChildByName ("Original")) p.original = std::make_shared<const Pattern> (patternFromXml (*o));
     if (auto* o = x.getChildByName ("Edited")) p.edited = std::make_shared<const Pattern> (patternFromXml (*o));

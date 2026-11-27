@@ -130,7 +130,7 @@ public:
         auto* ui = x->createNewChildElement ("UI");
         String pn; { const ScopedLock l (uiLock); pn = presetName; }
         ui->setAttribute ("scale", uiScale); ui->setAttribute ("preset", pn); ui->setAttribute ("grid", uiGrid);
-        ui->setAttribute ("zoomX", uiZoomX); ui->setAttribute ("strip", uiStripTools); ui->setAttribute ("shelf", uiShelfTools); ui->setAttribute ("qscope", uiQuantScope); ui->setAttribute ("headW", uiHeadW); ui->setAttribute ("editOpen", uiEditOpen);
+        ui->setAttribute ("zoomX", uiZoomX); ui->setAttribute ("strip", uiStripTools); ui->setAttribute ("shelf", uiShelfTools); ui->setAttribute ("qscope", uiQuantScope); ui->setAttribute ("shelf2", uiShelf2Tools); ui->setAttribute ("tempoDrag", uiTempoDragMode); ui->setAttribute ("headW", uiHeadW); ui->setAttribute ("editOpen", uiEditOpen);
         ui->setAttribute ("stopkey", uiStopKey); ui->setAttribute ("project", uiProjectPath);
         return x;
     }
@@ -141,7 +141,7 @@ public:
             { const ScopedLock l (uiLock); presetName = ui->getStringAttribute ("preset"); }
             uiGrid = jlimit (0, numNoteValues - 1, ui->getIntAttribute ("grid", 3));
             uiZoomX = (float) jlimit (0.25, 8.0, ui->getDoubleAttribute ("zoomX", 1.0));
-            uiStripTools = ui->getStringAttribute ("strip", uiStripTools); uiShelfTools = ui->getStringAttribute ("shelf", uiShelfTools); uiQuantScope = jlimit (0, 2, ui->getIntAttribute ("qscope", 0)); uiHeadW = jlimit (70, 360, ui->getIntAttribute ("headW", 200)); uiEditOpen = ui->getBoolAttribute ("editOpen", true);
+            uiStripTools = ui->getStringAttribute ("strip", uiStripTools); uiShelfTools = ui->getStringAttribute ("shelf", uiShelfTools); uiQuantScope = jlimit (0, 2, ui->getIntAttribute ("qscope", 0)); uiShelf2Tools = ui->getStringAttribute ("shelf2", uiShelf2Tools); uiTempoDragMode = jlimit (0, 1, ui->getIntAttribute ("tempoDrag", 0)); uiHeadW = jlimit (70, 360, ui->getIntAttribute ("headW", 200)); uiEditOpen = ui->getBoolAttribute ("editOpen", true);
             uiStopKey = ui->getIntAttribute ("stopkey", KeyPress::spaceKey);
             uiProjectPath = ui->getStringAttribute ("project");
         }
@@ -185,6 +185,8 @@ public:
     int uiStopKey = KeyPress::spaceKey;          // the computer key that stops (0 = none)
     bool uiLearnStopKey = false;                 // the next key you press becomes the stop key
     String uiStripTools = "fit,grid,tools,play,stop,rec,quantize";
+    String uiShelf2Tools;                                 // the buttons you put in the second toolbar row
+    int uiTempoDragMode = 0;                              // dragging the tempo while synced: 0 Studio One leads, 1 turns Sync off
     int uiQuantScope = 0;                                // the Quantize button: 0 this pattern, 1 the selected keys, 2 all
     String uiShelfTools = "humanize,functions";          // the buttons you put next to the pattern's length   // the Option-key strip: what you put on it
     std::atomic<int> stateVersion { 0 };
@@ -929,7 +931,7 @@ private:
             const int laneSwing = lane != nullptr ? lane->swingMode : 0;
             if (laneSwing == 0) sw = swingChoice == 0 ? nt.autoDiv : swingChoiceTicks (swingChoice);
             else if (laneSwing >= 2) sw = laneSwing - 2 == 0 ? nt.autoDiv : swingChoiceTicks (laneSwing - 2);
-            const double swOff = laneSwing == 1 ? 0.0 : swingOffset (nt.tick, sw, swing);
+            const double swOff = 0.0; (void) sw; (void) laneSwing; (void) swing;   // swing is written into the notes (the swing knobs), never added while playing
 
             const int k0 = jmax (0, (int) std::floor ((relA - nt.tick - margin) / LL));
             const int k1 = (int) std::floor ((relB - nt.tick + margin) / LL);

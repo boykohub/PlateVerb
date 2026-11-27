@@ -1254,38 +1254,12 @@ private:
 };
 
 // ---------------------------------------------------------------- quantize page
+// the rules for each note value (their own window); mode, catch range and strength live in the front, in the toolbar
 class QuantizePage : public Page
 {
 public:
-    QuantizePage (EditState& e) : Page ("QUANTIZE SETUP"), st (e)
+    QuantizePage (EditState& e) : Page ("QUANTIZE SETTINGS: RULES FOR EACH NOTE VALUE"), st (e)
     {
-        StringArray vals; for (auto& v : noteValues) vals.add (v.name);
-        setupLabel (*this, lGrid, "Quantize to"); setupCombo (*this, grid, vals); grid.setSelectedItemIndex (3, dontSendNotification);
-        setupLabel (*this, lMode, "Mode");
-        setupCombo (*this, mode, { "Normal: everything to the grid", "Catch: only notes near the grid", "Dual: straight and triplets each to their own grid" });
-        mode.setSelectedItemIndex (0, dontSendNotification);
-        setupLabel (*this, lCatch, "Catch range");
-        setupSlider (*this, catchR); catchR.setRange (5, 50, 1); catchR.setValue (25); catchR.setTextValueSuffix (" %");
-        setupLabel (*this, lStr, "Strength");
-        setupSlider (*this, strength); strength.setRange (0, 100, 1); strength.setValue (100); strength.setTextValueSuffix (" %");
-        setupButton (*this, selOnly, "Only selected notes", true); selOnly.setToggleState (true, dontSendNotification);
-
-        // ---- keep the swing: open it to see how it works and set it
-        setupButton (*this, swingHead, "Keep the swing", true, "Open to see how it works and set it");
-        swingHead.onClick = [this] { swingOpen = swingHead.getToggleState(); resized(); save(); };
-        setupButton (*this, keepSwing, "On", true, "Notes snap to the swung grid, so a swung groove stays swung");
-        setupLabel (*this, lSwAmt, "Swing amount");
-        setupCombo (*this, swingFrom, { "The Swing setting in the toolbar", "My own amount" });
-        swingFrom.setSelectedItemIndex (0, dontSendNotification);
-        setupSlider (*this, ownSwing); ownSwing.setRange (50, 75, 0.5); ownSwing.setValue (58, dontSendNotification); ownSwing.setTextValueSuffix (" %");
-        setupLabel (*this, lSwOn, "Swing on");
-        StringArray sv { "The quantize grid" }; for (auto& v : noteValues) if (! v.triplet) sv.add (v.name);
-        setupCombo (*this, swingOn, sv); swingOn.setSelectedItemIndex (0, dontSendNotification);
-        setupLabel (*this, swingHelp, {}, 10.5f, th::dim); swingHelp.setJustificationType (Justification::topLeft);
-
-        // ---- a rule for each kind of note
-        setupButton (*this, rulesHead, "Rules for each note value", true, "Open to decide, for each kind of note, whether it goes to the grid, to its own value or stays, and how far it moves");
-        rulesHead.onClick = [this] { rulesOpen = rulesHead.getToggleState(); resized(); save(); };
         setupButton (*this, useRules, "Use these rules", true, "On: every note is first recognised (1/16, 1/16 triplet, 1/32...), then moved by its own rule");
         setupButton (*this, presetsBtn, "Presets"); presetsBtn.onClick = [this] { presetMenu(); };
         for (int c = 0; c < numQClasses; ++c) {
@@ -1294,112 +1268,68 @@ public:
             setupCombo (*this, r->action, { "To the grid", "To its own value", "Leave alone" });
             r->action.setSelectedItemIndex (0, dontSendNotification);
             setupSlider (*this, r->amount); r->amount.setRange (0, 100, 1); r->amount.setValue (100, dontSendNotification); r->amount.setTextValueSuffix (" %");
-            r->action.onChange = [this] { updateHelp(); save(); };
+            r->action.onChange = [this] { updateLook(); save(); };
             r->amount.onValueChange = [this] { save(); };
         }
+        useRules.onClick = [this] { updateLook(); save(); };
         setupLabel (*this, rulesHelp, "To the grid: moves to the grid you quantize to. To its own value: a triplet stays a triplet, a 1/32 stays a 1/32, just tidied. "
                                       "Leave alone: never moved. The % is how far it moves (100 % all the way, 40 % less than half, more human).", 10.5f, th::faint);
         rulesHelp.setJustificationType (Justification::topLeft);
-
-        for (auto* b : { &keepSwing, &useRules, &selOnly }) b->onClick = [this] { updateHelp(); save(); };
-        swingFrom.onChange = ownSwing.onValueChange = [this] { updateHelp(); save(); };
-        swingOn.onChange = grid.onChange = mode.onChange = [this] { updateHelp(); save(); };
-        catchR.onValueChange = strength.onValueChange = [this] { save(); };
-
-        setupLabel (*this, lRec, "While recording");
-        StringArray rq { "Off (as played)" }; for (auto& v : noteValues) rq.add (v.name);
-        setupCombo (*this, recQ, rq);
-        recQ.onChange = [this] { st.song().settings.recQuantize = recQ.getSelectedItemIndex(); st.publish(); };
-        setupButton (*this, apply, "Quantize now  (Q)");
-        apply.onClick = [this] { run(); };
-        setupLabel (*this, help, "Catch: with 1/16 and 25 %, triplets and faster notes are left alone. Dual: 16ths snap to 16ths, triplets to triplets.", 10.5f, th::faint);
-        help.setJustificationType (Justification::topLeft);
-        load(); updateHelp();
+        load(); updateLook();
     }
+    // the front's settings (kept here, saved with the rules)
+    int mode = 0; double catchPct = 25.0, strength = 100.0;
+    std::function<double()> swingPct;                    // the Pattern knob, as a swing amount for quantizing
+    std::function<int()> swingGridIndex;
+    std::function<std::map<int, double>()> laneSwings;
+
     QuantOptions options() const
     {
         QuantOptions o;
-        o.valueIndex = grid.getSelectedItemIndex(); o.mode = (QuantMode) mode.getSelectedItemIndex();
-        o.catchPct = catchR.getValue(); o.strength = strength.getValue(); o.keepSwing = keepSwing.getToggleState();
-        o.selectedOnly = selOnly.getToggleState();
-        o.swingPct = swingFrom.getSelectedItemIndex() == 1 ? ownSwing.getValue() : (double) st.proc.apvts.getRawParameterValue (ids::swing)->load();
-        o.swingValue = swingValueIndex();
+        o.valueIndex = st.grid >= 0 ? st.grid : 3; o.mode = (QuantMode) mode;
+        o.catchPct = catchPct; o.strength = strength; o.selectedOnly = true;
+        o.keepSwing = true;                               // the notes go to the swing the knobs show
+        o.swingPct = swingPct ? 50.0 + swingPct() * 0.25 : 50.0;
+        o.swingValue = swingGridIndex ? swingGridIndex() : -1;
+        if (laneSwings) for (auto& [n, v] : laneSwings()) o.laneSwingPct[n] = 50.0 + v * 0.25;
         o.useRules = useRules.getToggleState();
         for (int c = 0; c < numQClasses; ++c) { o.rules[(size_t) c].action = rules[c]->action.getSelectedItemIndex(); o.rules[(size_t) c].strength = rules[c]->amount.getValue(); }
         return o;
     }
     void run() { auto o = options(); st.apply ("Quantize", [o] (Pattern& p) { quantize (p, o); }); }
-    void refresh() override { recQ.setSelectedItemIndex (st.song().settings.recQuantize, dontSendNotification); updateHelp(); }
+    bool rulesOn() const { return useRules.getToggleState(); }
+    void refresh() override { updateLook(); }
     void resized() override
     {
         auto a = content();
-        grid.setBounds (row (a, lGrid).removeFromLeft (90));
-        mode.setBounds (row (a, lMode));
-        catchR.setBounds (row (a, lCatch));
-        strength.setBounds (row (a, lStr));
-        {   auto r = a.removeFromTop (26); a.removeFromTop (4); selOnly.setBounds (r.removeFromLeft (selOnly.getWidth()).reduced (0, 1)); }
-        // keep the swing
-        {   auto r = a.removeFromTop (26); a.removeFromTop (3);
-            swingHead.setBounds (r.removeFromLeft (swingHead.getWidth()).reduced (0, 1)); r.removeFromLeft (8);
-            keepSwing.setBounds (r.removeFromLeft (keepSwing.getWidth()).reduced (0, 1)); }
-        for (Component* c : { (Component*) &lSwAmt, (Component*) &swingFrom, (Component*) &ownSwing, (Component*) &lSwOn, (Component*) &swingOn, (Component*) &swingHelp }) c->setVisible (swingOpen);
-        if (swingOpen) {
-            auto r = row (a, lSwAmt); swingFrom.setBounds (r.removeFromLeft (210)); r.removeFromLeft (6); ownSwing.setBounds (r);
-            ownSwing.setEnabled (swingFrom.getSelectedItemIndex() == 1);
-            swingOn.setBounds (row (a, lSwOn).removeFromLeft (160));
-            swingHelp.setBounds (a.removeFromTop (46)); a.removeFromTop (4);
-        }
-        // rules
-        {   auto r = a.removeFromTop (26); a.removeFromTop (3);
-            rulesHead.setBounds (r.removeFromLeft (rulesHead.getWidth()).reduced (0, 1)); r.removeFromLeft (8);
+        {   auto r = a.removeFromTop (26); a.removeFromTop (6);
             useRules.setBounds (r.removeFromLeft (useRules.getWidth()).reduced (0, 1)); r.removeFromLeft (8);
             presetsBtn.setBounds (r.removeFromLeft (presetsBtn.getWidth()).reduced (0, 1)); }
-        for (auto* r : rules) for (Component* c : { (Component*) &r->name, (Component*) &r->action, (Component*) &r->amount }) c->setVisible (rulesOpen);
-        rulesHelp.setVisible (rulesOpen); presetsBtn.setVisible (rulesOpen);
-        if (rulesOpen) {
-            for (auto* r : rules) {
-                auto rr = a.removeFromTop (24); a.removeFromTop (2);
-                r->name.setBounds (rr.removeFromLeft (110)); r->action.setBounds (rr.removeFromLeft (140).reduced (0, 1)); rr.removeFromLeft (6); r->amount.setBounds (rr);
-            }
-            rulesHelp.setBounds (a.removeFromTop (44)); a.removeFromTop (4);
+        for (auto* r : rules) {
+            auto rr = a.removeFromTop (26); a.removeFromTop (2);
+            r->name.setBounds (rr.removeFromLeft (110)); r->action.setBounds (rr.removeFromLeft (140).reduced (0, 1)); rr.removeFromLeft (6); r->amount.setBounds (rr);
         }
-        apply.setBounds (a.removeFromTop (28).removeFromLeft (apply.getWidth()).reduced (0, 3)); a.removeFromTop (6);
-        recQ.setBounds (row (a, lRec).removeFromLeft (140));
-        help.setBounds (a.removeFromTop (40));
+        a.removeFromTop (6);
+        rulesHelp.setBounds (a.removeFromTop (50));
     }
-    ComboBox grid;
+    void save()
+    {
+        if (loading) return;
+        XmlElement x ("DrumPlayerQuantize");
+        x.setAttribute ("mode", mode); x.setAttribute ("catch", catchPct); x.setAttribute ("strength", strength);
+        x.setAttribute ("useRules", useRules.getToggleState());
+        for (int c = 0; c < numQClasses; ++c) { auto* r = x.createNewChildElement ("Rule"); r->setAttribute ("a", rules[c]->action.getSelectedItemIndex()); r->setAttribute ("s", rules[c]->amount.getValue()); }
+        x.writeTo (prefsFile());
+    }
 private:
     EditState& st;
-    Label lGrid, lMode, lCatch, lStr, lRec, help, lSwAmt, lSwOn, swingHelp, rulesHelp;
-    ComboBox mode, recQ, swingFrom, swingOn;
-    FineSlider catchR, strength, ownSwing;
-    TextButton selOnly, apply, swingHead, keepSwing, rulesHead, useRules, presetsBtn;
-    bool swingOpen = false, rulesOpen = false;
+    Label rulesHelp;
+    TextButton useRules, presetsBtn;
     struct RuleRow { Label name; ComboBox action; FineSlider amount; };
     OwnedArray<RuleRow> rules;
+    bool loading = false;
 
-    int swingValueIndex() const
-    {
-        const int i = swingOn.getSelectedItemIndex(); if (i <= 0) return -1;
-        int n = 0; for (int v = 0; v < numNoteValues; ++v) if (! noteValues[v].triplet && ++n == i) return v;
-        return -1;
-    }
-    // how keep-the-swing works, with today's numbers
-    void updateHelp()
-    {
-        const double sw = swingFrom.getSelectedItemIndex() == 1 ? ownSwing.getValue() : (double) st.proc.apvts.getRawParameterValue (ids::swing)->load();
-        const int vi = swingValueIndex();
-        const auto gName = String (noteValues[jlimit (0, numNoteValues - 1, vi >= 0 ? vi : grid.getSelectedItemIndex())].name);
-        const int stepTicks = noteValues[jlimit (0, numNoteValues - 1, vi >= 0 ? vi : grid.getSelectedItemIndex())].ticks;
-        const int late = (int) std::round ((sw - 50.0) / 50.0 * stepTicks);
-        String t;
-        t << "How it works: the grid is cut into pairs of " << gName << " steps. The first of each pair stays on the beat, the second is moved late by the swing ("
-               << String (sw, 1) << " % = " << late << " ticks of 960 per beat). With it on, the notes snap to that swung grid, so a swung groove stays swung.";
-        if (sw <= 50.01) t << " The swing is 50 % now (straight), so nothing is moved late: raise the Swing, or use My own amount.";
-        swingHelp.setText (t, dontSendNotification);
-        ownSwing.setEnabled (swingFrom.getSelectedItemIndex() == 1);
-        for (auto* r : rules) r->amount.setEnabled (r->action.getSelectedItemIndex() != 2);
-    }
+    void updateLook() { for (auto* r : rules) r->amount.setEnabled (r->action.getSelectedItemIndex() != 2); }
     void presetMenu()
     {
         PopupMenu m;
@@ -1420,35 +1350,16 @@ private:
                 rules[c]->action.setSelectedItemIndex (a, dontSendNotification); rules[c]->amount.setValue (amt, dontSendNotification);
             }
             useRules.setToggleState (true, dontSendNotification);
-            updateHelp(); save();
+            updateLook(); save();
         });
     }
     static File prefsFile() { return dataFolder().getChildFile ("Quantize.xml"); }
-    bool loading = false;
-    void save()
-    {
-        if (loading) return;
-        XmlElement x ("DrumPlayerQuantize");
-        x.setAttribute ("grid", grid.getSelectedItemIndex()); x.setAttribute ("mode", mode.getSelectedItemIndex());
-        x.setAttribute ("catch", catchR.getValue()); x.setAttribute ("strength", strength.getValue()); x.setAttribute ("sel", selOnly.getToggleState());
-        x.setAttribute ("keepSwing", keepSwing.getToggleState()); x.setAttribute ("swingFrom", swingFrom.getSelectedItemIndex());
-        x.setAttribute ("ownSwing", ownSwing.getValue()); x.setAttribute ("swingOn", swingOn.getSelectedItemIndex());
-        x.setAttribute ("useRules", useRules.getToggleState()); x.setAttribute ("swingOpen", swingOpen); x.setAttribute ("rulesOpen", rulesOpen);
-        for (int c = 0; c < numQClasses; ++c) { auto* r = x.createNewChildElement ("Rule"); r->setAttribute ("a", rules[c]->action.getSelectedItemIndex()); r->setAttribute ("s", rules[c]->amount.getValue()); }
-        x.writeTo (prefsFile());
-    }
     void load()
     {
         auto x = XmlDocument::parse (prefsFile()); if (x == nullptr) return;
         const ScopedValueSetter<bool> sv (loading, true);
-        grid.setSelectedItemIndex (x->getIntAttribute ("grid", 3), dontSendNotification); mode.setSelectedItemIndex (x->getIntAttribute ("mode", 0), dontSendNotification);
-        catchR.setValue (x->getDoubleAttribute ("catch", 25), dontSendNotification); strength.setValue (x->getDoubleAttribute ("strength", 100), dontSendNotification);
-        selOnly.setToggleState (x->getBoolAttribute ("sel", true), dontSendNotification);
-        keepSwing.setToggleState (x->getBoolAttribute ("keepSwing"), dontSendNotification); swingFrom.setSelectedItemIndex (x->getIntAttribute ("swingFrom", 0), dontSendNotification);
-        ownSwing.setValue (x->getDoubleAttribute ("ownSwing", 58), dontSendNotification); swingOn.setSelectedItemIndex (x->getIntAttribute ("swingOn", 0), dontSendNotification);
+        mode = jlimit (0, 2, x->getIntAttribute ("mode", 0)); catchPct = x->getDoubleAttribute ("catch", 25); strength = x->getDoubleAttribute ("strength", 100);
         useRules.setToggleState (x->getBoolAttribute ("useRules"), dontSendNotification);
-        swingOpen = x->getBoolAttribute ("swingOpen"); rulesOpen = x->getBoolAttribute ("rulesOpen");
-        swingHead.setToggleState (swingOpen, dontSendNotification); rulesHead.setToggleState (rulesOpen, dontSendNotification);
         int c = 0; for (auto* r : x->getChildWithTagNameIterator ("Rule")) { if (c >= numQClasses) break;
             rules[c]->action.setSelectedItemIndex (r->getIntAttribute ("a", 0), dontSendNotification); rules[c]->amount.setValue (r->getDoubleAttribute ("s", 100), dontSendNotification); ++c; }
     }

@@ -159,6 +159,100 @@ struct MidiLights : public Component, public SettableTooltipClient
     }
 };
 
+// a knob: drag up or down (Shift: fine), double-click to type. Shows its value; greys out when it doesn't apply
+struct ValueKnob : public Component, public SettableTooltipClient
+{
+    String title; double value = 50, lo = 0, hi = 100; int decimals = 0; String suffix = " %";
+    bool active = true;
+    double ownValue = -1;                 // the pattern's own value, marked blue on the scale (-1: none)
+    bool bigScale = false;                // swing knobs: a scale with numbers around
+    String caption;                       // under the knob (e.g. "Lane: Hi-Hat")
+    std::function<void()> onStart, onEnd, onInactiveClick, onRight;
+    std::function<void (double)> onChange;
+    void paint (Graphics& g) override
+    {
+        auto b = getLocalBounds().toFloat();
+        const float alpha = active ? 1.0f : 0.38f;
+        Rectangle<float> kr;
+        if (bigScale) { kr = b.withTrimmedBottom (14).reduced (12, 9); kr = kr.withSizeKeepingCentre (jmin (kr.getWidth(), kr.getHeight()), jmin (kr.getWidth(), kr.getHeight())); }
+        else kr = b.removeFromLeft (b.getHeight()).reduced (2);
+        const float a0 = MathConstants<float>::pi * 1.25f, a1 = MathConstants<float>::pi * 2.75f;
+        auto angleOf = [&] (double v) { return a0 + (float) ((v - lo) / (hi - lo)) * (a1 - a0); };
+        const auto c = kr.getCentre(); const float R = kr.getWidth() * 0.5f;
+        if (bigScale) {                       // the scale: ticks every 10, numbers at 0 / 50 / 100, the own value in blue
+            for (int v = 0; v <= 100; v += 10) {
+                const float an = angleOf (v);
+                g.setColour (th::faint.withAlpha (alpha));
+                g.drawLine (c.x + (R + 2) * std::sin (an), c.y - (R + 2) * std::cos (an), c.x + (R + 5) * std::sin (an), c.y - (R + 5) * std::cos (an), 1.0f);
+            }
+            g.setFont (font (8.5f, 1));
+            for (int v : { 0, 50, 100 }) {
+                if (ownValue >= 0 && std::abs (ownValue - v) < 9) continue;
+                const float an = angleOf (v); const float rr = R + 10;
+                g.setColour (Colours::white.withAlpha (0.75f * alpha));
+                g.drawText (String (v), Rectangle<float> (c.x + rr * std::sin (an) - 12, c.y - rr * std::cos (an) - 6, 24, 12), Justification::centred);
+            }
+            if (ownValue >= 0) {
+                const float an = angleOf (ownValue); const float rr = R + 10;
+                g.setColour (th::blue.withAlpha (alpha)); g.setFont (font (9.5f, 3));
+                g.drawLine (c.x + (R + 1) * std::sin (an), c.y - (R + 1) * std::cos (an), c.x + (R + 6) * std::sin (an), c.y - (R + 6) * std::cos (an), 2.0f);
+                g.drawText (String (roundToInt (ownValue)), Rectangle<float> (c.x + rr * std::sin (an) - 12, c.y - rr * std::cos (an) - 6, 24, 12), Justification::centred);
+            }
+        }
+        // body
+        g.setGradientFill (ColourGradient (th::raised.brighter (0.25f).withMultipliedAlpha (alpha), c.x, kr.getY(), th::surface.withMultipliedAlpha (alpha), c.x, kr.getBottom(), false));
+        g.fillEllipse (kr);
+        g.setColour (Colours::black.withAlpha (0.6f * alpha)); g.drawEllipse (kr, 1.0f);
+        Path arc; arc.addCentredArc (c.x, c.y, R - 2, R - 2, 0, a0, angleOf (value), true);
+        g.setColour ((active ? th::amber : th::dim).withAlpha (alpha)); g.strokePath (arc, PathStrokeType (2.2f, PathStrokeType::curved, PathStrokeType::rounded));
+        const float an = angleOf (value);
+        g.setColour (th::text.withAlpha (alpha)); g.drawLine (c.x + R * 0.15f * std::sin (an), c.y - R * 0.15f * std::cos (an), c.x + (R - 4) * std::sin (an), c.y - (R - 4) * std::cos (an), 1.8f);
+        const String v = String (value, decimals);
+        if (bigScale) {
+            g.setColour (th::text.withAlpha (alpha)); g.setFont (font (10.5f, 3));
+            g.drawText (caption.isNotEmpty() ? caption : title, getLocalBounds().removeFromBottom (14), Justification::centred, true);
+            g.setColour (Colours::black.withAlpha (0.55f * alpha)); g.fillRoundedRectangle (Rectangle<float> (c.x - 15, c.y + R * 0.35f, 30, 13), 3);
+            g.setColour (th::text.withAlpha (alpha)); g.setFont (font (10.0f, 2)); g.drawText (v, Rectangle<float> (c.x - 15, c.y + R * 0.35f, 30, 13), Justification::centred);
+        } else {
+            g.setColour (th::dim.withAlpha (alpha)); g.setFont (font (10.0f, 1));
+            auto t = b.withTrimmedLeft (4);
+            g.drawText (title, t.removeFromTop (b.getHeight() * 0.5f), Justification::bottomLeft);
+            g.setColour (th::text.withAlpha (alpha)); g.setFont (font (11.5f, 2));
+            g.drawText (v + suffix, t, Justification::topLeft);
+        }
+    }
+    void mouseDown (const MouseEvent& e) override
+    {
+        if (e.mods.isPopupMenu()) { if (onRight) onRight(); return; }
+        if (! active) { if (onInactiveClick) onInactiveClick(); return; }
+        startV = value; dragging = true; if (onStart) onStart();
+    }
+    void mouseDrag (const MouseEvent& e) override
+    {
+        if (! dragging) return;
+        const double per = (hi - lo) / (e.mods.isShiftDown() ? 600.0 : 150.0);
+        const double nv = jlimit (lo, hi, std::round ((startV - e.getDistanceFromDragStartY() * per) * std::pow (10.0, decimals)) / std::pow (10.0, decimals));
+        if (nv != value) { value = nv; repaint(); if (onChange) onChange (value); }
+    }
+    void mouseUp (const MouseEvent&) override { if (dragging) { dragging = false; if (onEnd) onEnd(); } }
+    void mouseDoubleClick (const MouseEvent&) override
+    {
+        if (! active) return;
+        auto* aw = new AlertWindow (title, "Type a value (" + String (lo, 0) + " to " + String (hi, 0) + ")", MessageBoxIconType::NoIcon, this);
+        aw->addTextEditor ("v", String (value, decimals));
+        aw->addButton ("OK", 1, KeyPress (KeyPress::returnKey)); aw->addButton ("Cancel", 0, KeyPress (KeyPress::escapeKey));
+        Component::SafePointer<ValueKnob> sp (this);
+        aw->enterModalState (true, ModalCallbackFunction::create ([sp, aw] (int r) {
+            if (r != 1 || sp == nullptr) return;
+            const double nv = jlimit (sp->lo, sp->hi, aw->getTextEditorContents ("v").retainCharacters ("0123456789.").getDoubleValue());
+            if (sp->onStart) sp->onStart();
+            sp->value = nv; sp->repaint(); if (sp->onChange) sp->onChange (nv);
+            if (sp->onEnd) sp->onEnd();
+        }), true);
+    }
+    double startV = 0; bool dragging = false;
+};
+
 // the settings button: a cog wheel
 struct GearButton : public TextButton
 {
@@ -237,7 +331,7 @@ public:
                     auto run = f.run; auto* bp = b;
                     b->onClick = [run, bp] { if (run) run (bp); };
                     b->onRight = [this] { chooseMenu(); };
-                    b->onMoved = [this, id = f.id] (int x) { moveTool (id, x); };
+                    b->onMoved = [this, id = f.id] (Point<int> screen) { moveTool (id, screen); };
                 }
         resized(); repaint();
     }
@@ -258,8 +352,12 @@ public:
     void mouseDown (const MouseEvent& e) override { if (e.mods.isPopupMenu()) chooseMenu(); }
     void mouseDoubleClick (const MouseEvent&) override { chooseMenu(); }
     // Alt+Shift drag: put a tool somewhere else on the strip
-    void moveTool (const String& id, int x)
+    std::function<void (const String&, Point<int>)> onMoveOut;   // dropped outside this strip (into the other row)
+    void moveTool (const String& id, Point<int> screen)
     {
+        const auto local = getLocalPoint (nullptr, screen);
+        if ((local.y < -4 || local.y > getHeight() + 4) && onMoveOut) { onMoveOut (id, screen); return; }
+        const int x = local.x;
         int idx = 0; for (auto* b : btns) if (b->getBounds().getCentreX() < x) ++idx;
         StringArray next; for (auto& t : on) if (t != id) next.add (t);
         int pos = 0, seen = 0; for (; pos < next.size(); ++pos) { if (seen >= idx) break; ++seen; }
@@ -289,7 +387,7 @@ public:
 private:
     struct StripButton : public TextButton
     {
-        std::function<void()> onRight; std::function<void (int)> onMoved; bool moving = false;
+        std::function<void()> onRight; std::function<void (Point<int>)> onMoved; bool moving = false;
         void mouseDown (const MouseEvent& e) override
         {
             if (e.mods.isPopupMenu()) { if (onRight) onRight(); return; }
@@ -303,12 +401,13 @@ private:
         }
         void mouseUp (const MouseEvent& e) override
         {
-            if (moving) { moving = false; setMouseCursor (MouseCursor::NormalCursor); if (onMoved) onMoved (getBounds().getCentreX()); return; }
+            if (moving) { moving = false; setMouseCursor (MouseCursor::NormalCursor); if (onMoved) onMoved (e.getScreenPosition()); return; }
             if (e.mods.isPopupMenu()) return; TextButton::mouseUp (e);
         }
         void moved() override { if (! moving) startX = getX(); }
         int startX = 0;
     };
+public:
     OwnedArray<StripButton> btns;
 };
 
@@ -645,7 +744,7 @@ public:
         setupLabel (body, lGrid, "Grid");
         StringArray grids; for (auto& v : noteValues) grids.add (v.name); grids.add ("Off");
         setupCombo (body, gridBox, grids, 1, "Snap grid for drawing and moving (Alt while dragging = no snap)");
-        gridBox.onChange = [this] { const int i = gridBox.getSelectedItemIndex(); st.grid = i >= numNoteValues ? -1 : i; proc.uiGrid = jmax (0, st.grid); quantPage.grid.setSelectedItemIndex (jmax (0, st.grid), dontSendNotification); refreshAll(); };
+        gridBox.onChange = [this] { const int i = gridBox.getSelectedItemIndex(); st.grid = i >= numNoteValues ? -1 : i; proc.uiGrid = jmax (0, st.grid); refreshAll(); };
         for (int i = 0; i < 7; ++i) {
             auto* b = toolBtns.add (new TextButton());
             static const char* tips[] = { "Select and move (1, as in Studio One). Ctrl-drag copies, drag a note's right edge for length, drag the amber bar at a lane's end for polyrhythm",
@@ -674,10 +773,12 @@ public:
         swingSlider.onValueChange = [this] { syncSwingPreset(); };
         setupCombo (body, swingValue, StringArray::fromTokens (swingChoiceNames(), "|", ""), 1, "Which notes swing. Auto finds the value you played in each beat");
         swingValAtt = std::make_unique<AudioProcessorValueTreeState::ComboBoxAttachment> (proc.apvts, ids::swingGrid, swingValue);
-        setupButton (body, quantBtn, "Quantize", false, "Quantize whole patterns (every drum) with the Quantize setup: this pattern, the selected keys or all. Right-click: Quantize setup");
+        for (Component* c : { (Component*) &lSwing, (Component*) &swingPreset, (Component*) &swingSlider, (Component*) &swingValue }) c->setVisible (false);
+        setupQuantizeBar();
+        setupButton (body, quantBtn, "Quantize", false, "Quantize whole patterns (every drum) with the settings here: this pattern, the selected keys or all. Right-click: Quantize settings");
         quantBtn.getProperties().set ("rmenu", true);
         quantBtn.onClick = [this] { quantizePatterns(); };
-        quantBtn.onRight = [this] { PopupMenu m; m.addItem (1, "Quantize setup..."); m.addItem (2, "Quantize now"); m.addItem (3, "Humanize setup..."); m.addItem (4, "Humanize now");
+        quantBtn.onRight = [this] { PopupMenu m; m.addItem (1, "Quantize settings..."); m.addItem (2, "Quantize now"); m.addItem (3, "Humanize settings..."); m.addItem (4, "Humanize now");
                                     m.showMenuAsync (PopupMenu::Options().withTargetComponent (&quantBtn), [this] (int r) { if (r > 0) quantHum (r - 1, true); }); };
         setupLabel (body, lQs, "on");
         setupButton (body, qsPattern, "Pattern", true, "Quantize the pattern you're editing (all its drums)");
@@ -858,17 +959,19 @@ public:
             tempoDown.onClick = [this] { setOwnTempo (std::round (effectiveTempo()) - (ModifierKeys::currentModifiers.isShiftDown() ? 0.1 : 1.0)); };
             tempoUp.onClick = [this] { setOwnTempo (std::round (effectiveTempo()) + (ModifierKeys::currentModifiers.isShiftDown() ? 0.1 : 1.0)); };
             body.addAndMakeVisible (tempoLbl); tempoLbl.setEditable (false, true, false); tempoLbl.setJustificationType (Justification::centred);
-            tempoLbl.setFont (font (20.0f, 3)); tempoLbl.setTooltip ("Drag up or down to change the tempo (Shift: fine), double-click to type. Locked: Studio One's tempo");
+            tempoLbl.setFont (font (15.0f, 1)); tempoLbl.setTooltip ("Drag up or down to change the tempo (Shift: fine), double-click to type. Locked: Studio One's tempo");
             tempoLbl.get = [this] { return effectiveTempo(); }; tempoLbl.set = [this] (double b) { setOwnTempo (b); };
             tempoLbl.onRight = [this] {
                 PopupMenu m; const double hb = proc.hostBpm.load();
                 m.addItem (1, "Take Studio One's tempo now (" + String (hb, std::abs (hb - std::round (hb)) < 0.05 ? 0 : 1) + " BPM)");
-                m.addItem (2, "Sync tempo to DAW", true, st.song().settings.followHost);
-                m.addSeparator(); for (int b : { 80, 90, 100, 110, 120, 130, 140 }) m.addItem (100 + b, String (b) + " BPM");
+                m.addItem (2, "Sync to DAW", true, st.song().settings.followHost);
+                m.addSectionHeader ("DRAGGING THE TEMPO WHILE SYNCED");
+                m.addItem (3, "Studio One leads (dragging here does nothing)", true, proc.uiTempoDragMode == 0);
+                m.addItem (4, "Dragging turns Sync off", true, proc.uiTempoDragMode == 1);
                 m.showMenuAsync (PopupMenu::Options().withTargetComponent (&tempoLbl), [this, hb] (int r) {
                     if (r == 1) { setOwnTempo (hb); showToast ("Tempo from Studio One: " + String (hb, 1) + " BPM"); }
                     else if (r == 2) { const bool on = ! st.song().settings.followHost; st.applySong ("Follow tempo", [on] (Song& s2) { s2.settings.followHost = on; }); showTempo(); }
-                    else if (r > 100) setOwnTempo (r - 100);
+                    else if (r == 3 || r == 4) proc.uiTempoDragMode = r - 3;
                 });
             };
             tempoLbl.setColour (Label::backgroundColourId, Colours::black.withAlpha (0.25f));
@@ -889,7 +992,7 @@ public:
                 m.showMenuAsync (PopupMenu::Options().withTargetComponent (&tapBtn), [this] (int r) {
                     if (r > 100 && r <= 108) tapAverage = r - 100; else if (r == 120) tapRound = ! tapRound; else clickItem (r); });
             };
-            setupButton (body, followBtn, "Sync tempo to DAW", true, "On: Drum Player always runs at Studio One's tempo, live as you change it there. Off: your own tempo here while Studio One is stopped (while it plays, its tempo rules)");
+            setupButton (body, followBtn, "Sync to DAW", true, "On: Drum Player always runs at Studio One's tempo, live as you change it there. Off: your own tempo here while Studio One is stopped (while it plays, its tempo rules)");
             followBtn.onClick = [this] { const bool on = followBtn.getToggleState(); st.applySong ("Follow tempo", [on] (Song& s) { s.settings.followHost = on; }); showTempo(); };
         }
         groovePage.onLoad = [this] (const File& f, int k) { importFiles ({ f.getFullPathName() }, k); };
@@ -925,6 +1028,10 @@ public:
         setSize ((int) (1240 * scale), (int) (800 * scale));
         setupToolStrip();
         st.quantHum = [this] (int w) { quantHum (w); };
+        quantPage.swingPct = [this] { return patternSwing (st.pat()); };
+        quantPage.swingGridIndex = [this] { const auto& p = st.pat(); return valueIndexForTicks (p.swingGrid > 0 ? p.swingGrid : 240); };
+        quantPage.laneSwings = [this] { std::map<int, double> m; for (auto& [n, v] : st.pat().laneSwing) m[n] = v; return m; };
+        refreshQuantBar();
         refreshTransport();
         showPlays();
         savedSerial = proc.editSerial.load();
@@ -1179,7 +1286,7 @@ public:
             case 109: selectAll (p, false); st.publish(); break;
             case 110: for (auto& n : p.notes) n.selected = ! n.selected; st.publish(); break;
             case 111: st.repeatLast(); break;
-            case 201: togglePage (quantPage, quantBtn); break;
+            case 201: togglePage (quantPage, qRules); break;
             case 202: togglePage (humPage, humBtn); break;
             case 203: openCurve(); break;
             case 204: st.apply ("Mute / unmute", [] (Pattern& q) { for (auto& n : q.notes) if (n.selected) n.probability = n.probability == 0 ? 100 : 0; }); break;
@@ -1348,7 +1455,7 @@ private:
         m.showMenuAsync (PopupMenu::Options().withTargetComponent (t), [sp] (int r) { if (r > 0 && sp[(size_t) r - 1] != nullptr) sp[(size_t) r - 1]->triggerClick(); });
     }
     Component* menuAnchor = nullptr;         // the shelf button a menu opens under
-    ToolStrip shelf;                         // the buttons next to the pattern's length: double-click to choose, Alt+Shift drag to arrange
+    ToolStrip shelf, shelf2;                 // your buttons in the two toolbar rows: double-click to choose, Alt+Shift drag to arrange (also from row to row)
     void setupShelf()
     {
         auto fn = [this] (int id) { return [this, id] (Component* t) { menuAnchor = t; runFunction (id); }; };
@@ -1375,10 +1482,25 @@ private:
         };
         shelf.hint = String::fromUTF8 ("double-click: add buttons here  \xc2\xb7  Alt+Shift drag: arrange");
         shelf.compact = true;
+        shelf2.all = shelf.all; shelf2.hint = shelf.hint; shelf2.compact = true;
         shelf.on = StringArray::fromTokens (proc.uiShelfTools, ",", ""); shelf.on.removeEmptyStrings();
+        shelf2.on = StringArray::fromTokens (proc.uiShelf2Tools, ",", ""); shelf2.on.removeEmptyStrings();
         shelf.onChanged = [this] { proc.uiShelfTools = shelf.on.joinIntoString (","); };
-        body.addAndMakeVisible (shelf);
-        shelf.rebuild();
+        shelf2.onChanged = [this] { proc.uiShelf2Tools = shelf2.on.joinIntoString (","); };
+        // Alt+Shift drag a button into the other row
+        auto across = [this] (ToolStrip& from, ToolStrip& to) {
+            from.onMoveOut = [this, &from, &to] (const String& id, Point<int> screen) {
+                if (! to.getScreenBounds().expanded (0, 6).contains (screen)) { from.rebuild(); return; }
+                from.on.removeString (id); to.on.removeString (id);
+                const auto local = to.getLocalPoint (nullptr, screen);
+                int idx = 0; for (auto* b : to.btns) if (b->getBounds().getCentreX() < local.x) ++idx;
+                to.on.insert (idx, id);
+                from.rebuild(); to.rebuild(); if (from.onChanged) from.onChanged(); if (to.onChanged) to.onChanged();
+            };
+        };
+        across (shelf, shelf2); across (shelf2, shelf);
+        body.addAndMakeVisible (shelf); body.addAndMakeVisible (shelf2);
+        shelf.rebuild(); shelf2.rebuild();
     }
     void setupToolStrip()
     {
@@ -1397,7 +1519,6 @@ private:
             { "mixer", "Mixer", "Pan and meters", click (mixerBtn) },
             { "zoom", "Zoom", "Wider, narrower, taller, lower, fit", [this] (Component* t) { buttonsMenu ({ &zH2, &zH1, &zV2, &zV1, &zFit }, t); } },
             { "vel", "Velocity", "Velocity for new notes", [this] (Component* t) { comboMenu (velBox, t); } },
-            { "swing", "Swing", "Swing preset", [this] (Component* t) { comboMenu (swingPreset, t); } },
             { "detach", "Window", "Detach the editor into its own window, or bring it back", [sp = Component::SafePointer<DrumPlayerEditor> (this)] (Component*) { MessageManager::callAsync ([sp] { if (sp) sp->toggleDetach(); }); } },
         };
         toolStrip.on = StringArray::fromTokens (proc.uiStripTools, ",", "");
@@ -1481,11 +1602,13 @@ private:
     double ownTempo() { return st.song().settings.ownBpm; }
     void setOwnTempo (double b)
     {
-        if (st.song().settings.followHost) {           // a plugin can't change Studio One's tempo: Studio One leads
-            showToast ("Synced to Studio One: change the tempo in Studio One (or turn Sync tempo to DAW off)"); showTempo(); return;
+        bool unsync = false;
+        if (st.song().settings.followHost) {           // a plugin can't change Studio One's tempo: your choice in the tempo's right-click
+            if (proc.uiTempoDragMode == 0) { showToast ("Synced: Studio One leads, change the tempo there (right-click the tempo to change this)"); showTempo(); return; }
+            unsync = true; showToast ("Sync to DAW is off: Drum Player plays at its own tempo");
         }
         b = jlimit (20.0, 400.0, std::round (b * 10.0) / 10.0);
-        st.applySong ("Tempo", [b] (Song& s) { s.settings.ownBpm = b; });
+        st.applySong ("Tempo", [b, unsync] (Song& s) { s.settings.ownBpm = b; if (unsync) s.settings.followHost = false; });
         showTempo();
     }
     double effectiveTempo() { return st.song().settings.followHost || proc.hostPlaying.load() ? proc.hostBpm.load() : ownTempo(); }
@@ -1516,6 +1639,112 @@ private:
         if (playTarget == 0) { const auto& sg = st.song(); playStartBeat = sg.loopOn && (songLane.cursorBeat < sg.loopStart || songLane.cursorBeat >= sg.loopEnd) ? sg.loopStart : songLane.cursorBeat;
                                proc.uiSongPlay (true, playStartBeat); return; }
         proc.uiTrigger (st.song().editKey);
+    }
+    // ---- the quantize bar in the front: grid, straight / triplet, mode, catch range, strength, rules; and the two swing knobs
+    TextButton qStraight, qTriplet, qToGrid, qNear, qDual, qRules; ValueKnob catchKnob, strengthKnob, swingPat, swingLane;
+    Pattern swingBase; bool swingDragging = false;
+    void setupQuantizeBar()
+    {
+        setupButton (body, qStraight, "Straight", true, "Straight note values (1/8, 1/16...)");
+        setupButton (body, qTriplet, "Triplet", true, "Triplet note values (1/8T, 1/16T...)");
+        for (auto* b : { &qStraight, &qTriplet }) { b->setRadioGroupId (781); b->setSize (b->getWidth() - 6, smallH()); }
+        qStraight.onClick = [this] { setTriplet (false); }; qTriplet.onClick = [this] { setTriplet (true); };
+        setupButton (body, qToGrid, "To grid", true, "Every note goes to the grid");
+        setupButton (body, qNear, "Near the grid", true, "Only notes near the grid move (how near: Catch range); notes further away, like triplets or fast fills, stay");
+        setupButton (body, qDual, "Dual", true, "Dual: straight notes to the straight grid and triplets to the triplet grid, each to their own");
+        for (auto* b : { &qToGrid, &qNear, &qDual }) { b->setRadioGroupId (782); b->setSize (b->getWidth() - 6, smallH()); }
+        auto setMode = [this] (int m) { quantPage.mode = m; quantPage.save(); refreshQuantBar(); };
+        qToGrid.onClick = [setMode] { setMode (0); }; qNear.onClick = [setMode] { setMode (1); }; qDual.onClick = [setMode] { setMode (2); };
+        catchKnob.title = "Catch range"; catchKnob.lo = 5; catchKnob.hi = 50;
+        catchKnob.setTooltip ("Near the grid: how close to a grid line a note must be to move (a share of one grid step). Drag up / down, double-click to type");
+        catchKnob.onChange = [this] (double v) { quantPage.catchPct = v; };
+        catchKnob.onEnd = [this] { quantPage.save(); };
+        catchKnob.onInactiveClick = [this] { showToast ("Catch range is for Near the grid"); };
+        strengthKnob.title = "Strength"; strengthKnob.lo = 0; strengthKnob.hi = 100;
+        strengthKnob.setTooltip ("How far notes move to the grid: 100 % all the way, less is less. Drag up / down, double-click to type");
+        strengthKnob.onChange = [this] (double v) { quantPage.strength = v; };
+        strengthKnob.onEnd = [this] { quantPage.save(); };
+        for (auto* k : { &catchKnob, &strengthKnob }) body.addAndMakeVisible (*k);
+        setupButton (body, qRules, "Rules...", true, "Rules for each note value (in their own window)");
+        qRules.onClick = [this] { togglePage (quantPage, qRules); };
+        // swing: Pattern (every drum) and Lane (the drum you picked). Turning moves the notes; the blue number is the pattern's own swing
+        for (auto* k : { &swingPat, &swingLane }) {
+            k->bigScale = true; k->lo = 0; k->hi = 100; k->suffix = {};
+            body.addAndMakeVisible (*k);
+            const bool lane = k == &swingLane;
+            k->title = lane ? "Lane swing" : "Swing";
+            k->setTooltip (lane ? "Swing for the drum you picked (click its name on the left). 0 straight, 100 fully swung. Turning it moves the notes; the blue number is how it was swung to begin with. Right-click: back to it"
+                                : "Swing for the whole pattern. 0 straight, 100 fully swung. Turning it moves the notes; the blue number is the pattern's own swing, turn back to it and every note is where it was. Right-click: more");
+            k->onStart = [this] { swingBase = st.pat(); proc.beginEdit(); swingDragging = true; };
+            k->onChange = [this, lane] (double v) {
+                Pattern q = swingBase; setSwing (q, lane ? activeLane() : -1, v);
+                proc.edit.keys[(size_t) jlimit (0, 127, proc.edit.editKey)] = q; proc.publish(); repaintRoll();
+            };
+            k->onEnd = [this, lane] { swingDragging = false; proc.endEdit (lane ? "Lane swing" : "Swing"); refreshQuantBar(); };
+            k->onRight = [this, lane] { swingMenu (lane); };
+        }
+        swingPat.onInactiveClick = [this] { st.focusLane = -1; selectAll (st.pat(), false); st.publish(); refreshAll(); };
+        swingLane.onInactiveClick = [this] { showToast ("Pick a drum first: click its name on the left (or select notes of one drum)"); };
+    }
+    // the drum the Lane knob works on: the lane picked on the left, or the one all selected notes are in
+    int activeLane()
+    {
+        if (st.focusLane >= 0) return st.focusLane;
+        int lane = -1; for (auto& n : st.pat().notes) if (n.selected) { if (lane < 0) lane = n.note; else if (lane != n.note) return -1; }
+        return lane;
+    }
+    void swingMenu (bool lane)
+    {
+        auto& p = st.pat(); const int ln = activeLane();
+        if (lane && ln < 0) { showToast ("Pick a drum first: click its name on the left"); return; }
+        const double own = lane ? laneSwingOwnOf (p, ln) : patternSwingOwn (p);
+        PopupMenu m;
+        m.addItem (1, "Back to " + String (lane ? "the lane's" : "the pattern's") + " own swing (" + String (roundToInt (own)) + ")");
+        m.addItem (2, "Straight (0)");
+        if (lane) m.addItem (3, "Follow the pattern's swing again", p.laneSwing.count (ln) > 0);
+        else { m.addSeparator(); m.addItem (10, "Swing on 1/16", true, (p.swingGrid > 0 ? p.swingGrid : 240) == 240); m.addItem (11, "Swing on 1/8", true, p.swingGrid == 480); }
+        m.showMenuAsync (PopupMenu::Options().withTargetComponent (lane ? &swingLane : &swingPat), [this, lane, ln, own] (int r) {
+            if (r == 1 || r == 2) { const double v = r == 1 ? own : 0.0; st.apply (lane ? "Lane swing" : "Swing", [lane, ln, v] (Pattern& q) { setSwing (q, lane ? ln : -1, v); }); }
+            else if (r == 3) st.apply ("Lane follows the swing", [ln] (Pattern& q) { setSwing (q, ln, patternSwing (q)); q.laneSwing.erase (ln); q.laneSwingOwn.erase (ln); });
+            else if (r == 10 || r == 11) {
+                const int g = r == 10 ? 240 : 480;
+                st.apply ("Swing grid", [g] (Pattern& q) { const double now = patternSwing (q); setSwing (q, -1, 0); q.swingGrid = g; setSwing (q, -1, now); });
+            }
+            refreshQuantBar();
+        });
+    }
+    void setTriplet (bool trip)
+    {
+        const int i = st.grid >= 0 ? st.grid : 3;
+        const String nm = noteValues[i].name;
+        const bool isT = nm.endsWith ("T");
+        if (isT == trip) return;
+        int to = i;
+        for (int k = 0; k < numNoteValues; ++k) {
+            const String n2 = noteValues[k].name;
+            if (trip ? n2 == nm + "T" : n2 + "T" == nm) to = k;
+        }
+        if (to == i) { showToast ("There's no triplet for " + nm); refreshQuantBar(); return; }
+        gridBox.setSelectedItemIndex (to, sendNotificationSync);
+    }
+    void refreshQuantBar()
+    {
+        const int i = st.grid >= 0 ? st.grid : 3;
+        const bool trip = String (noteValues[i].name).endsWith ("T");
+        qStraight.setToggleState (! trip, dontSendNotification); qTriplet.setToggleState (trip, dontSendNotification);
+        const int m = quantPage.mode;
+        qToGrid.setToggleState (m == 0, dontSendNotification); qNear.setToggleState (m == 1, dontSendNotification); qDual.setToggleState (m == 2, dontSendNotification);
+        catchKnob.value = quantPage.catchPct; catchKnob.active = m == 1; catchKnob.repaint();
+        strengthKnob.value = quantPage.strength; strengthKnob.repaint();
+        qRules.setToggleState (openPage == &quantPage || quantPage.rulesOn(), dontSendNotification);
+        if (! swingDragging) {
+            const auto& p = st.pat(); const int ln = activeLane();
+            swingPat.value = std::round (patternSwing (p)); swingPat.ownValue = patternSwingOwn (p); swingPat.active = ln < 0;
+            if (ln >= 0) { swingLane.value = std::round (laneSwingNow (p, ln)); swingLane.ownValue = laneSwingOwnOf (p, ln); swingLane.caption = "Lane: " + st.song().laneName (ln); }
+            else { swingLane.value = 0; swingLane.ownValue = -1; swingLane.caption = "Lane swing"; }
+            swingLane.active = ln >= 0;
+            swingPat.caption = "Swing"; swingPat.repaint(); swingLane.repaint();
+        }
     }
     // ---- the control bar: like a DAW's, every button with its own right-click menu
     void setupControlBar()
@@ -1589,7 +1818,7 @@ private:
         midiLights.in = [this] { uint32 t = 0; for (auto& h : proc.inHits) t += h.load(); return t; };
         midiLights.out = [this] { uint32 t = 0; for (auto& h : proc.outHits) t += h.load(); return t; };
     }
-    int lastMetro = 2; String lastTransportKey;
+    int lastMetro = 2; String lastTransportKey, lastQuantKey;
     double stepSize() { return stepBeats > 0 ? stepBeats : -stepBeats * st.pat().beatsPerBar; }
     void moveCursorTo (double b)
     {
@@ -1635,14 +1864,18 @@ private:
         else if (scope == 1) { keys = st.keySel; if (keys.empty()) keys.insert (ek); }
         else for (int k = 0; k < 128; ++k) if (! st.song().keys[(size_t) k].notes.empty()) keys.insert (k);
         st.applySong (scope == 0 ? "Quantize pattern" : scope == 1 ? "Quantize selected patterns" : "Quantize all patterns", [keys, o] (Song& s2) {
-            for (int k : keys) if (k >= 0 && k < 128) { auto& p = s2.keys[(size_t) k]; for (auto& n : p.notes) n.selected = false; quantize (p, o); } });
+            for (int k : keys) if (k >= 0 && k < 128) {
+                auto& p = s2.keys[(size_t) k]; for (auto& n : p.notes) n.selected = false;
+                auto o2 = o; o2.swingPct = 50.0 + patternSwing (p) * 0.25; o2.swingValue = valueIndexForTicks (p.swingGrid > 0 ? p.swingGrid : 240);
+                o2.laneSwingPct.clear(); for (auto& [n, v] : p.laneSwing) o2.laneSwingPct[n] = 50.0 + v * 0.25;
+                quantize (p, o2); } });
         refreshAll();
         showToast (String ("Quantized ") + (scope == 0 ? "this pattern" : String ((int) keys.size()) + " patterns") + " to " + noteValues[jlimit (0, numNoteValues - 1, o.valueIndex)].name + "  (Ctrl+Z undoes it)");
     }
     // quantize setup, quantize, humanize setup, humanize: from the menus
     void quantHum (int what, bool wholePattern = false)
     {
-        if (what == 0) { if (openPage != &quantPage) togglePage (quantPage, quantBtn); return; }
+        if (what == 0) { if (openPage != &quantPage) togglePage (quantPage, qRules); return; }
         if (what == 1) { if (wholePattern) quantizePatterns(); else quantPage.run(); return; }
         if (what == 2) { if (openPage != &humPage) togglePage (humPage, humBtn); return; }
         const double ticksPerMs = effectiveTempo() / 60000.0 * PPQ;
@@ -1739,9 +1972,8 @@ private:
             auto tr = tb;
             followBtn.setBounds (tr.removeFromRight (followBtn.getWidth()).withSizeKeepingCentre (followBtn.getWidth(), btnH)); tr.removeFromRight (6);
             tapBtn.setBounds (tr.removeFromRight (tapBtn.getWidth()).withSizeKeepingCentre (tapBtn.getWidth(), btnH)); tr.removeFromRight (10);
-            tempoUp.setBounds (tr.removeFromRight (24).withSizeKeepingCentre (24, tH)); tr.removeFromRight (1);
-            tempoLbl.setBounds (tr.removeFromRight (76).withSizeKeepingCentre (76, tH)); tr.removeFromRight (1);
-            tempoDown.setBounds (tr.removeFromRight (24).withSizeKeepingCentre (24, tH)); tr.removeFromRight (6);
+            tempoUp.setVisible (false); tempoDown.setVisible (false);
+            tempoLbl.setBounds (tr.removeFromRight (56).withSizeKeepingCentre (56, jmin (tH, (int) btnH + 2))); tr.removeFromRight (6);
             lTempo.setBounds (tr.removeFromRight (50).withSizeKeepingCentre (50, tH));
             if (lTempo.getX() < midiLights.getRight() + 4) { midiLights.setVisible (false); } else midiLights.setVisible (true);
             a.removeFromBottom (6); }
@@ -1760,8 +1992,9 @@ private:
             if (editing) songDiv.setBounds (a.removeFromTop (10)); else a.removeFromTop (8);
             (void) chainH; }
         a.removeFromTop (7);
-        std::vector<Component*> editParts { &nameEd, &lLen, &barsEd, &lenMenuBtn, &bpbBox, &lGrid, &gridBox, &lSwing, &swingPreset, &swingSlider, &swingValue,
-                                           &quantBtn, &velBox, &shelf, &lQs, &qsPattern, &qsSelected, &qsAll };
+        std::vector<Component*> editParts { &nameEd, &lLen, &barsEd, &lenMenuBtn, &bpbBox, &lGrid, &gridBox,
+                                           &quantBtn, &velBox, &shelf, &shelf2, &lQs, &qsPattern, &qsSelected, &qsAll, &qStraight, &qTriplet, &qToGrid, &qNear, &qDual,
+                                           &catchKnob, &strengthKnob, &qRules, &swingPat, &swingLane };
         for (auto* c : rollParts()) editParts.push_back (c);
         {   const auto rp = rollParts();
             for (auto* c : editParts) {
@@ -1775,23 +2008,32 @@ private:
             backBtn.setVisible (false); detachedNote.setVisible (false);
         } else {
             // toolbar 1: the pattern itself, and what you do to it
-            auto t1 = a.removeFromTop (jmax (28, (int) btnH + 6));
+            const int rowH = jmax (28, (int) btnH + 6);
+            auto both = a.removeFromTop (rowH * 2 + 4);
+            auto knobs = both.removeFromRight (2 * 80);                                // the swing knobs, over both rows
+            swingPat.setBounds (knobs.removeFromLeft (80)); swingLane.setBounds (knobs);
+            auto t1 = both.removeFromTop (rowH); both.removeFromTop (4);
             toolArea = t1;
             RowPlacer r1 (t1, 5);
-            r1.place (nameEd, 100); typeBox.setVisible (false); r1.skip (6);
-            r1.place (lLen, 44); r1.place (barsEd, 40); r1.place (lenMenuBtn); r1.place (bpbBox, 58); r1.skip (10);
-            shelf.setBounds (t1.withLeft (r1.x).withRight (t1.getRight()));          // your buttons: double-click to add, Alt+Shift drag to arrange
+            r1.place (nameEd, 82); typeBox.setVisible (false); r1.skip (6);
+            r1.place (lLen, 44); r1.place (barsEd, 34); r1.place (lenMenuBtn); r1.place (bpbBox, 46); r1.skip (10);
+            shelf.setBounds (t1.withLeft (r1.x).withRight (t1.getRight() - 6));        // your buttons: double-click to add, Alt+Shift drag to arrange (also between the rows)
             humBtn.setVisible (false); funcBtn.setVisible (false);
             for (auto* b : toolBtns) b->setVisible (false);     // tools live in the right-click menu, the Tools menu and keys 1-7
-            a.removeFromTop (4);
-            // toolbar 2: timing - grid, quantize and swing together
-            auto t2 = a.removeFromTop (jmax (28, (int) btnH + 6));
-            toolArea = toolArea.getUnion (t2);
+            // toolbar 2: quantize - grid, straight / triplet, mode, catch range, strength, rules, and the Quantize button
+            auto t2 = both;
+            toolArea = toolArea.getUnion (t2).getUnion (swingPat.getBounds()).getUnion (swingLane.getBounds());
             RowPlacer r2 (t2, 5);
-            r2.place (lGrid, 30); r2.place (gridBox, 70); r2.place (quantBtn); r2.place (lQs, 24);
-            for (auto* b : { &qsPattern, &qsSelected, &qsAll }) { b->setBounds (r2.x, t2.getCentreY() - smallH() / 2, b->getWidth(), smallH()); r2.x += b->getWidth() + 2; }
-            r2.skip (12);
-            r2.place (lSwing, 40); r2.place (swingPreset, 104); r2.place (swingSlider, 190); r2.place (swingValue, 66);
+            auto small = [&] (Component& c) { c.setBounds (r2.x, t2.getCentreY() - smallH() / 2, c.getWidth(), smallH()); r2.x += c.getWidth() + 2; };
+            r2.place (lGrid, 30); r2.place (gridBox, 64); small (qStraight); small (qTriplet); r2.x += 8;
+            small (qToGrid); small (qNear); small (qDual); r2.x += 6;
+            catchKnob.setBounds (r2.x, t2.getY() + 1, 92, t2.getHeight() - 2); r2.x += 96;
+            strengthKnob.setBounds (r2.x, t2.getY() + 1, 84, t2.getHeight() - 2); r2.x += 88;
+            r2.place (qRules); r2.x += 6;
+            r2.place (quantBtn); r2.place (lQs, 22);
+            for (auto* b : { &qsPattern, &qsSelected, &qsAll }) small (*b);
+            r2.x += 8;
+            shelf2.setBounds (t2.withLeft (r2.x).withRight (t2.getRight() - 6));
             a.removeFromTop (8);
             bodyRest = a;
             if (detached == nullptr) { backBtn.setVisible (false); detachedNote.setVisible (false); layoutRoll (a); }
@@ -1911,6 +2153,7 @@ private:
         gridBox.setSelectedItemIndex (st.grid < 0 ? numNoteValues : st.grid, dontSendNotification);
         presetName.setButtonText (proc.presetName.isNotEmpty() ? proc.presetName : String ("Presets"));
         randBtn.setButtonText (st.probMode ? "Randomize chance" : "Randomize velocity");
+        refreshQuantBar();
         editBtn.setToggleState (proc.uiEditOpen, dontSendNotification);
 
         if (! zoomPct.isBeingEdited()) zoomPct.setText (String ((int) std::round (scale * 100)) + "%", dontSendNotification);
@@ -1951,6 +2194,9 @@ private:
         const int sv = proc.stateVersion.load();
         if (sv != lastStateVersion) { lastStateVersion = sv; st.grid = jlimit (-1, numNoteValues - 1, st.grid); refreshAll(); }
         if (st.song().editKey != lastEditKeySeen) { const bool first = lastEditKeySeen < 0; lastEditKeySeen = st.song().editKey; if (! first) setEditorOpen (true); }
+        {   const auto& p = st.pat();
+            const String qk = String (st.song().editKey) + ":" + String (activeLane()) + ":" + String (patternSwing (p)) + ":" + String ((int) p.laneSwing.size()) + ":" + String (st.grid);
+            if (qk != lastQuantKey && ! swingDragging) { lastQuantKey = qk; refreshQuantBar(); } }
         {   // the control bar: position, MIDI lights, loop and click state
             midiLights.tick();
             if (proc.songBeatUi.load() >= 0 || posDisp.isMouseOver()) posDisp.repaint();

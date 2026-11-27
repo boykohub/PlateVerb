@@ -433,13 +433,6 @@ private:
             len.addItem (100 + steps, String (steps) + " x " + (st.grid >= 0 ? noteValues[st.grid].name : "1/16"), true, p.laneLength.count (note) && p.laneLen (note) == steps * g);
         for (int beats : { 3, 5, 6, 7, 9 }) len.addItem (200 + beats, String (beats) + " beats", true, p.laneLength.count (note) && p.laneLen (note) == beats * PPQ);
         m.addSubMenu ("Lane length (polyrhythm)", len);
-        PopupMenu sw;
-        const int cur = lane ? lane->swingMode : 0;
-        sw.addItem (300, "Follow main swing", true, cur == 0);
-        sw.addItem (301, "Straight (no swing)", true, cur == 1);
-        auto names = StringArray::fromTokens (swingChoiceNames(), "|", "");
-        for (int i = 0; i < names.size(); ++i) sw.addItem (302 + i, "Own value: " + names[i], true, cur == 2 + i);
-        m.addSubMenu ("Swing for this lane", sw);
         PopupMenu ch;
         ch.addItem (400, "Main output channel", true, lane == nullptr || lane->channel == 0);
         for (int c = 1; c <= 16; ++c) ch.addItem (400 + c, "Channel " + String (c), true, lane != nullptr && lane->channel == c);
@@ -998,9 +991,9 @@ private:
         // quantize and humanize first: set them up, or just do them the way they're set up
         auto qh = [&m, this] (bool notes) {
             const String what = notes ? (anySelected (st.pat()) ? " the selected notes" : " the notes") : " the notes";
-            m.addItem (960, "Quantize setup...");
+            m.addItem (960, "Quantize settings...");
             m.addItem (961, "Quantize" + what + "  (Q)");
-            m.addItem (962, "Humanize setup...");
+            m.addItem (962, "Humanize settings...");
             m.addItem (963, "Humanize" + what);
             m.addSeparator();
         };
